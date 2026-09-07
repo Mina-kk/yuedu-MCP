@@ -4,6 +4,7 @@ import android.content.Context
 import com.google.gson.Gson
 import com.mina.legadostudio.data.db.HttpLogEntity
 import com.mina.legadostudio.data.db.StudioDao
+import com.mina.legadostudio.domain.LogFilterUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 
@@ -28,6 +29,9 @@ class HttpLogRecorder(context: Context, private val dao: StudioDao, private val 
 
     fun record(draft: Draft) {
         if (!enabled) return
+        // 关键防护：如果请求是本地回环（如 127.0.0.1、localhost）或私网 IP，直接丢弃，绝不污染抓包库
+        if (LogFilterUtils.isLoopbackOrPrivate(draft.url)) return
+
         val entity = HttpLogEntity(
             method = draft.method,
             url = draft.url,
@@ -47,5 +51,10 @@ class HttpLogRecorder(context: Context, private val dao: StudioDao, private val 
     private fun redact(headers: Map<String, String>): Map<String, String> = headers.mapValues { (key, value) ->
         if (key.equals("Authorization", true) || key.equals("Cookie", true) || key.equals("Set-Cookie", true) || key.contains("api-key", true)) "***" else value
     }
-    private fun redactText(value: String): String = value.replace(Regex("(?i)(authorization|api[-_ ]?key|token)\\s*[:=]\\s*[^,;\\s]+"), "$1=***")
+
+    private fun redactText(value: String): String {
+        return value.replace(Regex("(?i)(authorization|api[-_ ]?key|token)\\s*[:=]\\s*[^,;\\s]+")) { mr ->
+            "${mr.groupValues[1]}=***"
+        }
+    }
 }
