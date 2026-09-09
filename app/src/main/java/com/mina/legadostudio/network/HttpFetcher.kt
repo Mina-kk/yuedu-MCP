@@ -24,6 +24,7 @@ class HttpFetcher(
         val body: String? = null,
         val charset: String? = null,
         val timeoutSec: Int? = 30,
+        val maxBodyBytes: Long? = null,
     )
     @Keep
     data class FetchResult(
@@ -86,7 +87,13 @@ class HttpFetcher(
                     logRecorder?.record(HttpLogRecorder.Draft(method, url, finalUrl, response.code, elapsed, requestHeaders, responseHeaders, input.body.orEmpty(), note, redirectChain = redirectChain))
                     return FetchResult(response.code, finalUrl, responseHeaders, "", elapsed, redirectChain, note, contentLength)
                 }
-                val bytes = response.body.bytes()
+                val bytes = input.maxBodyBytes?.let { max ->
+                    require(max in 1..8_000_000) { "maxBodyBytes 超出范围" }
+                    val source = response.body.source()
+                    source.request(max + 1)
+                    require(source.buffer.size <= max) { "CONTENT_TOO_LARGE：网页超出上下文下载容量，未截断保存" }
+                    source.readByteArray(source.buffer.size)
+                } ?: response.body.bytes()
                 val charset = input.charset?.let { runCatching { Charset.forName(it) }.getOrNull() }
                     ?: response.body.contentType()?.charset()
                     ?: detectCharset(bytes)

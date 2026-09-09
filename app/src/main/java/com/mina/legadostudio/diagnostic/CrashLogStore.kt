@@ -12,7 +12,11 @@ class CrashLogStore(private val context: Context) {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             runCatching { write(thread, error) }
-            previous?.uncaughtException(thread, error)
+            // 只有主线程异常才交给系统终止进程；后台线程（例如脚本自建线程）异常记录后不再杀进程，
+            // 否则一段书源脚本就能把 MCP 服务一起带崩。
+            if (thread === android.os.Looper.getMainLooper()?.thread) {
+                previous?.uncaughtException(thread, error) ?: throw error
+            }
         }
     }
 

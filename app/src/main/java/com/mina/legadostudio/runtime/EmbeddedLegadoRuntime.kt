@@ -24,13 +24,17 @@ class EmbeddedLegadoRuntime(
 ) : LegadoRuntime {
     override suspend fun inspect(request: LegadoRuntime.InspectRequest) = withContext(Dispatchers.IO) {
         val response = fetchAbsolute(request.url, request.method, request.headers, request.body, request.charset)
+        inspectSnapshot(request, response)
+    }
+    suspend fun inspectSnapshot(request: LegadoRuntime.InspectRequest, response: HttpFetcher.FetchResult) = withContext(Dispatchers.Default) {
         val output = request.rule.takeIf { it.isNotBlank() }?.let { extract(response.body, it, response.finalUrl) }
             ?.let { LegadoRuleEngine.Output(listOf(it), it, 1) }
         val elementRule = request.rule.takeIf { it.isNotBlank() && !hasJs(it) }
-            ?.let { LegadoStringRule.split(it).firstOrNull()?.rule }.orEmpty()
-        val elements = elementRule.takeIf { it.isNotBlank() }
-            ?.let { engine.elements(response.body, it, request.kind ?: LegadoRuleEngine.detect(it)).take(100) }.orEmpty()
-        LegadoRuntime.InspectReport(response.copy(body = response.body.take(300_000)), output, elements)
+            ?.let { LegadoStringRule.elementRule(it) }.orEmpty()
+        val elementAttempt = runCatching { elementRule.takeIf { it.isNotBlank() }
+            ?.let { engine.elements(response.body, it, request.kind ?: LegadoRuleEngine.detect(it)).take(100) }.orEmpty() }
+        LegadoRuntime.InspectReport(response.copy(body = response.body.take(300_000)), output,
+            elementAttempt.getOrDefault(emptyList()), elementAttempt.exceptionOrNull()?.let { "元素预览不可用：${it.message}" })
     }
 
     override suspend fun debug(sourceJson: String, entry: String): LegadoRuntime.DebugReport = withContext(Dispatchers.IO) {

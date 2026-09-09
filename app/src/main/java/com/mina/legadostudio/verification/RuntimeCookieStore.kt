@@ -13,6 +13,7 @@ class RuntimeCookieStore(context: Context) {
         return cookie
     }
 
+    fun contextFingerprint(): String = com.mina.legadostudio.mcp.TaskContextStore.digest(prefs.all.toSortedMap().toString())
     fun headerFor(url: String): String? = prefs.getString(domain(url), null)
     fun set(url: String, cookie: String) {
         require(cookie.contains('=')) { "Cookie 必须包含 name=value" }

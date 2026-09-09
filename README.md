@@ -3,7 +3,7 @@
 本机 **Legado 运行时 + MCP Server**（原「书源工坊」）。App 内不调用任何模型、不保存任何模型密钥。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.0.111`（versionCode 131）
+- 当前版本：`1.0.118`（versionCode 138）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado
 
@@ -60,3 +60,11 @@ list_skills / search_knowledge
 排查请用 MCP：`get_logs` / `get_log` / `get_http_logs` / `get_http_log` / `get_crash_logs` / `get_crash_log` / `get_diagnostic_snapshots` / `get_diagnostic_snapshot`。
 
 构建说明见 `BUILDING.md`。
+
+## 任务上下文
+
+使用 `create_context` 创建任务，后续调用传入 `contextId`。`fetch_page` 保存网页并返回 `pageId`；重复GET/HEAD在5分钟内复用，只返回引用。正文通过 `read_page` 分段或搜索，也可直接交给 `inspect_rule`、`analyze_html`、`eval_js`。大结果通过 `read_result` 读取；`list_contexts` 可列出当前任务与占用，不返回正文。
+
+`update_context` 保存阶段笔记，重连后使用 `get_context` 恢复目录与进度，完成后 `clear_context`。上下文仅保存在内存，达到8个上限时会自动回收最久未使用且已闲置60秒以上的任务，闲置30分钟或进程结束后失效；它不自动读取、总结或裁剪客户端的聊天历史。`refresh=true` 强制抓取，最终 `debug_source` / `check_source` 仍保持实时校验。
+
+MCP 会话按 `Mcp-Session-Id` 统计：`clientCount` 只计最近 60 秒内发生过**真实工具调用**的活跃会话（客户端保活/心跳流量不计入），任务停止后自动掉出计数。会话活跃度同样只由工具调用刷新：闲置超过 `reapIdleSeconds`（默认 300 秒）即由 `McpSessions` 主动关闭释放（客户端再请求会收到 404 并重新握手），不再长期占用。`app_status` 同时返回 `sessionTotal`（累计建立）、`sessionClosed`、`sessionReaped`（已回收）、`reapIdleSeconds` 与 `maxLifetimeSeconds`（绝对存活上限，默认 7200 秒）。

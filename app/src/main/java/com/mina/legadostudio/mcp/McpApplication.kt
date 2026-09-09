@@ -30,10 +30,14 @@ fun Application.configureStudioMcp(
     intercept(ApplicationCallPipeline.Plugins) {
         context.response.header(HttpHeaders.CacheControl, "no-store")
         if (context.request.path() == "/health") return@intercept
-        McpStats.onRequest()
         val config = configProvider()
         if (config.tokenRequired && !secureEquals(config.token, context.request.header(McpAccess.TOKEN_HEADER).orEmpty())) {
             context.respondText("MCP token 无效", status = HttpStatusCode.Unauthorized)
+            finish()
+        }
+        val sessionId = context.request.header("Mcp-Session-Id")
+        if (sessionId != null && McpSessions.isReaped(sessionId)) {
+            context.respondText("MCP session expired", status = HttpStatusCode.NotFound)
             finish()
         }
     }

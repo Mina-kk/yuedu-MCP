@@ -21,6 +21,7 @@ interface LegadoRuntime {
         @SerializedName("response") val response: HttpFetcher.FetchResult,
         @SerializedName("output") val output: LegadoRuleEngine.Output?,
         @SerializedName("elements") val elements: List<String>,
+        @SerializedName("elementWarning") val elementWarning: String? = null,
     )
     @Keep
     data class DebugReport(

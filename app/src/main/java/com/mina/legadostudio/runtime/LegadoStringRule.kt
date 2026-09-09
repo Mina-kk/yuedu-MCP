@@ -58,6 +58,14 @@ object LegadoStringRule {
         )
     }
 
+    /** 元素预览用规则：取第一段（非 JS），并去掉尾部 lastRule 后缀。 */
+    fun elementRule(ruleStr: String): String {
+        val first = split(ruleStr).firstOrNull() ?: return ""
+        if (first.mode == Mode.Js) return ""
+        val cut = first.rule.lastIndexOf("@")
+        return if (cut > 0) first.rule.take(cut) else first.rule
+    }
+
     fun replace(result: String, part: Part): String {
         if (part.replaceRegex.isEmpty()) return result
         val regex = runCatching { Regex(part.replaceRegex) }.getOrNull()

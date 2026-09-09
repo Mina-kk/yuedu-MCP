@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import com.mina.legadostudio.MainActivity
 import com.mina.legadostudio.mcp.McpAccess
 import com.mina.legadostudio.mcp.McpConfigStore
+import com.mina.legadostudio.mcp.McpSessions
 import com.mina.legadostudio.mcp.McpStats
 import com.mina.legadostudio.mcp.StudioLog
 import com.mina.legadostudio.mcp.StudioMcpServer
@@ -28,6 +29,9 @@ class McpService : Service() {
     private var engine: EmbeddedServer<*, *>? = null
     private var notificationPending = false
     private var lastNotificationAt = 0L
+    private var reaper: java.util.concurrent.ScheduledExecutorService? = null
+    @Volatile private var reapBusy = false
+    private var reapWorker: Thread? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -55,6 +59,8 @@ class McpService : Service() {
         running = false
         starting = false
         endpoints = emptyList()
+        stopReaper()
+        McpSessions.clear()
         McpStats.resetConnections()
         super.onDestroy()
     }
@@ -63,6 +69,8 @@ class McpService : Service() {
 
     @Synchronized private fun startServer() {
         stopEngine()
+        stopReaper()
+        McpSessions.clear()
         McpStats.resetConnections()
         val store = McpConfigStore(this)
         val config = store.load()
@@ -78,6 +86,7 @@ class McpService : Service() {
             starting = false
             StudioLog.add("mcp start port=${config.port}", category = "mcp")
             updateNotification()
+            startReaper()
         } catch (error: Exception) {
             running = false
             starting = false
@@ -86,6 +95,42 @@ class McpService : Service() {
             (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
                 .notify(NOTIFICATION_ID, notification("MCP 启动失败", error.localizedMessage.orEmpty()))
         }
+    }
+
+    /** 定期回收长时间无请求的会话，避免 SDK 的 Streamable HTTP 会话一直占用。 */
+    private fun startReaper() {
+        stopReaper()
+        val executor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "mcp-session-reaper").apply { isDaemon = true }
+        }
+        executor.scheduleWithFixedDelay({
+            if (!reapBusy && reapWorker?.isAlive != true) {
+                reapBusy = true
+                try {
+                    val result = java.util.concurrent.atomic.AtomicReference<McpSessions.Scan?>()
+                    val worker = Thread({
+                        result.set(runCatching { kotlinx.coroutines.runBlocking { McpSessions.reap() } }.getOrNull())
+                    }, "mcp-reap-worker").apply { isDaemon = true }
+                    reapWorker = worker
+                    worker.start()
+                    runCatching { worker.join(10_000L) }
+                    if (worker.isAlive) StudioLog.add("mcp reap scan timeout", "W", "mcp")
+                    val scan = result.get()
+                    if (scan != null && scan.closed > 0) {
+                        StudioLog.add("mcp reap closed=${scan.closed} sessions=${scan.sessions} idle=${scan.idle}", category = "mcp")
+                    }
+                } finally {
+                    reapBusy = false
+                }
+            }
+        }, 60L, 60L, java.util.concurrent.TimeUnit.SECONDS)
+        reaper = executor
+    }
+
+    private fun stopReaper() {
+        reaper?.shutdownNow()
+        reaper = null
+        reapWorker = null
     }
 
     private fun stopEngine() {
@@ -118,7 +163,7 @@ class McpService : Service() {
         val title = if (running) "阅读书源MCP · 运行中" else "阅读书源MCP · 已停止"
         val detail = buildString {
             append(endpoints.firstOrNull() ?: "暂无回环 Endpoint")
-            append(" · ${stats["clientCount"] ?: 0} 个客户端")
+            append(" · ${stats["clientCount"] ?: 0} 个活跃会话")
             append("\n最近访问：")
             append(if ((stats["lastAccessAt"] ?: 0) > 0) java.text.DateFormat.getTimeInstance().format(stats["lastAccessAt"]) else "暂无")
         }
@@ -170,7 +215,15 @@ class McpService : Service() {
             val config = McpConfigStore(context).load()
             val base = mutableMapOf<String, Any>("running" to (running || starting), "endpoints" to endpoints, "port" to config.port, "tokenRequired" to config.tokenRequired)
             if (includeToken) base["token"] = config.token
-            return base + McpStats.snapshot()
+            return base + McpStats.snapshot() + mapOf(
+                "trackedServers" to McpSessions.tracked(),
+                "trackedSessions" to McpSessions.trackedSessions(),
+                "idleSessions" to McpSessions.idleSessions(),
+                "reapScans" to McpSessions.scanCount(),
+                "lastScanAt" to McpSessions.lastScan(),
+                "reapIdleSeconds" to McpSessions.reapIdleMs / 1000,
+                "maxLifetimeSeconds" to McpSessions.maxLifetimeMs / 1000,
+            )
         }
     }
 }

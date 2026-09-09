@@ -144,7 +144,7 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = 
                             Column(Modifier.weight(1f)) {
                                 Text(if (running) "服务运行中" else "服务已停止", style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    if (running) "连接数：${status["clientCount"] ?: 0} · 最近访问：${(status["lastAccessAt"] as? Long)?.takeIf { it > 0 }?.let { java.text.DateFormat.getTimeInstance().format(it) } ?: "暂无"}"
+                                    if (running) "活跃会话：${status["clientCount"] ?: 0} · 累计 ${status["sessionTotal"] ?: 0} · 最近访问：${(status["lastAccessAt"] as? Long)?.takeIf { it > 0 }?.let { java.text.DateFormat.getTimeInstance().format(it) } ?: "暂无"}"
                                     else "可预先复制 MCP 与鉴权请求头；服务启动后即可接入",
                                     style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant,
                                 )

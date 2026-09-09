@@ -55,6 +55,13 @@ class McpToolCatalogTest {
             "get_crash_log",
             "get_diagnostic_snapshots",
             "get_diagnostic_snapshot",
+            "create_context",
+            "get_context",
+            "update_context",
+            "clear_context",
+            "list_contexts",
+            "read_page",
+            "read_result",
         )
         val missing = required - toolNames()
         assertTrue("missing required tools: $missing", missing.isEmpty())
