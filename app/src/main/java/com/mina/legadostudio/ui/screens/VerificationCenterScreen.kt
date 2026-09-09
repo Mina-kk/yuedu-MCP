@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -42,6 +41,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.mina.legadostudio.StudioApplication
 import com.mina.legadostudio.ui.theme.GlassTopBar
 import com.mina.legadostudio.ui.theme.studioChipBorder
+import com.mina.legadostudio.ui.theme.studioBottomInset
 import com.mina.legadostudio.ui.theme.studioChipColors
 import com.mina.legadostudio.ui.theme.studioTopInset
 import kotlinx.coroutines.launch
@@ -62,14 +62,15 @@ fun VerificationCenterScreen(onBack: (() -> Unit)? = null) {
     LaunchedEffect(selected?.id) { currentUrl = selected?.finalUrl?.takeIf { it.isNotBlank() } ?: selected?.url.orEmpty() }
 
     Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().padding(top = 64.dp + studioTopInset()).navigationBarsPadding()) {
+        // 底栏为悬浮胶囊，底部留出 tab bar + 手势条的高度，避免操作按钮被遮挡
+        Column(Modifier.fillMaxSize().padding(top = 64.dp + studioTopInset(), bottom = 84.dp + studioBottomInset())) {
             LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(sessions, key = { it.id }) { session -> FilterChip(selected = session.id == selected?.id, onClick = { selectedId = session.id }, label = { Text("${session.domain.ifBlank { "验证" }} · ${if (session.status == "COMPLETED") "已完成" else "等待"}") }, colors = studioChipColors(), border = studioChipBorder(session.id == selected?.id)) }
             }
             if (selected == null) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("暂无待处理验证会话。由 MCP `browser_verify` 创建。", style = MaterialTheme.typography.bodyMedium)
-                    Text("可通过系统通知或 MCP 页顶部横幅进入本页。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("也可直接点底栏「验证中心」进入，通知栏被划掉也不影响。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
                 Text("用途：${selected.purpose}　状态：${selected.status}", Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)

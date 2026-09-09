@@ -20,14 +20,14 @@ class UiSurfaceContractTest {
     }
 
     @Test
-    fun bottomBarHasMcpSourcesSkillsAndLogs() {
+    fun bottomBarHasMcpSourcesSkillsVerificationAndLogs() {
         val source = appKt()
         assertTrue(source.contains("StudioTab(\"mcp\""))
         assertTrue(source.contains("StudioTab(\"sources\""))
         assertTrue(source.contains("StudioTab(\"skills\""))
         assertTrue(source.contains("StudioTab(\"logs\""))
         assertFalse(source.contains("StudioTab(\"projects\""))
-        assertFalse(source.contains("StudioTab(\"verification\""))
+        assertTrue(source.contains("StudioTab(\"verification\", \"验证中心\""))
         assertFalse(source.contains("StudioTab(\"settings\""))
         assertFalse(source.contains("composable(\"projects\")"))
         assertFalse(source.contains("composable(\"settings\")"))
@@ -119,7 +119,7 @@ class UiSurfaceContractTest {
         assertTrue(source.contains("\"get_crash_log\""))
         assertTrue(source.contains("\"get_diagnostic_snapshots\""))
         assertTrue(source.contains("\"get_diagnostic_snapshot\""))
-        assertTrue(source.contains("listOf(\"mcp\", \"sources\", \"skills\", \"logs\")"))
+        assertTrue(source.contains("listOf(\"mcp\", \"sources\", \"skills\", \"verification\", \"logs\")"))
     }
 
     @Test

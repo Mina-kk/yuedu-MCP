@@ -3,13 +3,13 @@
 本机 **Legado 运行时 + MCP Server**（原「书源工坊」）。App 内不调用任何模型、不保存任何模型密钥。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.0.118`（versionCode 138）
+- 当前版本：`1.0.119`（versionCode 139）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado
 
 ## 界面
 
-iOS 简约白风格：液态玻璃顶栏/底栏（高斯模糊）、大圆角卡片、底部悬浮标签栏。底栏为 **MCP / 书源 / 技能 / 日志**。
+iOS 简约白风格：液态玻璃顶栏/底栏（高斯模糊）、大圆角卡片、底部悬浮标签栏。底栏为 **MCP / 书源 / 技能 / 验证中心 / 日志**。
 
 ## 连接 MCP
 
@@ -40,7 +40,7 @@ list_skills / search_knowledge
 
 `save_source` 默认按书源 URL 覆盖更新同站记录；需要保留历史版本时传 `newVersion=true` 追加。
 
-验证码 / 登录 / WAF 用 `browser_verify`：通过系统通知或 MCP 页顶部横幅，在应用内完成站点验证。
+验证码 / 登录 / WAF 用 `browser_verify`：通过底栏「验证中心」、系统通知或 MCP 页顶部横幅，在应用内完成站点验证；通知栏被划掉也不影响进入。
 
 本 App **不提供** `list_models`、`ai_generate_source`、`start_job` 等模型或任务工具。
 

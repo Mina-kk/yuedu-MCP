@@ -72,7 +72,7 @@ class McpToolCatalogTest {
         val source = studioMcpServerSource()
         assertTrue(source.contains("\"ai\" to false"))
         assertTrue(source.contains("\"role\" to \"mcp-runtime\""))
-        assertTrue(source.contains("\"ui\" to listOf(\"mcp\", \"sources\", \"skills\", \"logs\")"))
+        assertTrue(source.contains("\"ui\" to listOf(\"mcp\", \"sources\", \"skills\", \"verification\", \"logs\")"))
         assertTrue(source.contains("默认覆盖当前成品"))
         assertTrue(source.contains("newVersion"))
     }

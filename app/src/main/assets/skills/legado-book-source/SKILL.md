@@ -47,7 +47,7 @@ description: 创建、修改、保存、调试或校验阅读（Legado）书源�
 | 读取、写入或清除站点 Cookie | `get_cookies`、`set_cookie`、`clear_cookies` |
 | 删除书源 | `delete_projects` |
 
-MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`save_source` 覆盖当前记录（内部修订历史不在书源页重复列出）。只有下一轮专门修复问题时才传 `newVersion=true` 追加第二条。调试阶段把 JSON 直接传给 `debug_source`，不要每改一次规则就 save。保存后用 `list_sources` / `get_source` 确认。App 底栏为 MCP / 书源 / 技能 / 日志。排查故障时用 MCP 读取日志。**不要**引导用户打开已删除的「项目列表」。
+MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`save_source` 覆盖当前记录（内部修订历史不在书源页重复列出）。只有下一轮专门修复问题时才传 `newVersion=true` 追加第二条。调试阶段把 JSON 直接传给 `debug_source`，不要每改一次规则就 save。保存后用 `list_sources` / `get_source` 确认。App 底栏为 MCP / 书源 / 技能 / 验证中心 / 日志。排查故障时用 MCP 读取日志。**不要**引导用户打开已删除的「项目列表」。
 
 ## Phase 0：基线与探针
 

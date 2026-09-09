@@ -14,6 +14,7 @@ import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -54,6 +55,7 @@ private val tabs = listOf(
     StudioTab("mcp", "MCP", Icons.Outlined.Link),
     StudioTab("sources", "书源", Icons.Outlined.MenuBook),
     StudioTab("skills", "技能", Icons.Outlined.Extension),
+    StudioTab("verification", "验证中心", Icons.Outlined.VerifiedUser),
     StudioTab("logs", "日志", Icons.AutoMirrored.Outlined.ReceiptLong),
 )
 
@@ -104,7 +106,8 @@ fun StudioApp(initialRoute: String? = null, deepLinkNonce: Int = 0, onExit: () -
                     composable("sources") { SourcesScreen() }
                     composable("skills") { SkillsScreen() }
                     composable("logs") { LogsScreen() }
-                    composable("verification") { VerificationCenterScreen(onBack = { nav.popBackStack() }) }
+                    // 验证中心是底栏顶级页面，不显示返回箭头（系统返回键仍可回上一页）
+                    composable("verification") { VerificationCenterScreen() }
                 }
                 if (route in tabs.map { it.route } && !fullscreenOverlay.value) {
                     GlassTabBar(

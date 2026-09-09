@@ -160,7 +160,7 @@ class StudioMcpServer(context: Context) {
                 "ai" to false,
                 "role" to "mcp-runtime",
                 "runtime" to listOf("official-css", "official-xpath", "official-jsonpath", "official-regex", "official-rhino", "webview"),
-                "ui" to listOf("mcp", "sources", "skills", "logs"),
+                "ui" to listOf("mcp", "sources", "skills", "verification", "logs"),
                 "bookSourceType" to app.runtimeConfig.bookSourceType,
                 "bookSourceTypeName" to com.mina.legadostudio.network.RuntimeConfigStore.typeName(app.runtimeConfig.bookSourceType),
                 "bookSourceTypeHint" to "用户在 MCP 页选择的目标书源类型：0 文本 / 1 音频 / 2 图片 / 3 文件 / 4 视频；save_source 缺省时自动写入该类型，fetch_page 按该类型过滤二进制资源",
