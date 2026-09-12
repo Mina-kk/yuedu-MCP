@@ -84,7 +84,15 @@ fun StudioApp(initialRoute: String? = null, deepLinkNonce: Int = 0, onExit: () -
             var stopMcpOnExit by remember { mutableStateOf(false) }
             val fullscreenOverlay = remember { mutableStateOf(false) }
             LaunchedEffect(initialRoute, deepLinkNonce) {
-                if (!initialRoute.isNullOrBlank() && initialRoute in allowedDeepLinkRoutes) nav.navigate(initialRoute)
+                // 深链与底栏 onSelect 用同一套 tab 式导航参数：避免把目标页压进当前 tab 栈，
+                // 否则 tab 切换的 saveState/restoreState 会把脏栈恢复出来，表现为某个 tab 一点就跳到深链页
+                if (!initialRoute.isNullOrBlank() && initialRoute in allowedDeepLinkRoutes) {
+                    nav.navigate(initialRoute) {
+                        popUpTo("mcp") { saveState = true }
+                        launchSingleTop = true
+                        restoreState = true
+                    }
+                }
             }
             val backEntry by nav.currentBackStackEntryAsState()
             val route = backEntry?.destination?.route.orEmpty()
@@ -102,7 +110,14 @@ fun StudioApp(initialRoute: String? = null, deepLinkNonce: Int = 0, onExit: () -
                     popEnterTransition = { EnterTransition.None },
                     popExitTransition = { ExitTransition.None },
                 ) {
-                    composable("mcp") { McpStatusScreen(onOpenVerification = { nav.navigate("verification") }, themeMode = themeMode, onThemeModeChange = { themeMode = it; themeStore.save(it) }) }
+                    composable("mcp") { McpStatusScreen(onOpenVerification = {
+                        // 与 tab 切换同参数：验证中心是顶级 tab，不能压栈
+                        nav.navigate("verification") {
+                            popUpTo("mcp") { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }, themeMode = themeMode, onThemeModeChange = { themeMode = it; themeStore.save(it) }) }
                     composable("sources") { SourcesScreen() }
                     composable("skills") { SkillsScreen() }
                     composable("logs") { LogsScreen() }

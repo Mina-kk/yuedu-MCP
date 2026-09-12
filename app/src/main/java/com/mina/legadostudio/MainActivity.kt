@@ -35,6 +35,8 @@ class MainActivity : ComponentActivity() {
 
     private fun consume(intent: Intent?) {
         launchRoute = intent?.getStringExtra("route")
+        // 消费后立即清除，避免 Activity 重建时重复导航到同一目标
+        intent?.removeExtra("route")
         launchNonce++
     }
 }

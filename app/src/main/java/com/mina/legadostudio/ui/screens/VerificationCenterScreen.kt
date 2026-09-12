@@ -31,6 +31,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,7 +45,14 @@ import com.mina.legadostudio.ui.theme.studioChipBorder
 import com.mina.legadostudio.ui.theme.studioBottomInset
 import com.mina.legadostudio.ui.theme.studioChipColors
 import com.mina.legadostudio.ui.theme.studioTopInset
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -57,9 +65,50 @@ fun VerificationCenterScreen(onBack: (() -> Unit)? = null) {
     var currentUrl by rememberSaveable { mutableStateOf("") }
     var refreshNonce by rememberSaveable { mutableStateOf(0) }
     var statusMessage by remember { mutableStateOf("") }
+    var autoProbe by remember { mutableStateOf<Job?>(null) }
     val selected = sessions.firstOrNull { it.id == selectedId }
         ?: sessions.firstOrNull { it.status == "WAITING" }
+    // WebView 回调里读到的会话必须是最新值：factory 闭包只执行一次，直接捕获 selected 会拿到过期快照
+    val currentSelected by rememberUpdatedState(selected)
     LaunchedEffect(selected?.id) { currentUrl = selected?.finalUrl?.takeIf { it.isNotBlank() } ?: selected?.url.orEmpty() }
+
+    // 轮询判定验证是否放行：不再要求 URL 发生跳转（CF/JS 挑战常常原地通过）。
+    // 条件：页面非空、无验证页标记、长度稳定（与上次差<5%）连续 2 次；90 秒后停止自动判定，保留手动按钮。
+    fun startAutoCompleteProbe(view: WebView, sessionId: String, startUrl: String) {
+        autoProbe?.cancel()
+        autoProbe = scope.launch {
+            var lastLen = -1L
+            var stable = 0
+            var probedUrl = startUrl
+            val deadline = System.currentTimeMillis() + 90_000
+            while (isActive && System.currentTimeMillis() < deadline) {
+                delay(2_000)
+                val urlNow = withContext(Dispatchers.Main) { view.url } ?: break
+                if (urlNow != probedUrl) { probedUrl = urlNow; lastLen = -1; stable = 0 }
+                val html = withContext(Dispatchers.Main) {
+                    suspendCancellableCoroutine<String?> { c ->
+                        view.evaluateJavascript("document.documentElement.outerHTML") { raw ->
+                            c.resume(runCatching { com.google.gson.JsonParser.parseString(raw).asString }.getOrNull())
+                        }
+                    }
+                } ?: continue
+                if (html.isBlank()) continue
+                val len = html.length.toLong()
+                val challenged = app.fetcher.verificationMarkerLoose(html) != null
+                stable = if (!challenged && lastLen > 0 && kotlin.math.abs(len - lastLen) * 20 < len) stable + 1 else 0
+                lastLen = len
+                if (!challenged && stable >= 2) {
+                    CookieManager.getInstance().flush()
+                    delay(500) // 尾随异步下发的 cookie 缓冲
+                    CookieManager.getInstance().flush()
+                    statusMessage = "检测到验证已完成，Cookie 已写入运行时。"
+                    app.verification.complete(sessionId, urlNow)
+                    selectedId = null
+                    break
+                }
+            }
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         // 底栏为悬浮胶囊，底部留出 tab bar + 手势条的高度，避免操作按钮被遮挡
@@ -91,27 +140,21 @@ fun VerificationCenterScreen(onBack: (() -> Unit)? = null) {
                                 webViewClient = object : WebViewClient() {
                                     override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean = request.url.scheme !in setOf("http", "https")
                                     override fun onPageFinished(view: WebView, url: String) {
+                                        val session = currentSelected ?: return
                                         currentUrl = url
                                         CookieManager.getInstance().flush()
-                                        app.verificationWebState.save(selected.id, view)
-                                        scope.launch { app.verification.updateCurrentUrl(selected.id, url) }
-                                        if (selected.jobId != "manual" && selected.status == "WAITING") {
-                                            view.evaluateJavascript("document.documentElement.outerHTML") { raw ->
-                                                val html = runCatching { com.google.gson.JsonParser.parseString(raw).asString }.getOrDefault("")
-                                                val redirected = url != selected.url && url != selected.finalUrl
-                                                if (redirected && html.isNotBlank() && !app.fetcher.looksLikeVerification(403, url, html)) {
-                                                    statusMessage = "检测到验证已完成，Cookie 已写入运行时。"
-                                                    scope.launch { app.verification.complete(selected.id, url); selectedId = null }
-                                                }
-                                            }
+                                        app.verificationWebState.save(session.id, view)
+                                        scope.launch { app.verification.updateCurrentUrl(session.id, url) }
+                                        if (session.jobId != "manual" && session.status == "WAITING") {
+                                            startAutoCompleteProbe(view, session.id, url)
                                         }
                                     }
                                 }
-                                val restored = app.verificationWebState.restore(selected.id, this)
-                                if (!restored) loadUrl(selected.finalUrl.takeIf { it.isNotBlank() } ?: selected.url)
+                                val restored = app.verificationWebState.restore(currentSelected?.id.orEmpty(), this)
+                                if (!restored) loadUrl(currentSelected?.finalUrl?.takeIf { it.isNotBlank() } ?: currentSelected?.url.orEmpty())
                             }
                         },
-                        onRelease = { view -> app.verificationWebState.save(selected.id, view); view.stopLoading(); view.destroy() },
+                        onRelease = { view -> currentSelected?.let { app.verificationWebState.save(it.id, view) }; autoProbe?.cancel(); view.stopLoading(); view.destroy() },
                     )
                 }
                 if (statusMessage.isNotBlank()) Text(statusMessage, Modifier.padding(horizontal = 12.dp))

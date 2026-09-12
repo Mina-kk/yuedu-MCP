@@ -37,22 +37,32 @@ class EmbeddedLegadoRuntime(
             elementAttempt.getOrDefault(emptyList()), elementAttempt.exceptionOrNull()?.let { "元素预览不可用：${it.message}" })
     }
 
-    override suspend fun debug(sourceJson: String, entry: String): LegadoRuntime.DebugReport = withContext(Dispatchers.IO) {
+    override suspend fun debug(sourceJson: String, entry: String): LegadoRuntime.DebugReport = debug(sourceJson, entry, null)
+
+    /**
+     * cacheFetch 按调用传入（每个 MCP 任务一份闭包，指向各自的任务上下文缓存），
+     * 并行调试多个书源时互不干扰，也不再需要全局开关与跨任务互斥。
+     */
+    suspend fun debug(
+        sourceJson: String,
+        entry: String,
+        cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?,
+    ): LegadoRuntime.DebugReport = withContext(Dispatchers.IO) {
         val root = JsonParser.parseString(sourceJson).asJsonObject
         val state = hashMapOf<String, String>()
         when {
-            entry.startsWith("--") -> debugContent(root, entry.removePrefix("--"), state)
-            entry.startsWith("++") -> debugToc(root, entry.removePrefix("++"), state)
+            entry.startsWith("--") -> debugContent(root, entry.removePrefix("--"), state, cacheFetch)
+            entry.startsWith("++") -> debugToc(root, entry.removePrefix("++"), state, cacheFetch)
             entry.contains("::") -> {
                 val parts = entry.split("::", limit = 2)
-                debugList(root, root.getAsJsonObject("ruleExplore"), requestValue(parts[1], root, mapOf("page" to 1, "source" to state)), "发现", parts[1], state)
+                debugList(root, root.getAsJsonObject("ruleExplore"), requestValue(parts[1], root, mapOf("page" to 1, "source" to state)), "发现", parts[1], state, cacheFetch)
             }
-            entry.startsWith("http://") || entry.startsWith("https://") -> debugInfo(root, entry, state)
+            entry.startsWith("http://") || entry.startsWith("https://") -> debugInfo(root, entry, state, cacheFetch)
             else -> {
                 val search = root.text("searchUrl").orEmpty()
                 require(search.isNotBlank()) { "书源没有 searchUrl" }
                 val value = requestValue(search, root, mapOf("key" to entry, "page" to 1, "source" to state))
-                debugList(root, root.getAsJsonObject("ruleSearch"), value, "搜索", entry, state)
+                debugList(root, root.getAsJsonObject("ruleSearch"), value, "搜索", entry, state, cacheFetch)
             }
         }
     }
@@ -63,8 +73,8 @@ class EmbeddedLegadoRuntime(
 
     override fun validate(sourceJson: String) = validator.validate(sourceJson)
 
-    private suspend fun debugInfo(root: JsonObject, value: String, state: MutableMap<String, String>): LegadoRuntime.DebugReport {
-        val response = fetchValue(value, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root))
+    private suspend fun debugInfo(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?): LegadoRuntime.DebugReport {
+        val response = fetchValue(value, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch)
         val rules = root.getAsJsonObject("ruleBookInfo") ?: JsonObject()
         val bindings = mapOf("source" to state, "url" to response.finalUrl, "isFromBookInfo" to true)
         val fields = linkedMapOf<String, String?>()
@@ -75,7 +85,7 @@ class EmbeddedLegadoRuntime(
         return LegadoRuntime.DebugReport("详情", value, listOf("HTTP ${response.code} ${response.finalUrl}", "页面 ${response.body.length} 字符") + fields.map { "${it.key}: ${it.value.orEmpty()}" }, fields)
     }
 
-    private suspend fun debugToc(root: JsonObject, value: String, state: MutableMap<String, String>): LegadoRuntime.DebugReport {
+    private suspend fun debugToc(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?): LegadoRuntime.DebugReport {
         val rules = root.getAsJsonObject("ruleToc") ?: error("缺少 ruleToc")
         val listRule = rules.text("chapterList").orEmpty()
         val chapters = mutableListOf<Map<String, Any>>()
@@ -85,7 +95,7 @@ class EmbeddedLegadoRuntime(
         for (page in 0 until 100) {
             val target = current ?: break
             if (!visited.add(target)) break
-            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root))
+            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch)
             val pageBindings = mapOf("source" to state, "url" to response.finalUrl, "page" to page + 1)
             val elements = extractElements(response.body, listRule, response.finalUrl, pageBindings)
             elements.forEach { html ->
@@ -100,10 +110,12 @@ class EmbeddedLegadoRuntime(
                 ?.let { extract(response.body, it, response.finalUrl, pageBindings) }
                 ?.takeIf { it.isNotBlank() }?.let { resolve(response.finalUrl, it) }
         }
-        return LegadoRuntime.DebugReport("目录", value, lines + "目录总数 ${chapters.size}" + chapters.take(3).map { "${it["name"]} -> ${it["url"]}" }, chapters)
+        // 输出裁剪：章节数据只保留前 20 条（调试足够定位），全量以 totalChapters 标注
+        return LegadoRuntime.DebugReport("目录", value, lines + "目录总数 ${chapters.size}" + chapters.take(3).map { "${it["name"]} -> ${it["url"]}" },
+            mapOf("totalChapters" to chapters.size, "chapters" to chapters.take(20)))
     }
 
-    private suspend fun debugContent(root: JsonObject, value: String, state: MutableMap<String, String>): LegadoRuntime.DebugReport {
+    private suspend fun debugContent(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?): LegadoRuntime.DebugReport {
         val rules = root.getAsJsonObject("ruleContent") ?: error("缺少 ruleContent")
         val contentRule = rules.text("content").orEmpty()
         val pages = mutableListOf<String>()
@@ -113,7 +125,7 @@ class EmbeddedLegadoRuntime(
         for (page in 0 until 10) {
             val target = current ?: break
             if (!visited.add(target)) break
-            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root))
+            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch)
             val bindings = mapOf("source" to state, "url" to response.finalUrl, "title" to "", "nextChapterUrl" to "")
             val rawContent = extract(response.body, contentRule, response.finalUrl, bindings, unescape = false).orEmpty()
             pages += rawContent
@@ -134,12 +146,16 @@ class EmbeddedLegadoRuntime(
         } else {
             lines += "合并正文 ${merged.length} 字符"
         }
-        return LegadoRuntime.DebugReport("正文", value, lines + "合并正文 ${cleaned.length} 字符", mapOf("pages" to pages.size, "content" to cleaned, "mergedBeforeReplace" to merged))
+        // 输出裁剪：正文只保留前 4000 字符供核对，replaceRegex 前样本保留 800 字符；全量以 contentTotalChars/mergedTotalChars 标注
+        return LegadoRuntime.DebugReport("正文", value, lines + "合并正文 ${cleaned.length} 字符", mapOf(
+            "pages" to pages.size, "content" to cleaned.take(4000), "contentTotalChars" to cleaned.length,
+            "mergedBeforeReplace" to merged.take(800), "mergedTotalChars" to merged.length,
+        ))
     }
 
-    private suspend fun debugList(root: JsonObject, rules: JsonObject?, requestValue: String, type: String, entry: String, state: MutableMap<String, String>): LegadoRuntime.DebugReport {
+    private suspend fun debugList(root: JsonObject, rules: JsonObject?, requestValue: String, type: String, entry: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?): LegadoRuntime.DebugReport {
         requireNotNull(rules) { "缺少 ${if (type == "搜索") "ruleSearch" else "ruleExplore"}" }
-        val response = fetchValue(requestValue, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root))
+        val response = fetchValue(requestValue, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch)
         val listRule = rules.text("bookList").orEmpty()
         val elements = extractElements(response.body, listRule, response.finalUrl, mapOf("source" to state, "url" to response.finalUrl))
         val books = elements.take(200).map { html ->
@@ -149,15 +165,24 @@ class EmbeddedLegadoRuntime(
                 "author" to extract(html, rules.text("author"), response.finalUrl, bindings).orEmpty(),
                 "bookUrl" to resolve(response.finalUrl, extract(html, rules.text("bookUrl"), response.finalUrl, bindings).orEmpty()),
                 "coverUrl" to resolve(response.finalUrl, extract(html, rules.text("coverUrl"), response.finalUrl, bindings).orEmpty()),
-                "intro" to extract(html, rules.text("intro"), response.finalUrl, bindings).orEmpty(),
+                "intro" to extract(html, rules.text("intro"), response.finalUrl, bindings).orEmpty().take(120),
                 "kind" to extract(html, rules.text("kind"), response.finalUrl, bindings).orEmpty(),
                 "lastChapter" to extract(html, rules.text("lastChapter"), response.finalUrl, bindings).orEmpty(),
             )
         }
-        return LegadoRuntime.DebugReport(type, entry, listOf("HTTP ${response.code} ${response.finalUrl}", "列表 ${books.size} 条") + books.take(3).map { "${it["name"]} / ${it["author"]}" }, books)
+        // 输出裁剪：列表只内联前 10 条（总数放 lines），避免大响应挤爆上下文
+        val trimmed = books.take(10)
+        return LegadoRuntime.DebugReport(type, entry,
+            listOf("HTTP ${response.code} ${response.finalUrl}", "列表 ${books.size} 条（内联前 ${trimmed.size} 条）") + trimmed.take(3).map { "${it["name"]} / ${it["author"]}" },
+            trimmed)
     }
 
-    private suspend fun fetchValue(value: String, base: String, sourceHeaders: Map<String, String> = emptyMap()): HttpFetcher.FetchResult {
+    private suspend fun fetchValue(
+        value: String,
+        base: String,
+        sourceHeaders: Map<String, String> = emptyMap(),
+        cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)? = null,
+    ): HttpFetcher.FetchResult {
         val parsed = LegadoUrlOptions.parse(value)
         val absolute = resolve(base, parsed.url)
         var response = if (parsed.webView || domainModes?.requiresWebView(absolute) == true) {
@@ -165,11 +190,15 @@ class EmbeddedLegadoRuntime(
             val loaded = loader.load(absolute, parsed.webJs, parsed.webViewDelayTime)
             httpLogs?.record(HttpLogRecorder.Draft(method = "WEBVIEW", url = absolute, finalUrl = loaded.finalUrl, statusCode = 200, durationMs = loaded.elapsedMs, requestHeaders = sourceHeaders + parsed.headers, responseBody = loaded.html))
             if (fetcher.looksLikeVerification(403, loaded.finalUrl, loaded.html)) {
-                throw com.mina.legadostudio.verification.VerificationRequiredException(loaded.finalUrl, loaded.finalUrl.toHttpUrlOrNull()?.host.orEmpty())
+                throw com.mina.legadostudio.verification.VerificationRequiredException(
+                    loaded.finalUrl, loaded.finalUrl.toHttpUrlOrNull()?.host.orEmpty(), viaWebView = true,
+                    marker = fetcher.verificationMarker(403, loaded.finalUrl, loaded.html) ?: "webview", code = 200,
+                )
             }
             HttpFetcher.FetchResult(200, loaded.finalUrl, emptyMap(), loaded.html, loaded.elapsedMs)
         } else {
-            fetchAbsolute(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset)
+            val cached = cacheFetch?.invoke(HttpFetcher.FetchRequest(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset))
+            cached ?: fetchAbsolute(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset)
         }
         parsed.bodyJs?.takeIf { it.isNotBlank() }?.let { js ->
             val transformed = rhino.evaluate(js, response.finalUrl, response.body, mapOf("url" to response.finalUrl)).value

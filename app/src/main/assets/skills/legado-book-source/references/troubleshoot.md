@@ -1,6 +1,8 @@
 # 获取不到内容？排查指南
 
 > 当规则写了但获取不到内容时，按以下顺序从简到繁排查。
+>
+> **调试期遇到验证码 / CF / WAF 盾**（工具返回 `verification_required` 或 `webview_mode_enabled` 的 JSON）：不要按本文改规则，先走 [`verification.md`](verification.md) 的验证中心 playbook。本文第 4 节的 `loginCheckJs` 是写进**成品书源**、让官方阅读 App 自己过盾的方案。
 
 ## 1. 更换 User-Agent（第一步）
 
@@ -135,7 +137,9 @@ window.run("java.toast('执行成功');'成功'")
 .catch(e=>alert("执行出错:"+e));
 ```
 
-## 4. loginCheckJs 过验证盾
+## 4. loginCheckJs 过验证盾（写进成品书源）
+
+> 本节是**成品源**在官方阅读 App 内过盾的方案。MCP 调试期遇到盾请走 [`verification.md`](verification.md)（验证中心 + 每域模式），两者互补不冲突：调试期过完盾验证规则后，若目标站真实使用中会频繁出盾，仍应把本节的 `loginCheckJs` 写进书源。
 
 `loginCheckJs` 位于书源**基础**选项卡。Legado 在每次请求网站后都会执行此 JS 代码，`result` 为响应对象（包含 `url`、`code`、`body` 等属性）。JS 需返回修改后的响应对象。
 

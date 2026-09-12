@@ -9,6 +9,10 @@ import androidx.core.app.NotificationCompat
 import com.mina.legadostudio.MainActivity
 import com.mina.legadostudio.data.db.StudioDao
 import com.mina.legadostudio.data.db.VerificationSessionEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.net.URI
 
 class VerificationCoordinator(
@@ -22,11 +26,24 @@ class VerificationCoordinator(
     suspend fun create(jobId: String, url: String, purpose: String): VerificationSessionEntity {
         val now = System.currentTimeMillis()
         val domain = DomainKey.fromHost(runCatching { URI(url).host }.getOrNull().orEmpty())
-        dao.waitingVerification(jobId, domain)?.let { return it }
+        // 复用 WAITING 会话时同步更新 url/purpose：站点常换验证地址，沿用旧 URL 会让用户白验
+        dao.waitingVerification(jobId, domain)?.let { old ->
+            val refreshed = if (old.url == url && old.purpose == purpose) old
+                else old.copy(url = url, purpose = purpose, updatedAt = now)
+            if (refreshed != old) dao.saveVerificationSession(refreshed)
+            return refreshed
+        }
         val value = VerificationSessionEntity(java.util.UUID.randomUUID().toString(), jobId, domain, url, purpose, "WAITING", "", now, now)
         dao.saveVerificationSession(value)
         notifyVerification(value)
         return value
+    }
+
+    /** 该域最近一次 COMPLETED 会话是否仍在 ttl 内（ALWAYS 模式调用方应跳过本检查）。 */
+    suspend fun isCompletedFresh(domain: String, ttlMs: Long = 30 * 60_000L): Boolean {
+        val latest = dao.latestVerification("mcp", domain) ?: return false
+        if (latest.status != "COMPLETED") return false
+        return System.currentTimeMillis() - latest.updatedAt < ttlMs
     }
 
     suspend fun complete(id: String, finalUrl: String): VerificationSessionEntity {
@@ -35,6 +52,11 @@ class VerificationCoordinator(
         val completed = old.copy(status = "COMPLETED", finalUrl = finalUrl, updatedAt = System.currentTimeMillis()).also { dao.saveVerificationSession(it) }
         webState.clear(id)
         (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(notificationId(id))
+        // 部分 CF/JS 挑战的 cookie 在页面通过后才异步下发，延迟二次采集合并
+        CoroutineScope(Dispatchers.IO).launch {
+            delay(1_000)
+            runCatching { cookies.captureFromWebView(finalUrl) }
+        }
         return completed
     }
 

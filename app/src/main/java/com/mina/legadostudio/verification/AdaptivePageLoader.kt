@@ -18,7 +18,10 @@ class AdaptivePageLoader(
             val result = webView.load(url)
             logs?.record(HttpLogRecorder.Draft(method = "WEBVIEW", url = url, finalUrl = result.finalUrl, statusCode = 200, durationMs = result.elapsedMs, responseBody = result.html))
             if (http.looksLikeVerification(403, result.finalUrl, result.html)) {
-                throw VerificationRequiredException(result.finalUrl, DomainKey.fromUrl(result.finalUrl))
+                throw VerificationRequiredException(
+                    result.finalUrl, DomainKey.fromUrl(result.finalUrl), viaWebView = true,
+                    marker = http.verificationMarker(403, result.finalUrl, result.html) ?: "webview", code = 200,
+                )
             }
             return HttpFetcher.FetchResult(200, result.finalUrl, emptyMap(), result.html, result.elapsedMs)
         }

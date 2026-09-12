@@ -99,8 +99,11 @@ class HttpFetcher(
                     ?: detectCharset(bytes)
                 val text = bytes.toString(charset)
                 logRecorder?.record(HttpLogRecorder.Draft(method, url, finalUrl, response.code, elapsed, requestHeaders, responseHeaders, input.body.orEmpty(), text, redirectChain = redirectChain))
-                if (looksLikeVerification(response.code, finalUrl, text)) {
-                    throw com.mina.legadostudio.verification.VerificationRequiredException(finalUrl, response.request.url.host)
+                val verifyMarker = verificationMarker(response.code, finalUrl, text)
+                if (verifyMarker != null) {
+                    throw com.mina.legadostudio.verification.VerificationRequiredException(
+                        finalUrl, response.request.url.host, viaWebView = false, marker = verifyMarker, code = response.code,
+                    )
                 }
                 FetchResult(response.code, finalUrl, responseHeaders, text, elapsed, redirectChain)
             }
@@ -112,10 +115,17 @@ class HttpFetcher(
         }
     }
 
-    fun looksLikeVerification(code: Int, url: String, body: String): Boolean {
-        val sample = body.take(20_000)
-        val marker = Regex("Verify Yourself|WAF/VERIFY/CAPTCHA|cf-chl-|challenges\\.cloudflare\\.com|turnstile|altcha-widget|aegis_altcha|人机验证|安全验证", RegexOption.IGNORE_CASE)
-        return marker.containsMatchIn(sample) && (code >= 403 || url.contains("verify", true) || url.contains("captcha", true))
+    fun looksLikeVerification(code: Int, url: String, body: String): Boolean = verificationMarker(code, url, body) != null
+
+    /** 仅按页面标记判定（不看状态码/URL 门限），验证中心轮询「挑战是否已放行」用。 */
+    fun verificationMarkerLoose(body: String): String? =
+        Regex("Verify Yourself|WAF/VERIFY/CAPTCHA|cf-chl-|challenges\\.cloudflare\\.com|turnstile|altcha-widget|aegis_altcha|人机验证|安全验证", RegexOption.IGNORE_CASE)
+            .find(body.take(20_000))?.value
+
+    /** 返回命中的验证页标记名（如 "cf-chl"、"turnstile"、"人机验证"），非验证页返回 null。 */
+    fun verificationMarker(code: Int, url: String, body: String): String? {
+        val hit = verificationMarkerLoose(body) ?: return null
+        return if (code >= 403 || url.contains("verify", true) || url.contains("captcha", true)) hit else null
     }
 
     private fun detectCharset(bytes: ByteArray): Charset {
