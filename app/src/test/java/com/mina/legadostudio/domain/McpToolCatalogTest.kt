@@ -62,6 +62,18 @@ class McpToolCatalogTest {
             "list_contexts",
             "read_page",
             "read_result",
+            "match_sources",
+            "get_corpus_source",
+            "get_corpus_shard",
+            "read_knowledge",
+            "get_skill_reference",
+            "get_domain_modes",
+            "set_domain_mode",
+            "browser_verify",
+            "get_verification_status",
+            "get_cookies",
+            "set_cookie",
+            "clear_cookies",
         )
         val missing = required - toolNames()
         assertTrue("missing required tools: $missing", missing.isEmpty())

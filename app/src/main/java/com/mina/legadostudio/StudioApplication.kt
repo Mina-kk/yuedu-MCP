@@ -58,7 +58,10 @@ class StudioApplication : Application() {
     val fetcher by lazy { HttpFetcher(cookieStore::headerFor, httpLogs, runtimeConfig::userAgent, { runtimeConfig.bookSourceType }) }
     val webViewLoader by lazy { WebViewPageLoader(this, runtimeConfig::userAgent) }
     val verification by lazy { VerificationCoordinator(this, database.dao(), cookieStore, verificationWebState) }
-    val taskContexts by lazy { com.mina.legadostudio.mcp.TaskContextStore() }
+    val contextEpoch by lazy { com.mina.legadostudio.mcp.ContextEpochStore(this) }
+    val pageLoader by lazy { com.mina.legadostudio.verification.AdaptivePageLoader(fetcher, webViewLoader, domainModes, httpLogs) }
+    val corpus by lazy { com.mina.legadostudio.domain.CorpusRepository(this) }
+    val taskContexts by lazy { com.mina.legadostudio.mcp.TaskContextStore(snapshotDir = java.io.File(filesDir, "contexts")) }
     val analyzer by lazy { HtmlAnalyzer() }
     val runtime by lazy { EmbeddedLegadoRuntime(fetcher, validator, rhino = RhinoEvaluator(fetcher, gson, webViewLoader, cookieStore, runtimeConfig::userAgent), webViewLoader = webViewLoader, domainModes = domainModes, httpLogs = httpLogs) }
 

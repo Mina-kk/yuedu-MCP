@@ -33,6 +33,11 @@ import kotlinx.serialization.json.putJsonObject
 class StudioMcpServer(context: Context) {
     private val app = context.applicationContext as StudioApplication
     private val contexts get() = app.taskContexts
+
+    // 每个本类实例对应一个 MCP 连接：默认上下文挂在实例上，多个客户端/多个并行书源任务各自有默认槽，
+    // 不再共用进程级单例把彼此的 pageId/resultId 挤出缓存（FIFO 驱逐导致「引用失效/数据互串」）。
+    private val defaultContextMutex = kotlinx.coroutines.sync.Mutex()
+    @Volatile private var defaultContextId: String? = null
     private suspend fun contextId(args: JsonObject?): String {
         args.str("contextId")?.let { contexts.describe(it); return it }
         return defaultContextMutex.withLock {
@@ -41,10 +46,8 @@ class StudioMcpServer(context: Context) {
             else contexts.create("MCP connection").also { defaultContextId = it }
         }
     }
-    private fun contextFingerprint(): String = TaskContextStore.digest(listOf(
-        app.cookieStore.contextFingerprint(), app.runtimeConfig.userAgent, app.runtimeConfig.bookSourceType,
-        app.domainModes.contextFingerprint(), McpConfigStore(app).load().token,
-    ).joinToString("|"))
+    // Epoch 只在 token/UA/书源类型变更时推进；cookie 或域验证模式变化不再作废已有引用（旧实现的主要 token 浪费源）
+    private fun contextFingerprint(): String = TaskContextStore.digest("epoch:${app.contextEpoch.value}")
     private suspend fun savedEntry(args: JsonObject?, id: String): TaskContextStore.Entry =
         contexts.get(contextId(args), id, contextFingerprint())
     private suspend fun contextFetch(args: JsonObject?): Pair<String, TaskContextStore.Hit> {
@@ -58,10 +61,11 @@ class StudioMcpServer(context: Context) {
         require(input.url!!.length <= 8192) { "url过长" }
         require((input.body?.length ?: 0) <= 1_000_000) { "请求体过大" }
         val fingerprint = contextFingerprint()
-        val key = TaskContextStore.digest(app.gson.toJson(input))
-        val hit = contexts.fetch(id, key, fingerprint, method != "POST", args.bool("refresh") == true) {
-            withContext(Dispatchers.IO) { app.fetcher.fetch(input) }.also {
-                require(contextFingerprint() == fingerprint) { "AUTH_CONTEXT_CHANGED：抓取期间登录状态变化，请重试" }
+        // 缓存 key 只与方法/URL/请求体相关：调超时等参数不再打穿缓存；POST（搜索）也纳入缓存，迭代调试搜索规则不再反复联网
+        val key = TaskContextStore.digest(method + "\n" + input.url + "\n" + (input.body.orEmpty()))
+        val hit = contexts.fetch(id, key, fingerprint, reusable = true, args.bool("refresh") == true) {
+            withContext(Dispatchers.IO) { app.pageLoader.load(input) }.also {
+                require(contextFingerprint() == fingerprint) { "AUTH_CONTEXT_CHANGED：抓取期间运行环境（Token/UA/书源类型）变化，请重试" }
             }
         }
         return id to hit
@@ -103,7 +107,7 @@ class StudioMcpServer(context: Context) {
         putJsonObject("limit") { put("type", "integer"); put("minimum", 1); put("maximum", 12000) }
     }, required = listOf(key))
     private suspend fun boundedResult(name: String, args: JsonObject?, result: CallToolResult): CallToolResult {
-        if (result.isError == true || name !in setOf("inspect_rule", "analyze_html", "eval_js", "debug_source", "check_source", "get_source", "export_source", "list_sources", "get_http_log", "get_http_logs", "get_logs", "get_log", "get_skill", "search_knowledge")) return result
+        if (result.isError == true || name !in BOUNDED_TOOLS) return result
         val text = (result.content.singleOrNull() as? TextContent)?.text ?: return result
         if (text.length <= 12000) return result
         val inlineFallback: () -> CallToolResult = {
@@ -137,8 +141,84 @@ class StudioMcpServer(context: Context) {
         registerResources(server)
         registerTools(server)
         registerContextTools(server)
+        registerCorpusTools(server)
         McpSessions.register(server)
     }
+
+    /** 语料命中与知识/参考读取工具：做源前先 match_sources，可大幅减少抓网页与试错次数。 */
+    private fun registerCorpusTools(server: Server) {
+        server.tool("match_sources", "在内置4256书源语料中按域名/名称查现成书源与模板族。做书源前先查", schema(mapOf("query" to "域名、URL或站点名称关键词", "limit" to "1..20，默认10"), listOf("query")), toolAnnotations = readOnly) { req ->
+            runCatching {
+                val query = req.arguments.str("query") ?: error("query 不能为空")
+                val limit = (req.arguments.int("limit") ?: 10).coerceIn(1, 20)
+                val matches = app.corpus.match(query, limit)
+                ok(app.gson.toJson(mapOf(
+                    "query" to query, "count" to matches.size,
+                    "matches" to matches.map { mapOf("i" to it.i, "d" to it.domain, "n" to it.name, "t" to it.type, "f" to it.family, "g" to it.flags) },
+                    "hint" to "命中同域：get_corpus_source(i) 取全文做底本最小修改；同族：get_corpus_shard(f) 取代表样例参考结构。都未命中再 fetch_page 探索",
+                )))
+            }.getOrElse { err(it.message.orEmpty()) }
+        }
+        server.tool("get_corpus_source", "按 i 读取语料书源完整 JSON（已按官方公共字段清洗）", schema(mapOf("i" to "match_sources 返回的全局序号"), listOf("i")), toolAnnotations = readOnly) { req ->
+            runCatching {
+                val i = req.arguments.int("i") ?: error("i 不能为空")
+                ok(app.corpus.sourceJson(i) ?: error("语料中没有该序号"))
+            }.getOrElse { err(it.message.orEmpty()) }
+        }
+        server.tool("get_corpus_shard", "读取模板族代表书源全文（≤6个最完整样例），用于学习同 CMS 站点的规则写法", schema(mapOf("familyId" to "match_sources 返回的族 ID，如 f_0002"), listOf("familyId")), toolAnnotations = readOnly) { req ->
+            runCatching {
+                val fid = req.arguments.str("familyId") ?: error("familyId 不能为空")
+                val meta = app.corpus.familyMeta(fid) ?: error("族不存在")
+                val exemplars = app.corpus.familyExemplars(fid).mapNotNull { id ->
+                    runCatching { app.corpus.sourceJson(id.removePrefix("i").toInt()) }.getOrNull()
+                }
+                ok(app.gson.toJson(mapOf(
+                    "familyId" to fid, "memberCount" to meta.count, "searchMethod" to meta.searchMethod,
+                    "exemplarCount" to exemplars.size, "exemplars" to exemplars,
+                    "hint" to "样例按完整度优先挑选；结构参考后按目标站实测改写，勿照抄域名",
+                )))
+            }.getOrElse { err(it.message.orEmpty()) }
+        }
+        server.tool("read_knowledge", "按 path 分页读取知识库文档全文；路径来自 search_knowledge 命中", pagedSchema("path", "知识库路径，如 knowledge/css选择器规则.txt"), toolAnnotations = readOnly) { req ->
+            runCatching {
+                val path = req.arguments.str("path") ?: error("path 不能为空")
+                ok(app.gson.toJson(PagedText.page(app.knowledge.read(path), req.arguments.int("offset") ?: 0, req.arguments.int("limit") ?: 6000, req.arguments.str("query"))))
+            }.getOrElse { err(it.message.orEmpty()) }
+        }
+        server.tool("get_skill_reference", "读取 Skill 的 references 参考文件全文（分页），如 legado-book-source 的 references/js-api.md", pagedSchema2("id", "Skill ID", "path", "相对路径，如 references/patterns.md"), toolAnnotations = readOnly) { req ->
+            runCatching {
+                val id = req.arguments.str("id") ?: error("id 不能为空")
+                require(app.skills.isEnabled(id)) { "Skill 已禁用" }
+                val path = req.arguments.str("path") ?: error("path 不能为空")
+                ok(app.gson.toJson(PagedText.page(app.skills.readReference(id, path), req.arguments.int("offset") ?: 0, req.arguments.int("limit") ?: 6000, req.arguments.str("query"))))
+            }.getOrElse { err(it.message.orEmpty()) }
+        }
+        server.tool("get_domain_modes", "读取全部每域验证模式（auto/always/webview）", ToolSchema(properties = buildJsonObject {}, required = emptyList()), toolAnnotations = readOnly) { _ ->
+            ok(app.gson.toJson(mapOf("modes" to app.domainModes.allModes(), "hint" to "always=每次访问都要求人工验证，适合一搜一验的站点")))
+        }
+        server.tool("set_domain_mode", "设置每域验证模式：auto/always/webview。always 不依赖缓存 cookie，每次都人工验证", schema(mapOf("domain" to "域名", "mode" to "auto/always/webview"), listOf("domain", "mode")), toolAnnotations = write) { req ->
+            runCatching {
+                val domain = req.arguments.str("domain") ?: error("domain 不能为空")
+                val mode = com.mina.legadostudio.verification.DomainVerifyMode.valueOf(
+                    (req.arguments.str("mode") ?: error("mode 不能为空")).uppercase())
+                app.domainModes.setMode(com.mina.legadostudio.verification.DomainKey.fromUrl(
+                    if (domain.contains("://")) domain else "https://$domain"), mode)
+                ok(app.gson.toJson(mapOf("domain" to domain, "mode" to mode.name.lowercase())))
+            }.getOrElse { err(it.message.orEmpty()) }
+        }
+    }
+    private fun pagedSchema(key: String, description: String) = ToolSchema(properties = buildJsonObject {
+        put(key, stringProp(description))
+        putJsonObject("offset") { put("type", "integer"); put("minimum", 0) }
+        putJsonObject("limit") { put("type", "integer"); put("minimum", 1); put("maximum", 12000) }
+        put("query", stringProp("可选字面搜索，命中处开始返回"))
+    }, required = listOf(key))
+    private fun pagedSchema2(key1: String, desc1: String, key2: String, desc2: String) = ToolSchema(properties = buildJsonObject {
+        put(key1, stringProp(desc1)); put(key2, stringProp(desc2))
+        putJsonObject("offset") { put("type", "integer"); put("minimum", 0) }
+        putJsonObject("limit") { put("type", "integer"); put("minimum", 1); put("maximum", 12000) }
+        put("query", stringProp("可选字面搜索，命中处开始返回"))
+    }, required = listOf(key1, key2))
 
     private fun registerResources(server: Server) {
         app.skills.list().filter { it.enabled }.forEach { skill ->
@@ -155,7 +235,8 @@ class StudioMcpServer(context: Context) {
                 "name" to "阅读书源MCP",
                 "version" to BuildConfig.VERSION_NAME,
                 "mcpPath" to McpAccess.PATH,
-                "contextProtocol" to mapOf("version" to 1, "workflow" to "create_context → fetch_page → read_page/inspect_rule/analyze_html/eval_js(pageId) → update_context；重连后get_context或list_contexts", "cacheTtlSeconds" to 300, "idleTtlSeconds" to 1800, "persistence" to "memory-only", "maxInlineChars" to 12000, "hint" to "调用时传contextId；大结果用read_result，不重复运行；上限满时自动回收最久未使用的闲置上下文；check_source/debug_source保持实时请求"),
+                "contextProtocol" to mapOf("version" to 2, "workflow" to "match_sources(语料命中) → create_context → fetch_page → read_page/inspect_rule/analyze_html/eval_js(pageId) → update_context；重连后get_context或list_contexts", "cacheTtlSeconds" to 300, "idleTtlSeconds" to 1800, "persistence" to "memory+snapshot", "maxInlineChars" to 12000, "hint" to "调用时传contextId；并行做多个书源时每个任务各自 create_context 并全程显式传同一 contextId，互不串数据；POST搜索也入缓存；大结果用read_result不重复运行；check_source/debug_source默认复用本任务快照，最终验收传refresh=true"),
+                "corpus" to mapOf("sources" to 4256, "hint" to "内置语料特征索引，做源前先 match_sources(域名)"),
                 "license" to "GPL-3.0",
                 "ai" to false,
                 "role" to "mcp-runtime",
@@ -262,25 +343,8 @@ class StudioMcpServer(context: Context) {
             val report = app.validator.validate(project.sourceJson)
             if (report.isValid) ok(project.sourceJson) else err("书源验证未通过：${app.gson.toJson(report.issues)}")
         }
-        server.tool("fetch_page", "抓取并保存网页上下文。首次默认返回6000字符预览+pageId；同任务相同GET/HEAD五分钟内复用，仅返回引用。用read_page分段/搜索、analyze_html/inspect_rule(pageId)测试，勿重复传HTML。refresh=true强制联网；POST不缓存。", fetchSchema(), toolAnnotations = openWrite) { req ->
-            runCatching {
-                val mode = req.arguments.str("responseMode") ?: "auto"
-                require(mode in setOf("auto", "preview", "reference")) { "responseMode 必须为 auto/preview/reference" }
-                val limit = req.arguments.int("maxChars") ?: 6000
-                require(limit in 0..12000) { "maxChars 必须为 0..12000" }
-                val (id, hit) = contextFetch(req.arguments)
-                val e = hit.entry
-                val result = e.page!!
-                val preview = if (mode == "reference" || (mode == "auto" && hit.reused)) "" else e.text.take(limit)
-                ok(app.gson.toJson(contexts.metadata(e) + mapOf(
-                    "contextId" to id, "pageId" to e.id, "cacheHit" to hit.reused, "networkRequest" to !hit.reused,
-                    "code" to result.code, "finalUrl" to result.finalUrl, "elapsedMs" to result.elapsedMs,
-                    "body" to preview, "bodyNote" to result.bodyNote, "binaryBytes" to result.binaryBytes,
-                    "truncated" to (preview.isNotEmpty() && preview.length < e.text.length),
-                    "bodyOmitted" to (preview.isEmpty() && e.text.isNotEmpty()), "nextOffset" to preview.length,
-                    "hint" to "正文完整保存在pageId；用read_page或直接inspect_rule/analyze_html/eval_js引用，不要重复抓取。快照不是实时验证。",
-                )))
-            }.getOrElse { verificationAware(it) }
+        server.tool("fetch_page", "抓取并保存网页上下文。首次默认返回6000字符预览+pageId；同任务相同URL(含POST)五分钟内复用，仅返回引用。用read_page分段/搜索、analyze_html/inspect_rule(pageId)测试，勿重复传HTML。refresh=true强制联网。", fetchSchema(), toolAnnotations = openWrite) { req ->
+            runCatching { fetchPageOk(req.arguments) }.getOrElse { verificationAware(it, req.arguments) }
         }
         server.tool("analyze_html", "分析HTML或CSS选择器；优先传pageId直接分析完整已存网页，免去重复传HTML/联网。html与pageId二选一。", schema(mapOf("html" to "HTML（与pageId二选一）", "pageId" to "已存网页ID", "baseUrl" to "基础URL", "selector" to "可选CSS选择器"), emptyList()), toolAnnotations = readOnly) { req ->
             runCatching {
@@ -312,8 +376,11 @@ class StudioMcpServer(context: Context) {
                     "elements" to report.elements, "elementWarning" to report.elementWarning, "contextId" to contextId(req.arguments), "pageId" to e?.id, "cacheHit" to (hit?.reused ?: (pageId != null)), "snapshot" to (e?.let { contexts.metadata(it) } ?: mapOf("live" to true)))))
             }.getOrElse { verificationAware(it) }
         }
-        server.tool("debug_source", "使用 App 内运行时调试 BookSource JSON；entry 支持关键词、详情 URL、++目录、--正文、分类::URL", schema(mapOf("source" to "BookSource JSON", "entry" to "调试入口"), listOf("source", "entry")), toolAnnotations = openWrite) { req ->
-            runCatching { ok(app.gson.toJson(app.runtime.debug(req.arguments.str("source")!!, req.arguments.str("entry")!!))) }.getOrElse { verificationAware(it) }
+        server.tool("debug_source", "使用 App 内运行时调试 BookSource JSON；entry 支持关键词、详情 URL、++目录、--正文、分类::URL。默认复用本任务快照，refresh=true 全程实时", schema(mapOf("source" to "BookSource JSON", "entry" to "调试入口", "refresh" to "可选，true=不使用缓存"), listOf("source", "entry")), toolAnnotations = openWrite) { req ->
+            runCatching {
+                val cache = runtimeCache(req.arguments, req.arguments.bool("refresh") == true)
+                ok(app.gson.toJson(app.runtime.debug(req.arguments.str("source")!!, req.arguments.str("entry")!!, cache)))
+            }.getOrElse { verificationAware(it, req.arguments) }
         }
         server.tool("eval_js", "Legado Rhino执行JS；可传pageId，将完整已存正文注入result/src，免去复制HTML。JS内ajax/connect仍会联网。", schema(mapOf("js" to "JavaScript", "baseUrl" to "基础URL", "pageId" to "可选网页快照ID"), listOf("js")), toolAnnotations = openWrite) { req ->
             runCatching {
@@ -323,12 +390,33 @@ class StudioMcpServer(context: Context) {
                 ok(app.gson.toJson(if (e == null) output else mapOf("snapshot" to contexts.metadata(e), "output" to output)))
             }.getOrElse { verificationAware(it) }
         }
-        server.tool("browser_verify", "创建站点验证会话（验证码/登录/WAF）。完成后通过系统通知或 MCP 页顶部横幅进入应用内 WebView", schema(mapOf("url" to "验证 URL", "purpose" to "用途说明"), listOf("url")), toolAnnotations = openWrite) { req ->
+        server.tool("browser_verify", "创建站点验证会话（验证码/登录/WAF/CF）。waitSec=0 立即返回；1..120 阻塞等待用户在验证中心完成后自动取证重试并返回 evidence", schema(mapOf("url" to "验证 URL", "purpose" to "用途说明", "waitSec" to "0..120，阻塞等待完成的最长秒数"), listOf("url")), toolAnnotations = openWrite) { req ->
             runCatching {
-                val session = app.verification.create("mcp", req.arguments.str("url")!!, req.arguments.str("purpose") ?: "MCP 请求验证")
-                val payload = app.gson.toJsonTree(session).asJsonObject
-                payload.addProperty("message", VERIFY_MESSAGE)
-                ok(payload.toString())
+                val url = req.arguments.str("url")!!
+                val session = app.verification.create("mcp", url, req.arguments.str("purpose") ?: "MCP 请求验证")
+                val waitSec = (req.arguments.int("waitSec") ?: 0).coerceIn(0, 120)
+                var done = app.database.dao().verificationSession(session.id)?.status == "COMPLETED"
+                var waited = 0
+                while (!done && waited < waitSec) {
+                    kotlinx.coroutines.delay(1_000); waited++
+                    done = app.database.dao().verificationSession(session.id)?.status == "COMPLETED"
+                }
+                if (!done) {
+                    val payload = app.gson.toJsonTree(session).asJsonObject
+                    payload.addProperty("status", if (waited > 0) "wait_timeout" else "WAITING")
+                    payload.addProperty("waitedSec", waited)
+                    payload.addProperty("message", VERIFY_MESSAGE + "；稍后可用 get_verification_status 轮询，完成后重试原工具")
+                    return@tool ok(payload.toString())
+                }
+                // 完成后用 WebView 通道取证一次，AI 直接拿到验证是否真正生效
+                val evidence = runCatching {
+                    val r = app.pageLoader.load(HttpFetcher.FetchRequest(url = url, method = "GET", timeoutSec = 45))
+                    mapOf("code" to r.code, "finalUrl" to r.finalUrl, "marker" to app.fetcher.verificationMarker(200, r.finalUrl, r.body))
+                }.getOrElse { mapOf("code" to 0, "finalUrl" to url, "marker" to "load_error:" + (it.message?.take(80) ?: "")) }
+                ok(app.gson.toJson(mapOf(
+                    "status" to "COMPLETED", "sessionId" to session.id, "domain" to session.domain,
+                    "waitedSec" to waited, "evidence" to evidence, "message" to "验证完成并已取证，请重试原工具；若 evidence.marker 非空说明该站每次访问都要求验证，建议 set_domain_mode(domain, ALWAYS)",
+                )))
             }.getOrElse { err(it.message.orEmpty()) }
         }
         server.tool("get_verification_status", "读取 App 内验证会话状态", schema(mapOf("sessionId" to "验证会话 ID"), listOf("sessionId")), toolAnnotations = readOnly) { req ->
@@ -343,17 +431,21 @@ class StudioMcpServer(context: Context) {
         server.tool("clear_cookies", "清除指定 URL 所属域的 Runtime/WebView Cookie", schema(mapOf("url" to "URL"), listOf("url")), toolAnnotations = write) { req ->
             app.cookieStore.clear(req.arguments.str("url") ?: return@tool err("url 不能为空")); ok("Cookie 已清除")
         }
-        server.tool("check_source", "按提供的搜索/详情/目录/正文入口批量运行真实校验", checkSourceSchema(), toolAnnotations = openWrite) { req ->
-            val source = req.arguments.str("source") ?: return@tool err("source 不能为空")
-            val checks = linkedMapOf<String, String>()
-            req.arguments.str("searchKey")?.takeIf { it.isNotBlank() }?.let { checks["搜索"] = it }
-            req.arguments.str("detailUrl")?.takeIf { it.isNotBlank() }?.let { checks["详情"] = it }
-            req.arguments.str("tocUrl")?.takeIf { it.isNotBlank() }?.let { checks["目录"] = "++$it" }
-            req.arguments.str("contentUrl")?.takeIf { it.isNotBlank() }?.let { checks["正文"] = "--$it" }
-            val results = linkedMapOf<String, Any>()
-            results["validation"] = app.runtime.validate(source)
-            checks.forEach { (name, entry) -> results[name] = runCatching { app.runtime.debug(source, entry) }.fold({ it }, { mapOf("error" to it.message.orEmpty()) }) }
-            ok(app.gson.toJson(results))
+        server.tool("check_source", "按提供的搜索/详情/目录/正文入口批量运行校验；默认复用本任务快照避免重复联网，refresh=true 全程实时（上线验收用）", checkSourceSchema(), toolAnnotations = openWrite) { req ->
+            runCatching {
+                val source = req.arguments.str("source") ?: return@tool err("source 不能为空")
+                val cache = runtimeCache(req.arguments, req.arguments.bool("refresh") == true)
+                val checks = linkedMapOf<String, String>()
+                req.arguments.str("searchKey")?.takeIf { it.isNotBlank() }?.let { checks["搜索"] = it }
+                req.arguments.str("detailUrl")?.takeIf { it.isNotBlank() }?.let { checks["详情"] = it }
+                req.arguments.str("tocUrl")?.takeIf { it.isNotBlank() }?.let { checks["目录"] = "++$it" }
+                req.arguments.str("contentUrl")?.takeIf { it.isNotBlank() }?.let { checks["正文"] = "--$it" }
+                val results = linkedMapOf<String, Any>()
+                results["validation"] = app.runtime.validate(source)
+                checks.forEach { (name, entry) -> results[name] = runCatching { app.runtime.debug(source, entry, cache) }.fold({ it }, { mapOf("error" to it.message.orEmpty()) }) }
+                results["cache"] = if (cache == null) "实时请求" else "本任务快照（最终验收请传 refresh=true）"
+                ok(app.gson.toJson(results))
+            }.getOrElse { verificationAware(it, req.arguments) }
         }
         server.tool("search_knowledge", "搜索内置 Legado 书源知识库并返回命中片段", schema(mapOf("query" to "搜索词"), listOf("query")), toolAnnotations = readOnly) { req ->
             ok(app.gson.toJson(app.knowledge.search(req.arguments.str("query").orEmpty(), 50)))
@@ -439,28 +531,75 @@ class StudioMcpServer(context: Context) {
         }
     }
 
-    private suspend fun verificationAware(error: Throwable): CallToolResult {
+    /**
+     * 构造本次调用专用的缓存闭包（指向该任务的上下文快照），随参数传入 runtime.debug。
+     * 并行调试多个书源时各走各的缓存，互不干扰；refresh=true 返回 null 表示全程实时。
+     */
+    private suspend fun runtimeCache(args: JsonObject?, refresh: Boolean): (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)? {
+        if (refresh) return null
+        val id = contextId(args)
+        val fingerprint = contextFingerprint()
+        return { r ->
+            val key = TaskContextStore.digest((r.method ?: "GET") + "\n" + r.url.orEmpty() + "\n" + r.body.orEmpty())
+            contexts.fetch(id, key, fingerprint, reusable = true, refresh = false) {
+                withContext(Dispatchers.IO) { app.pageLoader.load(r) }
+            }.entry.page!!
+        }
+    }
+    private suspend fun fetchPageOk(args: JsonObject?, autoRetried: Boolean = false): CallToolResult {        val mode = args.str("responseMode") ?: "auto"
+        require(mode in setOf("auto", "preview", "reference")) { "responseMode 必须为 auto/preview/reference" }
+        val limit = args.int("maxChars") ?: 6000
+        require(limit in 0..12000) { "maxChars 必须为 0..12000" }
+        val (id, hit) = contextFetch(args)
+        val e = hit.entry
+        val result = e.page!!
+        val preview = if (mode == "reference" || (mode == "auto" && hit.reused)) "" else e.text.take(limit)
+        return ok(app.gson.toJson(contexts.metadata(e) + mapOf(
+            "contextId" to id, "pageId" to e.id, "cacheHit" to hit.reused, "networkRequest" to !hit.reused,
+            "code" to result.code, "finalUrl" to result.finalUrl, "elapsedMs" to result.elapsedMs,
+            "body" to preview, "bodyNote" to result.bodyNote, "binaryBytes" to result.binaryBytes,
+            "truncated" to (preview.isNotEmpty() && preview.length < e.text.length),
+            "bodyOmitted" to (preview.isEmpty() && e.text.isNotEmpty()), "nextOffset" to preview.length,
+            "autoRetried" to autoRetried,
+            "hint" to "正文完整保存在pageId；用read_page或直接inspect_rule/analyze_html/eval_js引用，不要重复抓取。快照不是实时验证。",
+        )))
+    }
+    private suspend fun verificationAware(error: Throwable, args: JsonObject? = null): CallToolResult {
         if (error is kotlinx.coroutines.CancellationException) throw error
         val verification = error as? com.mina.legadostudio.verification.VerificationRequiredException
             ?: return err(error.message.orEmpty())
-        val domain = com.mina.legadostudio.verification.DomainKey.fromUrl(verification.verificationUrl)
-        val latest = app.database.dao().latestVerification("mcp", domain)
-        if (latest?.status == "COMPLETED" && !app.domainModes.requiresWebView(verification.verificationUrl)) {
-            app.domainModes.requireWebView(verification.verificationUrl)
-            return ok(app.gson.toJson(mapOf(
-                "status" to "webview_mode_enabled",
-                "domain" to domain,
-                "message" to "HTTP 会话仍被验证拦截，已切换 App 内 WebView 请求模式，请重试原工具",
-            )))
+        val url = verification.verificationUrl
+        val domain = com.mina.legadostudio.verification.DomainKey.fromUrl(url)
+        val mode = app.domainModes.modeFor(url)
+        // ALWAYS 模式（一搜一验站点）不看历史完成态；其余模式 30 分钟内的完成记录视为有效
+        val fresh = mode != com.mina.legadostudio.verification.DomainVerifyMode.ALWAYS && app.verification.isCompletedFresh(domain)
+        val evidence = mapOf(
+            "code" to verification.code, "finalUrl" to url,
+            "marker" to verification.marker, "viaWebView" to verification.viaWebView,
+        )
+        when (val action = com.mina.legadostudio.verification.VerificationPolicy.decide(mode, fresh, verification.viaWebView, url, domain)) {
+            is com.mina.legadostudio.verification.VerificationPolicy.VerifyAction.EnableWebView -> {
+                app.domainModes.setMode(domain, com.mina.legadostudio.verification.DomainVerifyMode.WEBVIEW)
+                // fetch_page 场景：切换后立即原地重试一次，把结论（而不是中间态）交给 AI
+                if (args != null && args.str("url") != null && args.str("pageId") == null) {
+                    runCatching { return fetchPageOk(args, autoRetried = true) }
+                        .onFailure { retry -> if (retry is kotlinx.coroutines.CancellationException) throw retry }
+                }
+                return ok(app.gson.toJson(mapOf(
+                    "status" to "webview_mode_enabled", "domain" to domain, "mode" to "WEBVIEW",
+                    "autoRetried" to false, "evidence" to evidence,
+                    "message" to "该域已切换 WebView 抓取模式（此后 fetch/规则解析走应用内 WebView）。请重试原工具；若仍被拦截，用 browser_verify(url, waitSec=90) 发起人工验证",
+                )))
+            }
+            is com.mina.legadostudio.verification.VerificationPolicy.VerifyAction.NewSession -> {
+                val session = app.verification.create("mcp", action.url, "MCP 请求需要网站验证")
+                return ok(app.gson.toJson(mapOf(
+                    "status" to "verification_required", "sessionId" to session.id, "url" to session.url,
+                    "domain" to session.domain, "mode" to mode.name, "autoRetried" to false,
+                    "evidence" to evidence, "message" to VERIFY_MESSAGE + "；完成后重试原工具即可",
+                )))
+            }
         }
-        val session = app.verification.create("mcp", verification.verificationUrl, "MCP 请求需要网站验证")
-        return ok(app.gson.toJson(mapOf(
-            "status" to "verification_required",
-            "sessionId" to session.id,
-            "url" to session.url,
-            "domain" to session.domain,
-            "message" to VERIFY_MESSAGE,
-        )))
     }
 
     private fun Server.tool(
@@ -471,7 +610,9 @@ class StudioMcpServer(context: Context) {
         handler: suspend (CallToolRequest) -> CallToolResult,
     ) {
         val server = this
-        val extra = mutableMapOf("contextId" to stringProp("可选任务上下文ID；重连、多任务时请显式传入"))
+        val extra = mutableMapOf<String, kotlinx.serialization.json.JsonObject>()
+        // contextId 只注入真正使用任务上下文的工具，其余工具 schema 不再携带该参数（tools/list 体积减半）
+        if (name in CONTEXT_TOOLS) extra["contextId"] = stringProp("可选任务上下文ID；重连、多任务时请显式传入")
         if (name == "inspect_rule") extra["refresh"] = buildJsonObject { put("type", "boolean"); put("description", "使用url时强制联网") }
         val contextualSchema = inputSchema.copy(properties = JsonObject(inputSchema.properties.orEmpty() + extra))
         addTool(name, description, contextualSchema, toolAnnotations = toolAnnotations) { req ->
@@ -525,13 +666,25 @@ class StudioMcpServer(context: Context) {
         put("detailUrl", stringProp("可选详情 URL"))
         put("tocUrl", stringProp("可选目录 URL"))
         put("contentUrl", stringProp("可选正文 URL"))
+        putJsonObject("refresh") { put("type", "boolean"); put("description", "true=全程实时请求（上线验收用），默认复用任务快照") }
     }, required = listOf("source"))
 
     companion object {
-        /** 进程内共享同一个默认上下文，避免每个 MCP 会话各占一个上下文槽位。 */
-        private val defaultContextMutex = kotlinx.coroutines.sync.Mutex()
-        private var defaultContextId: String? = null
         private const val VERIFY_MESSAGE = "请通过系统通知或 MCP 页顶部横幅，在应用内完成站点验证"
         private val HIDDEN_ARG_KEYS = setOf("token", "cookie", "authorization", "html", "source", "js", "markdown", "body", "project", "header", "password")
+
+        /** 真正使用任务上下文的工具白名单（schema 注入 contextId 用）。 */
+        private val CONTEXT_TOOLS = setOf(
+            "fetch_page", "read_page", "read_result", "inspect_rule", "analyze_html", "eval_js",
+            "debug_source", "check_source", "create_context", "get_context", "update_context", "clear_context",
+        )
+
+        /** 结果超过 12000 字符时自动转 resultId+预览的工具名单。 */
+        private val BOUNDED_TOOLS = setOf(
+            "inspect_rule", "analyze_html", "eval_js", "debug_source", "check_source",
+            "get_source", "export_source", "get_project", "get_skill", "get_skill_reference",
+            "search_knowledge", "read_knowledge", "get_corpus_shard", "get_corpus_source",
+            "match_sources", "list_sources", "get_http_log", "get_http_logs", "get_logs", "get_log",
+        )
     }
 }

@@ -3,25 +3,33 @@ package com.mina.legadostudio.mcp
 import com.mina.legadostudio.network.HttpFetcher
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 
-/** Ephemeral capability-addressed workspaces. No cookies or page contents are persisted. */
+/**
+ * Ephemeral capability-addressed workspaces.
+ * notes 与条目正文保存在内存；传入 snapshotDir 时会异步落盘快照，进程重启后可恢复（恢复条目一律标记 stale，首用必须 refresh）。
+ */
 class TaskContextStore(
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
     private val idleMs: Long = 30 * 60_000L,
     private val freshMs: Long = 5 * 60_000L,
-    private val maxContexts: Int = 8,
+    private val maxContexts: Int = 16,
     private val maxChars: Int = 2_000_000,
     private val maxEntryChars: Int = 1_000_000,
     private val minEvictIdleMs: Long = 60_000L,
+    private val snapshotDir: File? = null,
 ) {
     data class Entry(val id: String, val kind: String, val text: String, val created: Long,
         val fingerprint: String, val key: String? = null, val page: HttpFetcher.FetchResult? = null)
     data class Hit(val entry: Entry, val reused: Boolean)
     private data class Task(val id: String, val label: String, var touched: Long,
         var notes: String = "", val entries: LinkedHashMap<String, Entry> = linkedMapOf())
-    init { require(maxEntryChars > 0 && maxEntryChars <= maxChars && maxContexts > 0) }
+    init {
+        require(maxEntryChars > 0 && maxEntryChars <= maxChars && maxContexts > 0)
+        restoreFromSnapshot()
+    }
     private val mutex = Mutex()
     private val tasks = linkedMapOf<String, Task>()
 
@@ -32,6 +40,7 @@ class TaskContextStore(
         require(tasks.size < maxContexts) { "上下文数量已达上限，请先 clear_context" }
         val id = UUID.randomUUID().toString()
         tasks[id] = Task(id, label, clock())
+        scheduleSnapshot()
         id
     }
     private fun expire() { tasks.entries.removeAll { clock() - it.value.touched >= idleMs } }
@@ -69,10 +78,14 @@ class TaskContextStore(
             if (reusable && result.code in 200..299 && result.headers.none { it.key.equals("cache-control", true) && (it.value.contains("no-store", true) || it.value.contains("no-cache", true)) }) key else null,
             result.copy(headers = safeHeaders, redirectChain = emptyList()))
         task.touched = clock()
-        Hit(insert(task, entry), false)
+        val hit = Hit(insert(task, entry), false)
+        scheduleSnapshot()
+        hit
     }
     suspend fun saveResult(id: String, text: String, fingerprint: String): Entry = mutex.withLock {
-        insert(task(id), Entry(UUID.randomUUID().toString(), "result", text, clock(), fingerprint))
+        val e = insert(task(id), Entry(UUID.randomUUID().toString(), "result", text, clock(), fingerprint))
+        scheduleSnapshot()
+        e
     }
     suspend fun get(id: String, entryId: String, fingerprint: String): Entry = mutex.withLock {
         val entry = task(id).entries[entryId] ?: error("REFERENCE_EXPIRED_OR_UNKNOWN：引用已清理或不属于此上下文")
@@ -81,9 +94,9 @@ class TaskContextStore(
     }
     suspend fun describe(id: String, notes: String? = null): Map<String, Any> = mutex.withLock {
         val task = task(id)
-        notes?.let { require(it.length <= 4000) { "notes 最多 4000 字符" }; task.notes = it }
+        notes?.let { require(it.length <= 4000) { "notes 最多 4000 字符" }; task.notes = it; scheduleSnapshot() }
         mapOf("contextId" to task.id, "label" to task.label, "notes" to task.notes,
-            "idleTtlSeconds" to idleMs / 1000, "persistence" to "memory-only",
+            "idleTtlSeconds" to idleMs / 1000, "persistence" to if (snapshotDir != null) "memory+snapshot" else "memory-only",
             "entries" to task.entries.values.map { metadata(it) },
             "usedChars" to task.entries.values.sumOf { it.text.length }, "maxChars" to maxChars)
     }
@@ -106,7 +119,47 @@ class TaskContextStore(
             )
         }
     }
-    suspend fun clear(id: String): Boolean = mutex.withLock { tasks.remove(id) != null }
+    suspend fun clear(id: String): Boolean = mutex.withLock {
+        val removed = tasks.remove(id) != null
+        if (removed) scheduleSnapshot()
+        removed
+    }
+
+    /** 在持有 mutex 的调用点捕获当前任务快照，交给防抖写入。 */
+    private fun scheduleSnapshot() {
+        val dir = snapshotDir ?: return
+        val snapshot = tasks.values.map { t ->
+            TaskContextSnapshot.TaskSnapshot(
+                id = t.id, label = t.label, touched = t.touched, notes = t.notes,
+                entries = t.entries.values.map { e ->
+                    TaskContextSnapshot.EntrySnapshot(
+                        id = e.id, kind = e.kind, text = e.text, created = e.created,
+                        fingerprint = e.fingerprint, key = null,
+                        code = e.page?.code, finalUrl = e.page?.finalUrl, elapsedMs = e.page?.elapsedMs,
+                    )
+                },
+            )
+        }
+        TaskContextSnapshot.scheduleSave(dir) { snapshot }
+    }
+
+    /** 进程启动时恢复快照；恢复条目一律把 created 回拨到 fresh 窗口之外（stale，首用必须 refresh）。 */
+    private fun restoreFromSnapshot() {
+        val dir = snapshotDir ?: return
+        val restored = runCatching { TaskContextSnapshot.load(dir) }.getOrDefault(emptyList())
+            .sortedByDescending { it.touched }.take(maxContexts)
+        restored.forEach { s ->
+            val task = Task(s.id, s.label, s.touched, s.notes)
+            s.entries.forEach { e ->
+                val page = if (e.kind == "page") HttpFetcher.FetchResult(
+                    e.code ?: 200, e.finalUrl.orEmpty(), emptyMap(), e.text, e.elapsedMs ?: 0L,
+                ) else null
+                // 回拨 created：保证 metadata().stale == true，旧快照不会被当新鲜数据复用
+                task.entries[e.id] = Entry(e.id, e.kind, e.text, clock() - freshMs - 1, e.fingerprint, key = null, page = page)
+            }
+            tasks[s.id] = task
+        }
+    }
     fun metadata(e: Entry): Map<String, Any> = mapOf("id" to e.id, "kind" to e.kind,
         "totalChars" to e.text.length, "sha256" to digest(e.text), "ageMs" to (clock() - e.created).coerceAtLeast(0),
         "stale" to (clock() - e.created >= freshMs), "url" to (e.page?.finalUrl ?: ""))

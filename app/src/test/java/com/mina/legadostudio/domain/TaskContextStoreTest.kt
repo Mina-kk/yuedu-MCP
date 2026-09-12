@@ -35,6 +35,14 @@ class TaskContextStoreTest {
         repeat(2) { store.fetch(id, "private", "a", true, false) { calls++; page(headers = mapOf("Cache-Control" to "no-store")) } }
         assertEquals(6, calls)
     }
+    @Test fun postRequestsWithReusableFlagCacheLikeGet() = runBlocking {
+        // 新语义：POST 搜索也纳入缓存（reusable 由调用方传入），迭代调试搜索规则不再反复联网
+        val store = TaskContextStore(); val id = store.create(); var calls = 0
+        val first = store.fetch(id, "post", "a", true, false) { calls++; page("first") }
+        val second = store.fetch(id, "post", "a", true, false) { calls++; page("second") }
+        assertEquals(1, calls); assertTrue(first.entry.page != null); assertTrue(second.reused)
+        assertEquals("first", second.entry.text)
+    }
     @Test fun isolatesContextsAndCredentialChanges() = runBlocking {
         val store = TaskContextStore(); val a = store.create(); val b = store.create()
         val e = store.fetch(a, "url", "old", true, false) { page() }.entry
@@ -139,6 +147,6 @@ class TaskContextStoreTest {
         assertEquals(10, item["notesChars"])
         assertEquals("notes-here", item["notesPreview"])
         assertFalse(item.toString().contains("secret-body"))
-        assertEquals(8, store.limits()["maxContexts"])
+        assertEquals(16, store.limits()["maxContexts"])
     }
 }
