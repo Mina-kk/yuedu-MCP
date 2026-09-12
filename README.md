@@ -6,7 +6,7 @@
 - 当前版本：`1.0.122`（versionCode 142）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado
-- 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK；仓库 `apks/` 目录保留最新 APK。自 1.0.120 起改用正式签名，从旧版本升级需先卸载再安装）
+- 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK；仓库 `apks/` 目录保留最新 APK）
 
 ## 界面
 
