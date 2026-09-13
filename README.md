@@ -3,7 +3,7 @@
 本机 **Legado 运行时 + MCP Server**（原「书源工坊」）。App 内不调用任何模型、不保存任何模型密钥。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.0.126`（versionCode 146）
+- 当前版本：`1.0.128`（versionCode 148）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK；仓库 `apks/` 目录保留最新 APK）
@@ -14,12 +14,17 @@ iOS 简约白风格：液态玻璃顶栏/底栏（高斯模糊）、大圆角卡
 
 ## 连接 MCP
 
-1. 打开 App，底栏 **MCP** 页开启服务（默认端口 **58823**）
-2. 外部 MCP 客户端配置：
-   - URL：`http://127.0.0.1:58823/mcp`
-   - 局域网（同一 Wi-Fi）：MCP 页可复制 `http://<局域网IP>:58823/mcp`
-   - Header：`X-Studio-Token: <你的 Token>`（在 App 的 MCP 页可查看/复制）
-3. 调用 `get_app_info`，应返回 `"ai": false`、`"role": "mcp-runtime"` 与语料库信息
+MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查）、**设置**（端口、令牌、书源类型、外观）、**前置条件**（通知、电池策略、端口占用等）。
+
+1. 底栏 **MCP** →「连接」页签开启服务（默认端口 **58823**）
+2. 「接入信息」卡按你的客户端界面形态给出对应填法，每一项都可一键复制：
+   - **服务器链接（所有客户端）**：`http://127.0.0.1:58823/mcp`；客户端不在同一台设备时切「局域网」，使用 `http://<局域网IP>:58823/mcp`
+   - 客户端有 **Token / Bearer Token 输入框** → 只粘贴令牌本身，不要加 `Bearer` 前缀
+   - 客户端只有 **自定义请求头（名称 + 值）两个框** → 名称填 `Authorization`，值填 `Bearer <令牌>`（名称填成 `Bearer` 是常见错误，会 401）
+   - 客户端没有任何鉴权输入 → 在「设置」页关闭访问令牌校验，或换用支持鉴权的客户端
+   - **「配置文件客户端（高级）」折叠卡**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制
+3. 鉴权统一使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
+4. 调用 `get_app_info`，应返回 `"ai": false`、`"role": "mcp-runtime"` 与语料库信息
 
 ### 书源类型开关
 

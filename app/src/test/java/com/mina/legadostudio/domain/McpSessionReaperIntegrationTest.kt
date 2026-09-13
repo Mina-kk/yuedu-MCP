@@ -91,7 +91,7 @@ class McpSessionReaperIntegrationTest {
         header(HttpHeaders.Host, "127.0.0.1:$port")
         header(HttpHeaders.ContentType, ContentType.Application.Json)
         header(HttpHeaders.Accept, "application/json, text/event-stream")
-        header("X-Studio-Token", "secret")
+        header(HttpHeaders.Authorization, "Bearer secret")
         setBody(initialize)
     }
 
@@ -100,7 +100,7 @@ class McpSessionReaperIntegrationTest {
             header(HttpHeaders.Host, "127.0.0.1:$port")
             header(HttpHeaders.ContentType, ContentType.Application.Json)
             header(HttpHeaders.Accept, "application/json, text/event-stream")
-            header("X-Studio-Token", "secret")
+            header(HttpHeaders.Authorization, "Bearer secret")
             header("Mcp-Session-Id", sessionId)
             setBody(listTools)
         }

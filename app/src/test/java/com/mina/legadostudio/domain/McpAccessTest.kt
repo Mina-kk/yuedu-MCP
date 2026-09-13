@@ -8,8 +8,11 @@ class McpAccessTest {
     @Test fun exposesLoopbackFirst() {
         assertEquals(listOf("http://127.0.0.1:1237/mcp"), McpAccess.endpoints(1237))
     }
-    @Test fun tokenHeaderLineIncludesNameAndValue() {
-        assertEquals("X-Studio-Token: secret", McpAccess.tokenHeaderLine("secret"))
+    @Test fun tokenHeaderLineIsStandardBearer() {
+        assertEquals("Authorization: Bearer secret", McpAccess.tokenHeaderLine("secret"))
+    }
+    @Test fun bearerTokenValueHasBearerPrefix() {
+        assertEquals("Bearer secret", McpAccess.bearerTokenValue("secret"))
     }
     @Test fun keepsLoopbackAllowed() {
         val hosts = McpAccess.allowedHosts(listOf(InetAddress.getByName("192.168.1.8")))
@@ -26,5 +29,21 @@ class McpAccessTest {
             assertTrue(host.all { it.isDigit() || it == '.' })
             assertTrue(host.count { it == '.' } == 3)
         }
+    }
+    @Test fun clientConfigJsonEmbedsHeaderWhenTokenRequired() {
+        val json = McpAccess.clientConfigJson("http://127.0.0.1:58823/mcp", "tk-123", true)
+        assertEquals(
+            "{\n  \"mcpServers\": {\n    \"yuedu-MCP\": {\n      \"url\": \"http://127.0.0.1:58823/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer tk-123\"\n      }\n    }\n  }\n}",
+            json,
+        )
+    }
+    @Test fun clientConfigJsonOmitsHeaderWhenNotRequiredOrBlank() {
+        val expected = "{\n  \"mcpServers\": {\n    \"yuedu-MCP\": {\n      \"url\": \"http://127.0.0.1:58823/mcp\"\n    }\n  }\n}"
+        assertEquals(expected, McpAccess.clientConfigJson("http://127.0.0.1:58823/mcp", "tk-123", false))
+        assertEquals(expected, McpAccess.clientConfigJson("http://127.0.0.1:58823/mcp", "", true))
+    }
+    @Test fun clientConfigJsonEscapesQuotesAndBackslashes() {
+        val json = McpAccess.clientConfigJson("http://x/mcp", "a\"b\\c", true)
+        assertTrue(json.contains("\"Authorization\": \"Bearer a\\\"b\\\\c\""))
     }
 }

@@ -16,8 +16,8 @@ android {
         applicationId = "com.mina.legadostudio"
         minSdk = 26
         targetSdk = 36
-        versionCode = 146
-        versionName = "1.0.126"
+        versionCode = 148
+        versionName = "1.0.128"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

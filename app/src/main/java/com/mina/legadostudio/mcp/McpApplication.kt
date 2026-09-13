@@ -31,9 +31,14 @@ fun Application.configureStudioMcp(
         context.response.header(HttpHeaders.CacheControl, "no-store")
         if (context.request.path() == "/health") return@intercept
         val config = configProvider()
-        if (config.tokenRequired && !secureEquals(config.token, context.request.header(McpAccess.TOKEN_HEADER).orEmpty())) {
-            context.respondText("MCP token 无效", status = HttpStatusCode.Unauthorized)
-            finish()
+        if (config.tokenRequired) {
+            // MCP 规范（Streamable HTTP）：只认标准 Authorization: Bearer 头
+            val authorization = context.request.header(HttpHeaders.Authorization).orEmpty()
+            val bearer = if (authorization.startsWith("Bearer ", ignoreCase = true)) authorization.substring(7).trim() else ""
+            if (!secureEquals(config.token, bearer)) {
+                context.respondText("MCP token 无效", status = HttpStatusCode.Unauthorized)
+                finish()
+            }
         }
         val sessionId = context.request.header("Mcp-Session-Id")
         if (sessionId != null && McpSessions.isReaped(sessionId)) {

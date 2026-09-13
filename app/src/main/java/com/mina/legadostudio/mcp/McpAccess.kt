@@ -5,7 +5,7 @@ import java.net.NetworkInterface
 
 object McpAccess {
     const val PATH = "/mcp"
-    const val TOKEN_HEADER = "X-Studio-Token"
+    const val AUTH_HEADER = "Authorization"
 
     fun localAddresses(): List<InetAddress> = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
         .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
@@ -26,5 +26,20 @@ object McpAccess {
     fun lanEndpoints(port: Int): List<String> =
         localAddresses().mapNotNull { it.hostAddress }.map { "http://$it:$port$PATH" }
 
-    fun tokenHeaderLine(token: String) = "$TOKEN_HEADER: $token"
+    // MCP 规范（Streamable HTTP）的鉴权方式是标准 Authorization: Bearer 头。
+    fun bearerTokenValue(token: String) = "Bearer $token"
+
+    fun tokenHeaderLine(token: String) = "$AUTH_HEADER: ${bearerTokenValue(token)}"
+
+    /**
+     * 标准 MCP 客户端配置（mcpServers JSON，Claude / Cherry Studio / Cline 等通用）。
+     * 鉴权使用规范要求的 Authorization: Bearer 头，已内嵌在配置里，用户整段粘贴即可。
+     */
+    fun clientConfigJson(url: String, token: String, tokenRequired: Boolean): String {
+        fun esc(s: String) = s.replace("\\", "\\\\").replace("\"", "\\\"")
+        val headerBlock = if (tokenRequired && token.isNotBlank())
+            ",\n      \"headers\": {\n        \"$AUTH_HEADER\": \"Bearer ${esc(token)}\"\n      }"
+        else ""
+        return "{\n  \"mcpServers\": {\n    \"yuedu-MCP\": {\n      \"url\": \"${esc(url)}\"$headerBlock\n    }\n  }\n}"
+    }
 }
