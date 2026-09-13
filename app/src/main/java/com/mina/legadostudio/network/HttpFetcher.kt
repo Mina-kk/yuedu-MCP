@@ -77,12 +77,12 @@ class HttpFetcher(
                 if (method != "HEAD" && isBinaryContent(response.body.contentType()?.toString(), finalUrl)) {
                     val contentLength = response.body.contentLength().coerceAtLeast(0)
                     response.body.close()
-                    val sourceType = sourceTypeProvider().coerceIn(0, 4)
+                    val sourceType = sourceTypeProvider().coerceIn(-1, 4)
                     val sizeText = if (contentLength > 0) "，大小约 ${contentLength / 1024} KB" else ""
-                    val note = if (sourceType == 0) {
-                        "已按当前书源类型（文本）跳过二进制资源，未下载正文$sizeText；制作音频/图片/文件/视频书源请到 MCP 页切换书源类型"
-                    } else {
-                        "二进制资源（当前书源类型：${RuntimeConfigStore.typeName(sourceType)}）$sizeText，未下载正文；书源规则只需引用该 URL"
+                    val note = when (sourceType) {
+                        0 -> "已按当前书源类型（文本）跳过二进制资源，未下载正文$sizeText；制作音频/图片/文件/视频书源请到 MCP 页切换书源类型，图文混合站点可选「自动」"
+                        -1 -> "二进制资源（当前书源类型：自动）$sizeText，未下载正文；书源规则只需引用该 URL"
+                        else -> "二进制资源（当前书源类型：${RuntimeConfigStore.typeName(sourceType)}）$sizeText，未下载正文；书源规则只需引用该 URL"
                     }
                     logRecorder?.record(HttpLogRecorder.Draft(method, url, finalUrl, response.code, elapsed, requestHeaders, responseHeaders, input.body.orEmpty(), note, redirectChain = redirectChain))
                     return FetchResult(response.code, finalUrl, responseHeaders, "", elapsed, redirectChain, note, contentLength)

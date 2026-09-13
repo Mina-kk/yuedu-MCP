@@ -170,4 +170,40 @@ class EmbeddedLegadoRuntimeTest {
             assertTrue(EmbeddedLegadoRuntime.JS_TEMPLATE.containsMatchIn("prefix{{java.time()}}suffix"))
         }
     }
+
+    @Test fun bareAttrRuleReadsAttributeFromCurrentElement() = runBlocking {
+        // 回归：子规则裸 @href 曾把元素序列化成 HTML 重解析，上下文变成文档根节点导致恒为空
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("<a class='ch' href='/book/1/2'><span class='t'>第一章</span></a><a class='ch' href='/book/1/3'><span class='t'>第二章</span></a>"))
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "ruleToc" to mapOf("chapterList" to "a.ch", "chapterName" to ".t@text", "chapterUrl" to "@href"),
+                "ruleContent" to mapOf("content" to "#content@html"),
+            ))
+            val runtime = EmbeddedLegadoRuntime(HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
+            val report = runtime.debug(source, "++${server.url("book/1")}")
+            val chapters = (report.data as Map<*, *>)["chapters"] as List<*>
+            val first = chapters.first() as Map<*, *>
+            assertEquals("第一章", first["name"])
+            assertEquals(server.url("book/1/2").toString(), first["url"])
+        }
+    }
+
+    @Test fun multiParagraphTextRuleJoinsAllParagraphs() = runBlocking {
+        // 回归：多段正文 @text 曾只取首段，与官方 getString 按 \n 拼接的行为不一致
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("<div id='c'><p>第一段</p><p>第二段</p><p>第三段</p></div>"))
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "ruleToc" to mapOf("chapterList" to "a"),
+                "ruleContent" to mapOf("content" to "#c p@text"),
+            ))
+            val runtime = EmbeddedLegadoRuntime(HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
+            val report = runtime.debug(source, "--${server.url("c1")}")
+            val content = (report.data as Map<*, *>)["content"].toString()
+            assertEquals("第一段\n第二段\n第三段", content)
+        }
+    }
 }

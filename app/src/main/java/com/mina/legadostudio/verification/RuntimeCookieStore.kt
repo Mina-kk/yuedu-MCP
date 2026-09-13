@@ -21,6 +21,16 @@ class RuntimeCookieStore(context: Context) {
         cookie.split(';').map { it.trim() }.filter { it.contains('=') }.forEach { CookieManager.getInstance().setCookie(url, it) }
         CookieManager.getInstance().flush()
     }
+    /** 按 Cookie 名合并进该域已有串，未点名的旧值保留（官方 cookie.setCookie 语义）；整串替换用 set() */
+    fun merge(url: String, cookie: String) {
+        require(cookie.contains('=')) { "Cookie 必须包含 name=value" }
+        val pairs = linkedMapOf<String, String>()
+        fun absorb(raw: String) = raw.split(';').map { it.trim() }.filter { it.contains('=') }
+            .forEach { pairs[it.substringBefore('=').trim()] = it.substringAfter('=').trim() }
+        absorb(headerFor(url).orEmpty())
+        absorb(cookie)
+        set(url, pairs.entries.joinToString("; ") { "${it.key}=${it.value}" })
+    }
     fun clear(url: String) {
         prefs.edit().remove(domain(url)).apply()
         val manager = CookieManager.getInstance()

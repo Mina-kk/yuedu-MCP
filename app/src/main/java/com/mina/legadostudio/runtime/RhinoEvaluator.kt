@@ -40,7 +40,16 @@ class RhinoEvaluator(
             put("result", previous)
             put("baseUrl", baseUrl)
             put("src", previous)
-            bindings.forEach { (key, item) -> put(key, item) }
+            // 官方同名对象：cookie/cache/source。bindings 传入的 source 状态图包成 SourceJsApi，JS 写入回传调试流程
+            put("cookie", CookieJsApi(cookies))
+            put("cache", CacheJsApi())
+            bindings.forEach { (key, item) -> if (key != "source") put(key, item) }
+            @Suppress("UNCHECKED_CAST")
+            put("source", when (val bound = bindings["source"]) {
+                is SourceJsApi -> bound
+                is MutableMap<*, *> -> SourceJsApi(bound as MutableMap<String, String>)
+                else -> SourceJsApi()
+            })
         }
         return RawResult(value, logs, System.currentTimeMillis() - started)
     }

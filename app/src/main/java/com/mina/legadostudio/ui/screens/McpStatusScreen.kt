@@ -224,19 +224,20 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = 
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("书源类型", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "选择本次制作的目标类型，保存书源时自动写入 bookSourceType；文本类型下抓取会自动跳过图片、音视频、安装包等二进制资源，避免不相干内容干扰规则编写。",
+                            "选择本次制作的目标类型，保存书源时自动写入 bookSourceType（「自动」不写入）；文本类型下抓取会提示跳过图片、音视频、安装包等二进制资源。图文漫画等类型不确定的站点选「自动」。",
                             style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant,
                         )
                         StudioSegmentedControl(
-                            options = RuntimeConfigStore.TYPE_NAMES,
-                            selectedIndex = sourceType,
+                            options = listOf("自动") + RuntimeConfigStore.TYPE_NAMES,
+                            selectedIndex = sourceType + 1,
                             onSelect = { index ->
-                                sourceType = index
-                                app.runtimeConfig.bookSourceType = index
+                                sourceType = index - 1
+                                app.runtimeConfig.bookSourceType = index - 1
                             },
                         )
                         Text(
                             when (sourceType) {
+                                -1 -> "自动：不写入 bookSourceType、不干预抓取，适合图文漫画混合等类型不确定的站点"
                                 1 -> "音频：正文规则产出播放地址，抓取到的媒体资源仅保留 URL 引用"
                                 2 -> "图片：正文保留 <img> 标签列表，抓取时不下载图片本体"
                                 3 -> "文件：正文规则产出下载链接，抓取时不下载文件本体"

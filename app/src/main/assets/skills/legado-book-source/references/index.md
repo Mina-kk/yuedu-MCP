@@ -11,7 +11,7 @@
 3. `fetch_page` 抓页存快照，用 `analyze_html` / `eval_js` 在快照上做探针。
 4. 用 `debug_source` 验证当前阶段（JSON 直接传入，不 save）。
 5. 完成后 `save_source` 保存 → `get_source` 回读 → `check_source(refresh=true)` 实时验收。
-6. 不要引导用户打开已删除的「项目列表」。本地书源在底栏「书源」页，可导入至阅读或删除。排查请用 `get_logs` / `get_http_logs` / `get_crash_logs`，不要要求用户导出日志。
+6. 不要引导用户打开已删除的「项目列表」。本地书源在底栏「书源」页，可导入至阅读或删除。排查请用 `get_logs` / `get_http_logs` / `get_crash_logs`；日志页支持一键导出当天 HTTP/操作日志，需要原始报文时让用户点「导出」直接贴出。
 
 MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替应用内调试。旧 `scripts/legado-debug.py` 仅是用户明确同意后的备用入口。
 
@@ -51,6 +51,12 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 - CSS 选择器全集：`knowledge/css选择器规则.txt`
 - 输出格式约束：`knowledge/书源输出模板_严格模式.md`
 - 真实书源写法合集：`knowledge/真实书源模板库.txt`
+- JS 逆向总纲（四阶段方法论、何时止损换通道）：`knowledge/js-reverse-s0-methodology.md`
+- JS 逆向入门 SOP（反爬六分类、定位归因、重放测试、坑清单）：`knowledge/js-reverse-s2-basic.md`
+- JS 逆向进阶（AST 反混淆、反调试对照、补环境、wasm、RPC、TLS 指纹）：`knowledge/js-reverse-s2-advanced.md`
+- 逆向迁移到书源（调试通道、生态判定、过反爬底线、靶场→书源映射）：`knowledge/js-reverse-s2-booksource.md`
+
+目标站出现动态签名/加密参数/动态 Cookie/字体反爬时，先按 `js-reverse-s2-basic.md` 的反爬六分类定位类型，再按对应专题操作；结论用 `eval_js` 验证后写进书源规则。
 
 ## 探针原则
 

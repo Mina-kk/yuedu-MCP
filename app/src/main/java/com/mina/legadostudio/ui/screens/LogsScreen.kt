@@ -1,6 +1,8 @@
 package com.mina.legadostudio.ui.screens
 
+import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -55,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.mina.legadostudio.StudioApplication
 import com.mina.legadostudio.data.db.HttpLogEntity
 import com.mina.legadostudio.diagnostic.CrashItem
+import com.mina.legadostudio.domain.LogExportFormatter
 import com.mina.legadostudio.domain.LogFilterUtils
 import com.mina.legadostudio.ui.theme.GlassCard
 import com.mina.legadostudio.ui.theme.GlassTopBar
@@ -66,6 +69,7 @@ import com.mina.legadostudio.ui.theme.studioChipColors
 import com.mina.legadostudio.ui.theme.studioTopInset
 import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.DateFormat
 import java.util.Date
 
@@ -185,6 +189,23 @@ fun LogsScreen() {
         }
     }
 
+    /** 导出当前日期筛选下的日志为文本并调起系统分享（FileProvider 授权一次读取） */
+    fun exportText(fileName: String, text: String) {
+        runCatching {
+            val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+            val file = File(dir, fileName)
+            file.writeText(text)
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "导出日志"))
+            message = "已导出 $fileName（${text.length} 字符）"
+        }.onFailure { message = "导出失败：${it.message}" }
+    }
+
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(top = 64.dp + studioTopInset())) {
             Row(
@@ -226,6 +247,12 @@ fun LogsScreen() {
                         onDateSelect = { selectedOpDate = it },
                         onOpenPicker = { showDatePickerDialog = true },
                     )
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.End) {
+                        TextButton(
+                            onClick = { exportText("操作日志_$selectedOpDate.txt", LogExportFormatter.operation(filteredOperations, selectedOpDate)) },
+                            enabled = filteredOperations.isNotEmpty(),
+                        ) { Text("导出当天 ${filteredOperations.size} 条") }
+                    }
                 }
                 LogsTab.HTTP -> {
                     LogDateSwitchBar(
@@ -242,7 +269,13 @@ fun LogsScreen() {
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Text("记录 HTTP 事务", style = MaterialTheme.typography.bodyMedium)
-                        Switch(checked = recording, onCheckedChange = { recording = it; app.httpLogs.enabled = it })
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = { exportText("HTTP日志_$selectedHttpDate.txt", LogExportFormatter.http(filteredHttpLogs, selectedHttpDate)) },
+                                enabled = filteredHttpLogs.isNotEmpty(),
+                            ) { Text("导出") }
+                            Switch(checked = recording, onCheckedChange = { recording = it; app.httpLogs.enabled = it })
+                        }
                     }
                 }
                 LogsTab.SNAPSHOT -> Button(

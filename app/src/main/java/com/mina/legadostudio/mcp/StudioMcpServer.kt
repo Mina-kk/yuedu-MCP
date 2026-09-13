@@ -118,8 +118,9 @@ class StudioMcpServer(context: Context) {
         return runCatching {
             val e = contexts.saveResult(id, text, contextFingerprint())
             ok(app.gson.toJson(contexts.metadata(e) + mapOf("contextId" to id, "resultId" to e.id,
-                "preview" to text.take(3000), "nextOffset" to 3000, "hasMore" to true,
-                "hint" to "结果已完整保存，调用 read_result，不要重复执行原工具。片段不一定是有效JSON。")))
+                "preview" to text.take(3000), "previewIsRawString" to true, "resultChars" to text.length,
+                "nextOffset" to 3000, "hasMore" to true,
+                "hint" to "结果已完整保存，调用 read_result，不要重复执行原工具。preview 是原始文本的硬截断片段，不是有效JSON，不要对它做 JSON 解析。")))
         }.getOrElse { inlineFallback() }
     }
 
@@ -244,7 +245,7 @@ class StudioMcpServer(context: Context) {
                 "ui" to listOf("mcp", "sources", "skills", "verification", "logs"),
                 "bookSourceType" to app.runtimeConfig.bookSourceType,
                 "bookSourceTypeName" to com.mina.legadostudio.network.RuntimeConfigStore.typeName(app.runtimeConfig.bookSourceType),
-                "bookSourceTypeHint" to "用户在 MCP 页选择的目标书源类型：0 文本 / 1 音频 / 2 图片 / 3 文件 / 4 视频；save_source 缺省时自动写入该类型，fetch_page 按该类型过滤二进制资源",
+                "bookSourceTypeHint" to "用户在 MCP 页选择的目标书源类型：-1 自动 / 0 文本 / 1 音频 / 2 图片 / 3 文件 / 4 视频；save_source 缺省时自动写入所选类型（自动则不写入，保留 JSON 原样），fetch_page 按类型提示二进制资源",
             )))
         }
         server.tool("app_status", "读取 MCP、权限、省电、局域网和验证会话状态", ToolSchema(properties = buildJsonObject {}, required = emptyList()), toolAnnotations = readOnly) {
@@ -298,8 +299,8 @@ class StudioMcpServer(context: Context) {
                 val newVersion = req.arguments.bool("newVersion") ?: false
                 val report = app.validator.validate(source); require(report.isValid) { "书源验证未通过：${app.gson.toJson(report.issues)}" }
                 val obj = JsonParser.parseString(source).asJsonObject
-                // 缺省时按用户在 MCP 页选择的目标类型写入 bookSourceType(0 文本/1 音频/2 图片/3 文件/4 视频)
-                if (!obj.has("bookSourceType") || obj.get("bookSourceType").isJsonNull) obj.addProperty("bookSourceType", app.runtimeConfig.bookSourceType)
+                // 缺省时按用户在 MCP 页选择的目标类型写入 bookSourceType(0 文本/1 音频/2 图片/3 文件/4 视频)；「自动」时不干预，保留 JSON 原样
+                if (app.runtimeConfig.bookSourceType >= 0 && (!obj.has("bookSourceType") || obj.get("bookSourceType").isJsonNull)) obj.addProperty("bookSourceType", app.runtimeConfig.bookSourceType)
                 val finalSource = app.gson.toJson(obj)
                 val siteUrl = obj.get("bookSourceUrl").asString.trim().trimEnd('/')
                 val now = System.currentTimeMillis()
@@ -382,7 +383,7 @@ class StudioMcpServer(context: Context) {
                 ok(app.gson.toJson(app.runtime.debug(req.arguments.str("source")!!, req.arguments.str("entry")!!, cache)))
             }.getOrElse { verificationAware(it, req.arguments) }
         }
-        server.tool("eval_js", "Legado Rhino执行JS；可传pageId，将完整已存正文注入result/src，免去复制HTML。JS内ajax/connect仍会联网。", schema(mapOf("js" to "JavaScript", "baseUrl" to "基础URL", "pageId" to "可选网页快照ID"), listOf("js")), toolAnnotations = openWrite) { req ->
+        server.tool("eval_js", "Legado Rhino执行JS；可传pageId，将完整已存正文注入result/src，免去复制HTML。已注入官方同名对象：java（ajax/connect/加解密）、cookie（getCookie/getKey/setCookie=合并/replaceCookie=替换/removeCookie）、cache（put/get/delete/putMemory/getFromMemory，进程内有效）、source（put/get/getVariable/setVariable，debug_source时与书源变量互通）。JS内ajax/connect仍会联网。", schema(mapOf("js" to "JavaScript", "baseUrl" to "基础URL", "pageId" to "可选网页快照ID"), listOf("js")), toolAnnotations = openWrite) { req ->
             runCatching {
                 val e = req.arguments.str("pageId")?.let { savedEntry(req.arguments, it) }
                 require(e == null || e.kind == "page") { "需要pageId" }
@@ -425,13 +426,18 @@ class StudioMcpServer(context: Context) {
         server.tool("get_cookies", "读取指定 URL 所属域的 Runtime Cookie", schema(mapOf("url" to "URL"), listOf("url")), toolAnnotations = readOnly) { req ->
             ok(app.cookieStore.headerFor(req.arguments.str("url") ?: return@tool err("url 不能为空")) ?: "（空）")
         }
-        server.tool("set_cookie", "写入指定 URL 所属域的 Runtime/WebView Cookie", schema(mapOf("url" to "URL", "cookie" to "name=value; ..."), listOf("url", "cookie")), toolAnnotations = write) { req ->
-            runCatching { app.cookieStore.set(req.arguments.str("url")!!, req.arguments.str("cookie")!!); ok("Cookie 已写入") }.getOrElse { err(it.message.orEmpty()) }
+        server.tool("set_cookie", "写入指定 URL 所属域的 Runtime/WebView Cookie。默认 merge=true 按 Cookie 名合并，该域其他 Cookie（如登录态）保留；merge=false 整串替换", schema(mapOf("url" to "URL", "cookie" to "name=value; ...", "merge" to "默认 true：按名合并；false=整串替换"), listOf("url", "cookie")), toolAnnotations = write) { req ->
+            runCatching {
+                val url = req.arguments.str("url")!!
+                val cookie = req.arguments.str("cookie")!!
+                if (req.arguments.bool("merge") != false) app.cookieStore.merge(url, cookie) else app.cookieStore.set(url, cookie)
+                ok("Cookie 已写入")
+            }.getOrElse { err(it.message.orEmpty()) }
         }
         server.tool("clear_cookies", "清除指定 URL 所属域的 Runtime/WebView Cookie", schema(mapOf("url" to "URL"), listOf("url")), toolAnnotations = write) { req ->
             app.cookieStore.clear(req.arguments.str("url") ?: return@tool err("url 不能为空")); ok("Cookie 已清除")
         }
-        server.tool("check_source", "按提供的搜索/详情/目录/正文入口批量运行校验；默认复用本任务快照避免重复联网，refresh=true 全程实时（上线验收用）", checkSourceSchema(), toolAnnotations = openWrite) { req ->
+        server.tool("check_source", "按提供的搜索/详情/目录/正文入口批量运行校验；书源含 searchUrl 而未传 searchKey 时会自动用关键词「我」探测搜索链路并在 warnings 标注（搜索页结构常与列表页不同，漏验会让真机搜索零结果）；默认复用本任务快照避免重复联网，refresh=true 全程实时（上线验收用）", checkSourceSchema(), toolAnnotations = openWrite) { req ->
             runCatching {
                 val source = req.arguments.str("source") ?: return@tool err("source 不能为空")
                 val cache = runtimeCache(req.arguments, req.arguments.bool("refresh") == true)
@@ -440,9 +446,18 @@ class StudioMcpServer(context: Context) {
                 req.arguments.str("detailUrl")?.takeIf { it.isNotBlank() }?.let { checks["详情"] = it }
                 req.arguments.str("tocUrl")?.takeIf { it.isNotBlank() }?.let { checks["目录"] = "++$it" }
                 req.arguments.str("contentUrl")?.takeIf { it.isNotBlank() }?.let { checks["正文"] = "--$it" }
+                val warnings = mutableListOf<String>()
+                val hasSearchUrl = runCatching {
+                    JsonParser.parseString(source).asJsonObject.get("searchUrl")?.takeIf { it.isJsonPrimitive }?.asString?.isNotBlank()
+                }.getOrNull() == true
+                if ("搜索" !in checks && hasSearchUrl) {
+                    checks["搜索"] = "我"
+                    warnings += "未传 searchKey：已用关键词「我」自动探测搜索链路；若「搜索」报告显示「列表 0 条」而站点实际有结果，说明 ruleSearch 选择器与搜索结果页结构不匹配（常见错误：直接套用发现/列表页选择器），请 fetch_page 搜索页实测后修正规则并显式传 searchKey 复验"
+                }
                 val results = linkedMapOf<String, Any>()
                 results["validation"] = app.runtime.validate(source)
                 checks.forEach { (name, entry) -> results[name] = runCatching { app.runtime.debug(source, entry, cache) }.fold({ it }, { mapOf("error" to it.message.orEmpty()) }) }
+                if (warnings.isNotEmpty()) results["warnings"] = warnings
                 results["cache"] = if (cache == null) "实时请求" else "本任务快照（最终验收请传 refresh=true）"
                 ok(app.gson.toJson(results))
             }.getOrElse { verificationAware(it, req.arguments) }

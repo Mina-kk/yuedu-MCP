@@ -149,4 +149,57 @@ class TaskContextStoreTest {
         assertFalse(item.toString().contains("secret-body"))
         assertEquals(16, store.limits()["maxContexts"])
     }
+    @Test fun snapshotRestoreKeepsStoreUsable() = runBlocking {
+        // 回归：restoreFromSnapshot 曾在 tasks 初始化之前执行，升级后存量快照让整个存储 NPE
+        val now = 10_000_000L
+        val dir = java.nio.file.Files.createTempDirectory("ctx-snap").toFile()
+        try {
+            val snap = com.mina.legadostudio.mcp.TaskContextSnapshot.TaskSnapshot(
+                id = "restored-1", label = "旧任务", touched = now, notes = "n",
+                entries = listOf(com.mina.legadostudio.mcp.TaskContextSnapshot.EntrySnapshot(
+                    "e1", "page", "body", now, "fp", code = 200, finalUrl = "https://example.org/")),
+            )
+            com.mina.legadostudio.mcp.TaskContextSnapshot.save(dir, listOf(snap))
+            val store = TaskContextStore(clock = { now }, snapshotDir = dir)
+            val listed = store.list()
+            assertEquals(1, listed.size)
+            assertEquals("restored-1", listed.single()["contextId"])
+            val entry = store.get("restored-1", "e1", "fp")
+            assertEquals(true, store.metadata(entry)["stale"])
+            // 恢复后所有写路径必须可用：create / fetch / saveResult / describe / clear
+            val id = store.create("new")
+            val hit = store.fetch(id, "GET/u", "fp", true, false) { page("p") }
+            assertFalse(hit.reused)
+            store.saveResult(id, "big-result", "fp")
+            store.describe(id, "notes")
+            assertEquals(2, store.list().size)
+            assertTrue(store.clear("restored-1"))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+    @Test fun corruptSnapshotFileNeverBreaksStore() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("ctx-snap-bad").toFile()
+        try {
+            java.io.File(dir, "bad.json").writeText("{\"id\":\"x\",\"entries\":null}")
+            java.io.File(dir, "garbage.json").writeText("not json at all")
+            val store = TaskContextStore(snapshotDir = dir)
+            assertTrue(store.list().isEmpty())
+            val id = store.create("ok")
+            store.fetch(id, "GET/u", "fp", true, false) { page() }
+            assertEquals(1, store.list().size)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+    @Test fun crossContextReferenceErrorNamesOwner() = runBlocking {
+        // 回归：引用属于别的上下文时，报错必须指出归属 contextId（AI 据此显式传参，不做跨上下文自动回退）
+        val store = TaskContextStore(); val a = store.create("书源A"); val b = store.create("书源B")
+        val e = store.saveResult(a, "body-a", "fp")
+        val ex = runCatching { store.get(b, e.id, "fp") }.exceptionOrNull()!!
+        assertTrue(ex.message!!.contains(a))
+        assertTrue(ex.message!!.contains("contextId=$a"))
+        assertTrue(runCatching { store.get(b, "missing-entry", "fp") }.exceptionOrNull()!!.message!!.contains("REFERENCE_EXPIRED_OR_UNKNOWN"))
+        assertEquals("body-a", store.get(a, e.id, "fp").text)
+    }
 }

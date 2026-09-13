@@ -3,7 +3,7 @@
 本机 **Legado 运行时 + MCP Server**（原「书源工坊」）。App 内不调用任何模型、不保存任何模型密钥。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.0.122`（versionCode 142）
+- 当前版本：`1.0.126`（versionCode 146）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK；仓库 `apks/` 目录保留最新 APK）
@@ -23,10 +23,10 @@ iOS 简约白风格：液态玻璃顶栏/底栏（高斯模糊）、大圆角卡
 
 ### 书源类型开关
 
-MCP 页可选择目标书源类型：**文本 / 音频 / 图片 / 文件 / 视频**（对应 Legado `bookSourceType` 0–4）。
+MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文件 / 视频**（对应 Legado `bookSourceType` -1、0–4）。
 
-- `save_source` 保存书源时自动写入所选类型；
-- `fetch_page` 按类型过滤二进制内容：文本类型跳过图片/音视频/压缩包等二进制响应（返回 `bodyNote`/`binaryBytes` 说明），非文本类型保留对应媒体内容。
+- `save_source` 保存书源时自动写入所选类型；选「自动」时不写入，保留 JSON 原样；
+- `fetch_page` 按类型过滤二进制内容：文本类型跳过图片/音视频/压缩包等二进制响应（返回 `bodyNote`/`binaryBytes` 说明），非文本类型保留对应媒体内容；「自动」不干预抓取，适合图文漫画混合等类型不确定的站点。
 
 ## MCP 工具一览
 
@@ -50,7 +50,17 @@ match_sources 语料命中（同域/同模板族现成书源）
   → save_source 保存，get_source 回读确认
 ```
 
-`save_source` 默认按书源 URL 覆盖更新同站记录；需要保留历史版本时传 `newVersion=true` 追加。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码等专题知识库。
+`save_source` 默认按书源 URL 覆盖更新同站记录；需要保留历史版本时传 `newVersion=true` 追加。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码、Web JS 逆向（方法论 / 入门 SOP / 进阶对抗 / 书源迁移四篇专题）等知识库。
+
+### eval_js 与书源 JS 环境
+
+`eval_js` 与书源 `<js>` / `{{}}` 段运行在 vendored 官方 Rhino + analyzeRule 引擎上，除 `java`（ajax/connect/加解密）外还注入官方同名对象：`cookie`（`getCookie`/`getKey`/`setCookie`/`replaceCookie`/`removeCookie`）、`cache`（`put`/`get`/`delete`/`putMemory`/`getFromMemory`，进程内有效）、`source`（`put`/`get`/`getVariable`/`setVariable`，`debug_source` 时与书源变量互通）。规则链路全程保留元素对象：CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性；多段落 `@text` 按官方语义 join 全部段落。
+
+`set_cookie` 默认 `merge=true` 按 Cookie 名合并（不会冲掉该域其他 Cookie，如登录态），`merge=false` 为整串替换。
+
+### 验收闭环
+
+`validate_source` 检查联动完整性：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`，缺一直接判非法。`check_source` 在书源含 `searchUrl` 而未传 `searchKey` 时，自动用关键词「我」探测搜索链路并在 `warnings` 标注——搜索结果页结构与列表页常常是两套 DOM，漏验会导致真机搜索零结果；正式验收请显式传 `searchKey` 并配 `refresh=true`。
 
 ### 语料命中（省 token 第一步）
 
@@ -95,6 +105,7 @@ match_sources 语料命中（同域/同模板族现成书源）
 - 操作日志与 HTTP 日志均采用吸顶日期切换栏（一天一页），支持左右按天翻看与弹窗跳选日期；
 - HTTP 记录含时间、状态码与耗时；自动过滤本地回环与私网探测流量，点击进入全屏详情页（请求/响应头、正文、重定向链），详情页内滚动与列表互不影响，系统返回键只关闭详情、回到列表；打开详情时隐藏底部标签栏；
 - HTTP 列表停留在顶部时自动跟随最新记录，翻历史时不被打断；
+- 操作日志与 HTTP 日志支持**按天导出为文本**（经系统分享发给电脑/AI 排查），导出含请求/响应头与正文；
 - 诊断快照只含版本、MCP 状态和前置条件，不含 HTTP 或崩溃正文。
 
 排查请用 MCP：`get_logs` / `get_log` / `get_http_logs` / `get_http_log` / `get_crash_logs` / `get_crash_log` / `get_diagnostic_snapshots` / `get_diagnostic_snapshot`。

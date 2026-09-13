@@ -228,11 +228,12 @@ class EmbeddedLegadoRuntime(
         return "$absolute,$optionText"
     }
 
-    private fun extractElements(content: String, rule: String, baseUrl: String, bindings: Map<String, Any?>): List<String> {
+    private fun extractElements(content: Any, rule: String, baseUrl: String, bindings: Map<String, Any?>): List<Any> {
         val parts = LegadoStringRule.split(rule)
         if (parts.isEmpty()) return emptyList()
         if (parts.size == 1 && parts[0].mode == LegadoStringRule.Mode.Default) {
-            return if (parts[0].rule.isBlank()) emptyList() else engine.elements(content, parts[0].rule)
+            // 保留原始节点：子规则（如裸 @href）必须在元素自身上求值，序列化成 HTML 重解析会把上下文换成文档根节点
+            return if (parts[0].rule.isBlank()) emptyList() else engine.elementList(content, parts[0].rule)
         }
         var current: Any? = content
         for (part in parts) {
@@ -243,11 +244,11 @@ class EmbeddedLegadoRuntime(
                         is String -> current
                         else -> toElementHtml(current).joinToString("")
                     }
-                    if (part.rule.isBlank()) current else engine.elements(html, part.rule)
+                    if (part.rule.isBlank()) current else engine.elementList(html, part.rule)
                 }
             }
         }
-        return toElementHtml(current)
+        return toElementList(current)
     }
 
     private fun toElementHtml(value: Any?): List<String> = when (value) {
@@ -266,23 +267,43 @@ class EmbeddedLegadoRuntime(
         else -> listOf(value.toString())
     }
 
-    private fun extract(content: String, rule: String?, baseUrl: String, bindings: Map<String, Any?> = emptyMap(), unescape: Boolean = true): String? {
+    private fun toElementList(value: Any?): List<Any> = when (value) {
+        null -> emptyList()
+        is org.jsoup.nodes.Element -> listOf(value)
+        is org.jsoup.select.Elements -> value.toList()
+        is org.htmlunit.corejs.javascript.NativeArray -> (0 until value.length.toInt()).flatMap { index ->
+            toElementList(com.script.rhino.RhinoScriptEngine.unwrapReturnValue(value.get(index, value)))
+        }
+        is Iterable<*> -> value.filterNotNull()
+        is Array<*> -> value.filterNotNull()
+        else -> listOf(value)
+    }
+
+    private fun asText(value: Any): String = when (value) {
+        is String -> value
+        is org.jsoup.nodes.Element -> value.outerHtml()
+        else -> value.toString()
+    }
+
+    private fun extract(content: Any, rule: String?, baseUrl: String, bindings: Map<String, Any?> = emptyMap(), unescape: Boolean = true): String? {
         if (rule.isNullOrBlank()) return null
-        var result: String? = content
+        var result: Any? = content
         for (part in LegadoStringRule.split(rule)) {
             if (result == null) continue
             if (part.rule.isNotBlank() || part.replaceRegex.isEmpty()) {
                 result = when (part.mode) {
-                    LegadoStringRule.Mode.Js -> rhino.evaluate(part.rule, baseUrl, result, bindings).value
-                    LegadoStringRule.Mode.Default -> if (part.rule.isBlank()) result else engine.extract(result, part.rule).first
+                    LegadoStringRule.Mode.Js -> rhino.evaluate(part.rule, baseUrl, asText(result), bindings).value
+                    // 与官方 getString 一致：多命中按 \n 拼接，不能只取首个（多段正文 @text 会丢后续段落）
+                    LegadoStringRule.Mode.Default -> if (part.rule.isBlank()) result else engine.extract(result, part.rule).values.takeIf { it.isNotEmpty() }?.joinToString("\n")
                 }
             }
             if (result != null && part.replaceRegex.isNotEmpty()) {
-                result = LegadoStringRule.replace(result, part)
+                result = LegadoStringRule.replace(asText(result), part)
             }
         }
         if (result == null) return null
-        return if (unescape) LegadoStringRule.unescapeHtml(result) else result
+        val text = asText(result)
+        return if (unescape) LegadoStringRule.unescapeHtml(text) else text
     }
 
     private fun sourceHeaders(root: JsonObject): Map<String, String> {

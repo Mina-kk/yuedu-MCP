@@ -35,6 +35,13 @@ class BookSourceValidator {
                 issues += Issue("ruleSearch.bookList", "启用搜索时必须配置书籍列表规则")
             }
         }
+        val exploreUrl = text(obj, "exploreUrl")
+        if (!exploreUrl.isNullOrBlank()) {
+            val ruleExplore = objectOrNull(obj, "ruleExplore")
+            if (ruleExplore == null || text(ruleExplore, "bookList").isNullOrBlank()) {
+                issues += Issue("ruleExplore.bookList", "启用发现时必须配置书籍列表规则")
+            }
+        }
 
         val content = objectOrNull(obj, "ruleContent")
         if (content == null || text(content, "content").isNullOrBlank()) {

@@ -26,12 +26,13 @@ class TaskContextStore(
     data class Hit(val entry: Entry, val reused: Boolean)
     private data class Task(val id: String, val label: String, var touched: Long,
         var notes: String = "", val entries: LinkedHashMap<String, Entry> = linkedMapOf())
-    init {
-        require(maxEntryChars > 0 && maxEntryChars <= maxChars && maxContexts > 0)
-        restoreFromSnapshot()
-    }
     private val mutex = Mutex()
     private val tasks = linkedMapOf<String, Task>()
+    init {
+        require(maxEntryChars > 0 && maxEntryChars <= maxChars && maxContexts > 0)
+        // 必须排在 tasks 声明之后：恢复快照会写 tasks，初始化顺序错误会在升级后把整个存储打成 NPE
+        restoreFromSnapshot()
+    }
 
     suspend fun create(label: String = ""): String = mutex.withLock {
         require(label.length <= 120) { "label 最多 120 字符" }
@@ -88,7 +89,11 @@ class TaskContextStore(
         e
     }
     suspend fun get(id: String, entryId: String, fingerprint: String): Entry = mutex.withLock {
-        val entry = task(id).entries[entryId] ?: error("REFERENCE_EXPIRED_OR_UNKNOWN：引用已清理或不属于此上下文")
+        val entry = task(id).entries[entryId] ?: run {
+            val owner = tasks.entries.firstOrNull { it.value.entries.containsKey(entryId) }?.key
+            error(if (owner != null) "REFERENCE_BELONGS_TO_OTHER_CONTEXT：引用 $entryId 属于上下文 $owner，请显式传入 contextId=$owner（并行任务之间不自动跨读，避免串数据）"
+                else "REFERENCE_EXPIRED_OR_UNKNOWN：引用已清理或不属于此上下文")
+        }
         require(entry.fingerprint == fingerprint) { "AUTH_CONTEXT_CHANGED：登录或运行配置已变化，请重新抓取" }
         entry
     }
@@ -149,15 +154,18 @@ class TaskContextStore(
         val restored = runCatching { TaskContextSnapshot.load(dir) }.getOrDefault(emptyList())
             .sortedByDescending { it.touched }.take(maxContexts)
         restored.forEach { s ->
-            val task = Task(s.id, s.label, s.touched, s.notes)
-            s.entries.forEach { e ->
-                val page = if (e.kind == "page") HttpFetcher.FetchResult(
-                    e.code ?: 200, e.finalUrl.orEmpty(), emptyMap(), e.text, e.elapsedMs ?: 0L,
-                ) else null
-                // 回拨 created：保证 metadata().stale == true，旧快照不会被当新鲜数据复用
-                task.entries[e.id] = Entry(e.id, e.kind, e.text, clock() - freshMs - 1, e.fingerprint, key = null, page = page)
+            // Gson 可产生字段为 null 的对象（坏文件/版本差异）：单个坏快照不许拖垮整个存储
+            runCatching {
+                val task = Task(s.id, s.label, s.touched, s.notes)
+                s.entries.orEmpty().forEach { e ->
+                    val page = if (e.kind == "page") HttpFetcher.FetchResult(
+                        e.code ?: 200, e.finalUrl.orEmpty(), emptyMap(), e.text, e.elapsedMs ?: 0L,
+                    ) else null
+                    // 回拨 created：保证 metadata().stale == true，旧快照不会被当新鲜数据复用
+                    task.entries[e.id] = Entry(e.id, e.kind, e.text, clock() - freshMs - 1, e.fingerprint, key = null, page = page)
+                }
+                tasks[s.id] = task
             }
-            tasks[s.id] = task
         }
     }
     fun metadata(e: Entry): Map<String, Any> = mapOf("id" to e.id, "kind" to e.kind,
