@@ -36,6 +36,9 @@ class VerificationCoordinator(
         val value = VerificationSessionEntity(java.util.UUID.randomUUID().toString(), jobId, domain, url, purpose, "WAITING", "", now, now)
         dao.saveVerificationSession(value)
         notifyVerification(value)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            VerificationOverlayManager.showVerificationAlert(context, domain, value.id, purpose)
+        }
         return value
     }
 
@@ -52,6 +55,9 @@ class VerificationCoordinator(
         val completed = old.copy(status = "COMPLETED", finalUrl = finalUrl, updatedAt = System.currentTimeMillis()).also { dao.saveVerificationSession(it) }
         webState.clear(id)
         (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(notificationId(id))
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            VerificationOverlayManager.hideVerificationAlert(id)
+        }
         // 部分 CF/JS 挑战的 cookie 在页面通过后才异步下发，延迟二次采集合并
         CoroutineScope(Dispatchers.IO).launch {
             delay(1_000)
@@ -85,6 +91,9 @@ class VerificationCoordinator(
     suspend fun close(id: String) {
         webState.clear(id)
         (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(notificationId(id))
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            VerificationOverlayManager.hideVerificationAlert(id)
+        }
         dao.deleteVerificationSession(id)
     }
 

@@ -27,6 +27,7 @@ class DeviceReadiness(private val context: Context) {
         val notificationsEnabled: Boolean,
         val mcpChannelEnabled: Boolean,
         val batteryUnrestricted: Boolean,
+        val overlayPermission: Boolean,
         val localAddresses: List<String>,
         val portAvailable: Boolean,
         val manufacturer: String,
@@ -37,8 +38,9 @@ class DeviceReadiness(private val context: Context) {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         fun channelEnabled(id: String) = notificationManager.getNotificationChannel(id)?.importance?.let { it != NotificationManager.IMPORTANCE_NONE } ?: true
         val battery = (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(context.packageName)
+        val overlay = Settings.canDrawOverlays(context)
         val addresses = McpAccess.localAddresses().mapNotNull { it.hostAddress }
-        return State(permission, NotificationManagerCompat.from(context).areNotificationsEnabled(), channelEnabled("studio_mcp"), battery, addresses, serviceRunning || canBind(port), Build.MANUFACTURER.orEmpty())
+        return State(permission, NotificationManagerCompat.from(context).areNotificationsEnabled(), channelEnabled("studio_mcp"), battery, overlay, addresses, serviceRunning || canBind(port), Build.MANUFACTURER.orEmpty())
     }
 
     suspend fun checkMcpHealth(port: Int): Boolean = withContext(Dispatchers.IO) {
@@ -55,6 +57,7 @@ class DeviceReadiness(private val context: Context) {
 
     fun openNotificationSettings() = launch(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
     fun openNotificationChannel(channelId: String) = launch(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName).putExtra(Settings.EXTRA_CHANNEL_ID, channelId))
+    fun openOverlaySettings() = launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
 
     fun requestBatteryUnrestricted() {
         val manufacturer = Build.MANUFACTURER.orEmpty()

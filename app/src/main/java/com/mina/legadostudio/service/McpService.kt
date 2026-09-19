@@ -21,6 +21,7 @@ import com.mina.legadostudio.mcp.McpStats
 import com.mina.legadostudio.mcp.StudioLog
 import com.mina.legadostudio.mcp.StudioMcpServer
 import com.mina.legadostudio.mcp.configureStudioMcp
+import com.mina.legadostudio.verification.VerificationOverlayManager
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
@@ -37,6 +38,7 @@ class McpService : Service() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, notification("MCP 服务启动中", "正在绑定本机回环 Endpoint"))
         McpStats.setListener(::scheduleNotificationUpdate)
+        VerificationOverlayManager.refresh(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -51,6 +53,7 @@ class McpService : Service() {
 
     override fun onDestroy() {
         McpStats.setListener(null)
+        VerificationOverlayManager.hideAll()
         // 关停引擎丢到后台线程，避免主线程被阻塞
         val old = engine
         engine = null
