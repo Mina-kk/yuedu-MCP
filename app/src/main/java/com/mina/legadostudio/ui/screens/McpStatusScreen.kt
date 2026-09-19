@@ -60,6 +60,8 @@ import com.mina.legadostudio.mcp.McpAccess
 import com.mina.legadostudio.mcp.McpConfigStore
 import com.mina.legadostudio.network.RuntimeConfigStore
 import com.mina.legadostudio.service.McpService
+import com.mina.legadostudio.verification.OverlayPrefs
+import com.mina.legadostudio.verification.VerificationOverlayManager
 import com.mina.legadostudio.ui.theme.GlassCard
 import com.mina.legadostudio.ui.theme.GlassTopBar
 import com.mina.legadostudio.ui.theme.LocalStudioHaze
@@ -369,6 +371,37 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = 
                             }
                         }
                         item {
+                            val cs = MaterialTheme.colorScheme
+                            var ballEnabled by remember { mutableStateOf(OverlayPrefs.isEnabled(context)) }
+                            GlassCard {
+                                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text("悬浮球（保活与验证提醒）", style = MaterialTheme.typography.titleMedium)
+                                            Text(
+                                                if (!readiness.overlayPermission) "先在「前置条件」页开启悬浮窗权限"
+                                                else if (!ballEnabled) "开启后屏幕边缘常驻圆形悬浮球，有验证时变色提醒"
+                                                else "已开启：悬浮球常驻；有验证时点击直达验证中心",
+                                                style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant,
+                                            )
+                                        }
+                                        Switch(checked = ballEnabled && readiness.overlayPermission, onCheckedChange = { checked ->
+                                            if (checked && !readiness.overlayPermission) {
+                                                DeviceReadiness(context).openOverlaySettings()
+                                            } else {
+                                                ballEnabled = checked
+                                                OverlayPrefs.setEnabled(context, checked)
+                                                VerificationOverlayManager.refresh(context)
+                                            }
+                                        })
+                                    }
+                                    if (!readiness.overlayPermission) {
+                                        OutlinedButton(onClick = { DeviceReadiness(context).openOverlaySettings() }, modifier = Modifier.fillMaxWidth()) { Text("去开启悬浮窗权限") }
+                                    }
+                                }
+                            }
+                        }
+                        item {
                             GlassCard {
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Text("外观", style = MaterialTheme.typography.titleMedium)
@@ -386,6 +419,9 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = 
                         item { ReadinessCard("通知权限", readiness.notificationPermission && readiness.notificationsEnabled, "用于常驻展示 MCP 连接状态", Icons.Outlined.Notifications) {
                             if (Build.VERSION.SDK_INT >= 33 && !readiness.notificationPermission) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                             else DeviceReadiness(context).openNotificationSettings()
+                        } }
+                        item { ReadinessCard("悬浮窗权限", readiness.overlayPermission, "开启后设置页可启用常驻悬浮球（保活与验证提醒）", Icons.Outlined.CheckCircle) {
+                            DeviceReadiness(context).openOverlaySettings()
                         } }
                         item { ReadinessCard("MCP 通知渠道", readiness.mcpChannelEnabled, "通知栏常驻展示 Endpoint 与运行状态", Icons.Outlined.Notifications) { DeviceReadiness(context).openNotificationChannel("studio_mcp") } }
                         item { ReadinessCard("电池策略：无限制", readiness.batteryUnrestricted, "避免后台 MCP 进程被系统冻结", Icons.Outlined.BatterySaver) { DeviceReadiness(context).requestBatteryUnrestricted() } }

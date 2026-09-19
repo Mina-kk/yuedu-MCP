@@ -27,6 +27,7 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 | 发现分类与布局 | `references/discovery.md` |
 | 漫画正文与图片 | `references/comic.md`, `references/basics.md` |
 | 多线路、多类型、跨页状态 | `references/patterns.md`, `references/js-api.md` |
+| JS 基础语法、排序过滤与常用 API | `references/js-tutorial.md`, `references/js-api.md` |
 | 订阅源/RSS | `references/basics.md`, `references/js-api.md` |
 
 ## 按失败现象读取
@@ -38,7 +39,8 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 | 搜索无结果、乱码、分页或 URL 参数异常 | `references/basics.md`, `references/troubleshoot.md` |
 | 浏览器有内容但普通请求拿不到 | `references/troubleshoot.md`, `references/webjs.md` |
 | 403、验证盾、跳转、UA、Cookie | `references/verification.md`, `references/troubleshoot.md` |
-| JS 报错、Rhino 兼容、java.* 用法 | `references/basics.md`, `references/js-api.md` |
+| JS 报错、Rhino 兼容、java.* 用法 | `references/basics.md`, `references/js-api.md`, `references/js-tutorial.md` |
+| 目录倒序、章节乱序、过滤广告章节 | `references/js-tutorial.md` |
 | 发现页 JSON、分类和按钮布局 | `references/discovery.md` |
 | 漫画图片不显示、403、懒加载或解密 | `references/comic.md`, `references/troubleshoot.md` |
 
@@ -51,6 +53,7 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 - CSS 选择器全集：`knowledge/css选择器规则.txt`
 - 输出格式约束：`knowledge/书源输出模板_严格模式.md`
 - 真实书源写法合集：`knowledge/真实书源模板库.txt`
+- 书源 JS 入门教程（写法位置/内置变量/三板斧/API表/文件/字体/调试/常见坑）：`knowledge/js-beginner-tutorial.md`
 - JS 逆向总纲（四阶段方法论、何时止损换通道）：`knowledge/js-reverse-s0-methodology.md`
 - JS 逆向入门 SOP（反爬六分类、定位归因、重放测试、坑清单）：`knowledge/js-reverse-s2-basic.md`
 - JS 逆向进阶（AST 反混淆、反调试对照、补环境、wasm、RPC、TLS 指纹）：`knowledge/js-reverse-s2-advanced.md`
