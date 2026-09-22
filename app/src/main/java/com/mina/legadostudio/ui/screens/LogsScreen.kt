@@ -57,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.mina.legadostudio.StudioApplication
 import com.mina.legadostudio.data.db.HttpLogEntity
 import com.mina.legadostudio.diagnostic.CrashItem
+import com.mina.legadostudio.domain.LogDeletePlan
 import com.mina.legadostudio.domain.LogExportFormatter
 import com.mina.legadostudio.domain.LogFilterUtils
 import com.mina.legadostudio.ui.theme.GlassCard
@@ -159,11 +160,23 @@ fun LogsScreen() {
         }
     }
 
-    val ids = when (tab) {
-        LogsTab.OPERATION -> filteredOperations.map { it.id.toString() }
-        LogsTab.HTTP -> filteredHttpLogs.map { it.id.toString() }
-        LogsTab.CRASH -> crashes.map { it.name }
-        LogsTab.SNAPSHOT -> snapshots.map { it.id }
+    // 当前 Tab + 当前日期筛选下的可见 id：勾选与删除的唯一合法范围。
+    // 用底层状态做 remember 键，内容不变时实例保持稳定，避免每帧重组把 LaunchedEffect 反复重启。
+    val visibleIds = remember(tab, operations, selectedOpDate, httpLogs, selectedHttpDate, crashes, snapshots) {
+        when (tab) {
+            LogsTab.OPERATION -> filteredOperations.map { it.id.toString() }
+            LogsTab.HTTP -> filteredHttpLogs.map { it.id.toString() }
+            LogsTab.CRASH -> crashes.map { it.name }
+            LogsTab.SNAPSHOT -> snapshots.map { it.id }
+        }
+    }
+    val visibleIdSet = remember(visibleIds) { visibleIds.toSet() }
+
+    // 选中集合始终收敛到当前可见视图：切 Tab / 切日期 / 删除后列表变化时，
+    // 视图外的陈旧选中项自动脱落，杜绝跨视图误删，也杜绝非法 id 进入删除通道
+    LaunchedEffect(visibleIdSet) {
+        val trimmed = selected.intersect(visibleIdSet)
+        if (trimmed != selected) selected = trimmed
     }
 
     fun toggle(id: String, checked: Boolean) {
@@ -171,20 +184,39 @@ fun LogsScreen() {
     }
 
     fun deleteSelected() {
+        // 点击即快照：选中集合与可见列表都以点击瞬间的值为准，协程内不再读可变 state
+        val chosen = selected
+        val visible = visibleIds
+        val currentTab = tab
+        // 先复位 UI 态再做删除：对话框关闭、勾选清空，删除过程中列表变化也不会串味
+        pendingDelete = false
+        selected = emptySet()
+        expanded = null
         scope.launch {
             runCatching {
-                when (tab) {
-                    LogsTab.OPERATION -> dao.deleteOperationLogs(selected.map { it.toLong() })
-                    LogsTab.HTTP -> dao.deleteHttpLogs(selected.map { it.toLong() })
+                var removed = 0
+                when (currentTab) {
+                    LogsTab.OPERATION, LogsTab.HTTP -> {
+                        // 只删当前视图可见项，非数字/陈旧选中一律剔除；按 MAX_BATCH 切批远离 SQLite 变量上限
+                        LogDeletePlan.chunk(LogDeletePlan.resolveLogIds(chosen, visible)).forEach { batch ->
+                            removed += if (currentTab == LogsTab.OPERATION) {
+                                dao.deleteOperationLogs(batch)
+                            } else {
+                                dao.deleteHttpLogs(batch)
+                            }
+                        }
+                    }
                     LogsTab.CRASH -> {
-                        app.crashLogs.delete(selected)
+                        removed = app.crashLogs.delete(LogDeletePlan.resolveNames(chosen, visible))
                         crashes = app.crashLogs.list()
                     }
-                    LogsTab.SNAPSHOT -> app.snapshots.delete(selected.toList())
+                    LogsTab.SNAPSHOT -> {
+                        LogDeletePlan.chunkNames(LogDeletePlan.resolveNames(chosen, visible)).forEach { batch ->
+                            removed += app.snapshots.delete(batch)
+                        }
+                    }
                 }
-                message = "已删除 ${selected.size} 条记录"
-                selected = emptySet()
-                expanded = null
+                message = if (removed > 0) "已删除 $removed 条记录" else "没有可删除的记录"
             }.onFailure { message = it.message.orEmpty() }
         }
     }
@@ -338,8 +370,8 @@ fun LogsScreen() {
 
         GlassTopBar("日志", actions = {
             TextButton(onClick = {
-                selected = if (selected.size == ids.size) emptySet() else ids.toSet()
-            }, enabled = ids.isNotEmpty()) { Text(if (selected.size == ids.size && ids.isNotEmpty()) "取消全选" else "全选") }
+                selected = if (selected.size == visibleIds.size) emptySet() else visibleIds.toSet()
+            }, enabled = visibleIds.isNotEmpty()) { Text(if (selected.size == visibleIds.size && visibleIds.isNotEmpty()) "取消全选" else "全选") }
             TextButton(onClick = { pendingDelete = true }, enabled = selected.isNotEmpty()) { Text("删除") }
         }, modifier = Modifier.align(Alignment.TopCenter))
     }

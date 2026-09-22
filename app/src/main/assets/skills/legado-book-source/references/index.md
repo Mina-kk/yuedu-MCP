@@ -20,7 +20,11 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 | 当前阶段 | 必读文件 |
 |---|---|
 | 写规则之前 | `references/corpus.md`（语料命中） |
+| 第三方搜索（rrssk）/ 主站搜索框跳外站 | 知识库 `第三方搜索逆向实战-rrssk.md` 第 0 节模板铁律 + 第 8 节换站复用清单（一律以书友社成品为骨架起步，禁止从零试错） |
 | 初始化、基础字段、详情、搜索、目录、正文 | `references/basics.md` |
+| 正文多页合并 / 翻页 / 净化验收 | `references/content-rules.md` |
+| 单站深案：番茄小说（官方接口/AES/字体混淆/插图） | `references/fanqie.md` |
+| 英文/国际站书源（查重 → royalroad 底本 → 适配仓反推 → 活页验收） | `references/english-sites.md` |
 | 请求失败、403、验证页、动态页面 | `references/verification.md`, `references/troubleshoot.md` |
 | WebView、webJs、调用网页函数 | `references/webjs.md`, `references/troubleshoot.md` |
 | 登录、按钮、回调、变量持久化 | `references/login.md`, `references/patterns.md` |
@@ -36,7 +40,10 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 |---|---|
 | 返回 verification_required / webview_mode_enabled | `references/verification.md` |
 | 选择器无结果、字段为空或错位 | `references/basics.md` |
+| 正文多页漏内容、翻页串章、净化后字数变 0 | `references/content-rules.md` |
+| 正文插图丢失、正文出现 CSS 文本、字体乱码（番茄等站点） | `references/content-rules.md`, `references/fanqie.md` |
 | 搜索无结果、乱码、分页或 URL 参数异常 | `references/basics.md`, `references/troubleshoot.md` |
+| 搜索走外站（rrssk）、signJs 签名、`__snc` 403、q 绑定会话 | 知识库 `第三方搜索逆向实战-rrssk.md`（模板铁律 + 关键坑 + 换站清单） |
 | 浏览器有内容但普通请求拿不到 | `references/troubleshoot.md`, `references/webjs.md` |
 | 403、验证盾、跳转、UA、Cookie | `references/verification.md`, `references/troubleshoot.md` |
 | JS 报错、Rhino 兼容、java.* 用法 | `references/basics.md`, `references/js-api.md`, `references/js-tutorial.md` |
@@ -58,6 +65,7 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 - JS 逆向入门 SOP（反爬六分类、定位归因、重放测试、坑清单）：`knowledge/js-reverse-s2-basic.md`
 - JS 逆向进阶（AST 反混淆、反调试对照、补环境、wasm、RPC、TLS 指纹）：`knowledge/js-reverse-s2-advanced.md`
 - 逆向迁移到书源（调试通道、生态判定、过反爬底线、靶场→书源映射）：`knowledge/js-reverse-s2-booksource.md`
+- 官方规则教程蒸馏（字段地图 / 搜索地址 / 调试方法 / 列表规则三语法，规则语义争议的最高准则）：`knowledge/legado-rules-map.md`
 
 目标站出现动态签名/加密参数/动态 Cookie/字体反爬时，先按 `js-reverse-s2-basic.md` 的反爬六分类定位类型，再按对应专题操作；结论用 `eval_js` 验证后写进书源规则。
 

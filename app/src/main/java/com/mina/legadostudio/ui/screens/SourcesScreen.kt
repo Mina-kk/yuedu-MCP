@@ -3,6 +3,7 @@ package com.mina.legadostudio.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -21,12 +23,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,12 +48,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import com.mina.legadostudio.StudioApplication
 import com.mina.legadostudio.data.db.ProjectEntity
 import com.mina.legadostudio.domain.SourceCatalog
 import com.mina.legadostudio.domain.SourceGroup
 import com.mina.legadostudio.export.ReaderCatalog
+import com.mina.legadostudio.export.SourceImportPayload
 import com.mina.legadostudio.ui.theme.GlassCard
 import com.mina.legadostudio.ui.theme.GlassTopBar
 import com.mina.legadostudio.ui.theme.LocalStudioFullscreen
@@ -57,10 +64,13 @@ import com.mina.legadostudio.ui.theme.LocalStudioHaze
 import com.mina.legadostudio.ui.theme.studioBottomInset
 import com.mina.legadostudio.ui.theme.studioTopInset
 import dev.chrisbanes.haze.hazeSource
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.DateFormat
 import java.util.Date
 
@@ -89,9 +99,32 @@ fun SourcesScreen() {
         toastNotice(context, message)
     }
 
+    /** 分享书源 JSON：统一包成 JSON 数组（阅读导入只认数组），写入 cacheDir/exports 后经 FileProvider 授权调起系统分享面板（QQ/微信等可直接收发） */
+    fun shareSource(project: ProjectEntity) {
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val payload = SourceImportPayload.arrayJson(project.sourceJson)
+                    val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+                    val file = File(dir, "${exportFileName(project)}.json")
+                    file.writeText(payload, Charsets.UTF_8)
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/json"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_TITLE, project.name.ifBlank { project.id })
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "分享书源 JSON"))
+                }
+            }.onSuccess { show("已生成「${project.name.ifBlank { project.id }}」JSON，选择应用分享") }
+                .onFailure { show("分享失败：${it.message.orEmpty()}") }
+        }
+    }
+
     fun copySource(project: ProjectEntity) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        val clip = ClipData.newPlainText("bookSource", project.sourceJson)
+        val clip = ClipData.newPlainText("bookSource", SourceImportPayload.arrayJson(project.sourceJson))
         clipboard?.setPrimaryClip(clip)
         notice = "已复制「${project.name.ifBlank { project.id }}」书源"
     }
@@ -132,6 +165,7 @@ fun SourcesScreen() {
                     onDetail = { viewingProject = it },
                     onCopy = ::copySource,
                     onImport = { importSource(it.sourceJson) },
+                    onShare = ::shareSource,
                     onDelete = { pendingDelete = it },
                 )
             }
@@ -178,6 +212,7 @@ fun SourcesScreen() {
             onBack = { viewingProject = null },
             onCopy = ::copySource,
             onImport = { importSource(it.sourceJson) },
+            onShare = ::shareSource,
         )
     }
 }
@@ -190,6 +225,7 @@ private fun DomainSourceGroup(
     onDetail: (ProjectEntity) -> Unit,
     onCopy: (ProjectEntity) -> Unit,
     onImport: (ProjectEntity) -> Unit,
+    onShare: (ProjectEntity) -> Unit,
     onDelete: (ProjectEntity) -> Unit,
 ) {
     GlassCard {
@@ -206,11 +242,6 @@ private fun DomainSourceGroup(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(
-                        group.latest.name.ifBlank { "未命名书源" },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
                 Icon(
                     if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
@@ -220,12 +251,14 @@ private fun DomainSourceGroup(
             AnimatedVisibility(visible = expanded) {
                 Column {
                     HorizontalDivider()
-                    group.items.forEach { project ->
+                    group.items.forEachIndexed { index, project ->
+                        if (index > 0) HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                         SourceVersionRow(
                             project = project,
                             onDetail = onDetail,
                             onCopy = onCopy,
                             onImport = onImport,
+                            onShare = onShare,
                             onDelete = onDelete,
                         )
                     }
@@ -241,6 +274,7 @@ private fun SourceVersionRow(
     onDetail: (ProjectEntity) -> Unit,
     onCopy: (ProjectEntity) -> Unit,
     onImport: (ProjectEntity) -> Unit,
+    onShare: (ProjectEntity) -> Unit,
     onDelete: (ProjectEntity) -> Unit,
 ) {
     var copied by remember { mutableStateOf(false) }
@@ -258,24 +292,55 @@ private fun SourceVersionRow(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(project.name.ifBlank { "未命名书源" }, fontWeight = FontWeight.Medium)
-        Text(project.siteUrl.ifBlank { project.id }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(formatTime(project.updatedAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(project.name.ifBlank { "未命名书源" }, fontWeight = FontWeight.Medium)
+                Text(project.siteUrl.ifBlank { project.id }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(formatTime(project.updatedAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = { onDelete(project) }) {
+                Icon(
+                    Icons.Outlined.Delete,
+                    contentDescription = "删除",
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
         Row(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = { onDetail(project) }) { Text("详情") }
-            TextButton(onClick = {
-                onCopy(project)
-                copied = true
-            }) {
-                Text(if (copied) "已复制" else "复制源")
+            TextButton(
+                onClick = { onDetail(project) },
+                modifier = Modifier.weight(1f).height(36.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+            ) {
+                Text("详情", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
-            TextButton(onClick = { onImport(project) }) { Text("导入至阅读") }
-            TextButton(onClick = { onDelete(project) }) {
-                Text("删除", color = MaterialTheme.colorScheme.error)
+            TextButton(
+                onClick = {
+                    onCopy(project)
+                    copied = true
+                },
+                modifier = Modifier.weight(1f).height(36.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+            ) {
+                Text(if (copied) "已复制" else "复制源", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
+            TextButton(
+                onClick = { onImport(project) },
+                modifier = Modifier.weight(1f).height(36.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+            ) {
+                Text("导入至阅读", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
+            TextButton(
+                onClick = { onShare(project) },
+                modifier = Modifier.weight(1f).height(36.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+            ) {
+                Text("分享JSON", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -290,6 +355,7 @@ private fun SourceDetailView(
     onBack: () -> Unit,
     onCopy: (ProjectEntity) -> Unit,
     onImport: (ProjectEntity) -> Unit,
+    onShare: (ProjectEntity) -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val prettyJson = remember(project.sourceJson) { formatJson(project.sourceJson) }
@@ -330,21 +396,31 @@ private fun SourceDetailView(
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Button(
                         onClick = {
                             onCopy(project)
                             copied = true
                         },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).height(44.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     ) {
-                        Text(if (copied) "已复制" else "复制源")
+                        Text(if (copied) "已复制" else "复制源", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                     }
                     Button(
                         onClick = { onImport(project) },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).height(44.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     ) {
-                        Text("导入至阅读")
+                        Text("导入至阅读", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                    }
+                    Button(
+                        onClick = { onShare(project) },
+                        modifier = Modifier.weight(1f).height(44.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text("分享JSON", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                     }
                 }
 
@@ -375,6 +451,13 @@ private fun formatJson(json: String): String {
             json
         }
     }.getOrDefault(json)
+}
+
+/** 分享用文件名：优先书源名，剥离文件系统非法字符，过长截断；空名退化为 id */
+private fun exportFileName(project: ProjectEntity): String {
+    val raw = project.name.ifBlank { project.id }.ifBlank { "booksource" }
+    val safe = raw.replace(Regex("[/\\\\:*?\"<>|\\x00-\\x1f]"), "_").trim().trim('.').take(64)
+    return safe.ifBlank { "booksource" }
 }
 
 private fun formatTime(value: Long): String = DateFormat.getDateTimeInstance().format(Date(value))

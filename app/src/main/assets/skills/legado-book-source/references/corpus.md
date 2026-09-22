@@ -1,6 +1,6 @@
-# 语料库：4256 书源特征索引
+# 语料库：26861 书源特征索引
 
-内置语料库由 4256 个现成书源去重而成，按内容规则签名聚成 **696 个模板族**；同族 = 同 CMS / 同模板结构，规则骨架基本一致，可参考代表样例改写。
+内置语料库由 26861 个现成书源去重而成，按内容规则签名聚成 **1838 个模板族**；同族 = 同 CMS / 同模板结构，规则骨架基本一致，可参考代表样例改写。
 
 ## match_sources 返回字段
 
@@ -49,15 +49,39 @@
 - `g & 2 | 4`（loginUrl/loginCheckJs）：站点要登录，读 [`login.md`](login.md)。
 - `g & 64`（规则不全）：该源四段规则缺阶段，别拿它当完整模板。
 
+## 语料写法共识（2026-09-22 全量统计，n=26,861）
+
+写规则前先查这里，与共识冲突的写法要能说出理由：
+
+| 指标 | 数值 |
+|------|------|
+| ruleToc.chapterList 纯 CSS（无 @js:/`<js>`） | 23,496（87.5%） |
+| chapterList 含 `@js:` / `<js>` / `$` JSON path | 708 / 1,109 / 869 |
+| JS 型 chapterList 同时配 chapterName+chapterUrl | 1,784/1,817（98.2%） |
+| nextTocUrl 出现率 | 8,460（31.5%），惯用法以 `text.下一页@href` 为主 |
+| nextContentUrl 出现率 | 11,587（43.1%） |
+| weight / lastUpdateTime / customOrder / enabledExplore 出现率 | 26,857 / 26,859 / 26,856 / 26,856 |
+| respondTime / enabledCookieJar / bookSourceComment | 25,591 / 25,590 / 25,064 |
+| customButton / eventListener（多数取默认 false） | 各 503 |
+| base64DecodeToByteArray / strToBytes 出现源数 | 70 / 14 |
+| `new Packages.java.lang.String` / `java.bytesToStr` 出现源数 | 0 / 2（该两件套是 Rhino 官方语法、菠萝猫实测可用，但并非语料主流；语料主流是 `java.base64Decode` 与 `createSymmetricCrypto(...).decryptStr(...)`） |
+| java.getElement / java.getElements 出现源数 | 236 / 510（官方 App 真实可用；Studio 沙箱未实现，调试期报错） |
+| 坏 API 出现源数：utf8ToGbk / currentTimeMillis / decodeURI / reversed() / new java.lang.String | 0 / 0 / 0 / 0 / 1 |
+| java.* 裸返回值直接 `.replace(/正则/,...)` | 59（非主流，且 Rhino 有「选择不明确」风险） |
+
 ## 分支兼容清单
 
 产出书源只面向官方阅读（Legado）公共字段：
 
 - 不要用 `mainJs` 纯 JS 单文件源：旧分支不识别。
-- JS 规则避免 `Packages.java.*` 反射：iOS JavaScriptCore 无此能力。
+- JS 规则避免 `Packages.java.*` 反射：iOS JavaScriptCore 无此能力。仅为兼容 iOS 分支的取舍——Android 官方阅读 App 的 base64 字节解码仍用标准两件套（`java.base64DecodeToByteArray` + `new Packages.java.lang.String(bytes, "UTF-8")`），不要因此弃用。
 - header 必须是合法 JSON 字符串。
 - 保存文件去 UTF-8 BOM。
 
 ## 生成方式
 
 语料由 `scripts/build_corpus.py` 从去重书源生成；重新生成可在任意 python3 环境运行。
+
+- 输入：`Mina/yuedu-source-hub` 采集管线产出的 `out/export/bookSource-merged.json`（16 个 GitHub 仓库 + 7 个独立站点订阅源合并去重，公共字段以官方规则为准）。
+- 输出：`index.json` + `shards/` 分片；成员多的族拆成 `f_XXXX-N.json` 多个 part，读取时自动排序合并，对调用方透明。
+- 重建 / 复跑 / 排障流程见 `Mina/yuedu-source-hub/AUTOMATION.md`。

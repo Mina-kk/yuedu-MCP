@@ -15,7 +15,7 @@ class BookSourceValidator {
         val root = try {
             JsonParser.parseString(json)
         } catch (error: Exception) {
-            return Report(listOf(Issue("$", "JSON 无法解析：${error.message.orEmpty()}")))
+            return Report(listOf(Issue("$", "JSON 无法解析：${error.message.orEmpty()}${malformedSnippet(json, error.message.orEmpty())}")))
         }
         if (!root.isJsonObject) return Report(listOf(Issue("$", "书源必须是 JSON 对象")))
         val obj = root.asJsonObject
@@ -23,7 +23,7 @@ class BookSourceValidator {
         requireText(obj, "bookSourceName", issues, "源名称不能为空")
         requireText(obj, "bookSourceUrl", issues, "源 URL 不能为空")
         val type = obj.get("bookSourceType")?.takeIf { it.isJsonPrimitive }?.asInt
-        if (type != null && type !in 0..3) issues += Issue("bookSourceType", "类型必须为 0..3")
+        if (type != null && type !in 0..4) issues += Issue("bookSourceType", "类型必须为 0..4")
 
         val searchUrl = text(obj, "searchUrl")
         val ruleSearch = objectOrNull(obj, "ruleSearch")
@@ -63,4 +63,16 @@ class BookSourceValidator {
 
     private fun objectOrNull(obj: JsonObject, key: String): JsonObject? =
         obj.get(key)?.takeIf { it.isJsonObject }?.asJsonObject
+
+    /**
+     * gson 报 "Unterminated object at line L column C" 时，回传错误列前后各约 140 字符的源码片段，
+     * 让 save_source 的调用方能直接看见漏引号/漏反斜杠的位置，不用整包肉眼扫。
+     */
+    private fun malformedSnippet(json: String, message: String): String {
+        val column = Regex("column (\\d+)").find(message)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return ""
+        val start = (column - 1 - 140).coerceAtLeast(0)
+        val end = (column - 1 + 140).coerceAtMost(json.length)
+        if (start >= end) return ""
+        return "\n错误位置附近源码（第 ${column} 列前后 140 字符）：\n…${json.substring(start, end).replace("\n", "\\n")}…"
+    }
 }

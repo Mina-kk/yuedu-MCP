@@ -43,8 +43,7 @@ class McpSessionReaperIntegrationTest {
     @After fun cleanup() {
         McpSessions.clear()
         McpSessions.clock = { System.currentTimeMillis() }
-        McpSessions.reapIdleMs = 5 * 60_000L
-        McpSessions.maxLifetimeMs = 2 * 60 * 60_000L
+        McpSessions.reapIdleMs = 30 * 60_000L
         McpSessions.closeTimeoutMs = 3_000L
         McpSessions.closeServer = { it.close() }
         McpSessions.sessionIdsOf = { server ->
@@ -108,6 +107,7 @@ class McpSessionReaperIntegrationTest {
     @Test fun keepAliveTrafficDoesNotPreventIdleReap() = runBlocking {
         val h = start()
         try {
+            McpSessions.reapIdleMs = 5 * 60_000L
             val init = h.initialize()
             val wireId = init.headers["Mcp-Session-Id"]!!
             assertTrue("门禁应认得 wire 会话 id", McpSessions.isKnown(wireId))
@@ -164,20 +164,26 @@ class McpSessionReaperIntegrationTest {
         }
     }
 
-    @Test fun hardCapClosesLongRunningSession() = runBlocking {
+    @Test fun interactiveGapDoesNotKillSession() = runBlocking {
         val h = start()
         try {
-            McpSessions.reapIdleMs = 10 * 60_000L
-            McpSessions.maxLifetimeMs = 1000L
+            // 默认 30 分钟空闲窗口：交互式客户端两次工具调用间隔 10 分钟（真人读页/思考）不得被回收
             val init = h.initialize()
             val wireId = init.headers["Mcp-Session-Id"]!!
             McpSessions.touchToolCall(servers.last())
-            fakeNow += 900L
-            McpSessions.touchToolCall(servers.last())
+            fakeNow += 10 * 60_000L
             assertEquals(0, McpSessions.reap().closed)
-            fakeNow += 100L
+            assertEquals(HttpStatusCode.OK, h.keepAlive(wireId).status)
+            // 超过 30 分钟无任何工具调用才回收；之后客户端重新 initialize 立即可用
+            fakeNow += 21 * 60_000L
             assertEquals(1, McpSessions.reap().closed)
             assertEquals(HttpStatusCode.NotFound, h.keepAlive(wireId).status)
+            val reinit = h.initialize()
+            assertEquals(HttpStatusCode.OK, reinit.status)
+            val newId = reinit.headers["Mcp-Session-Id"]!!
+            assertTrue(newId != wireId)
+            McpSessions.touchToolCall(servers.last())
+            assertEquals(HttpStatusCode.OK, h.keepAlive(newId).status)
         } finally {
             h.client.close()
             h.engine.stop(100, 500)

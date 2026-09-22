@@ -103,7 +103,11 @@ class UiSurfaceContractTest {
         assertTrue(source.contains("删除书源"))
         assertTrue(source.contains("SourceCatalog.groupByDomain"))
         assertTrue(source.contains("展开"))
+        assertTrue(source.contains("分享JSON"))
+        assertTrue(source.contains("Intent.ACTION_SEND"))
+        assertTrue(source.contains("FileProvider.getUriForFile"))
         assertFalse(source.contains("复制 JSON"))
+        assertFalse(source.contains("CreateDocument("))
     }
 
     @Test
@@ -119,6 +123,20 @@ class UiSurfaceContractTest {
         assertTrue(source.contains("删除"))
         assertTrue(source.contains("LocalStudioFullscreen"))
         assertTrue(source.contains("HttpLogDetail"))
+    }
+
+    /** 日志页删除流防回归锁：删除目标必须走 LogDeletePlan 解析（仅删可见项、数字解析、切批），禁止再对 selected 直接 toLong */
+    @Test
+    fun logsScreenDeleteGoesThroughPlanResolver() {
+        val candidates = listOf(
+            File("src/main/java/com/mina/legadostudio/ui/screens/LogsScreen.kt"),
+            File("app/src/main/java/com/mina/legadostudio/ui/screens/LogsScreen.kt"),
+        )
+        val source = candidates.first { it.isFile }.readText()
+        assertTrue(source.contains("LogDeletePlan.resolveLogIds"))
+        assertTrue(source.contains("LogDeletePlan.resolveNames"))
+        assertFalse(source.contains("selected.map { it.toLong() }"))
+        assertFalse(source.contains("selected.map{it.toLong()}"))
     }
 
     @Test
@@ -170,7 +188,7 @@ class UiSurfaceContractTest {
 
     @Test
     fun skillAssetsDoNotUseYueDuNames() {
-        val roots = listOf(File("src/main/assets/skills"), File("app/src/main/assets/skills")).filter { it.isDirectory }
+        val roots = listOf(File("src/main/assets/skills"), File("app/src/assets/skills")).filter { it.isDirectory }
         val hits = roots.asSequence()
             .flatMap { it.walkTopDown() }
             .filter { it.isFile && it.extension == "md" }
@@ -178,5 +196,25 @@ class UiSurfaceContractTest {
             .map { it.path }
             .toList()
         assertTrue("YueDU leftovers: $hits", hits.isEmpty())
+    }
+
+    /** 书源踩坑防回归锁：官方 API 补齐、分字段保存、signJs 禁缓存、searchUrl 返回契约提示，四道护栏必须都在 */
+    @Test
+    fun pitfallGuardsStayInPlace() {
+        val mcp = listOf(
+            File("src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
+            File("app/src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue(mcp.contains("\"fields\""))
+        assertTrue(mcp.contains("action=signJs"))
+        assertTrue(mcp.contains("返回的值无效"))
+
+        val rhino = listOf(
+            File("src/main/java/com/mina/legadostudio/runtime/RhinoEvaluator.kt"),
+            File("app/src/main/java/com/mina/legadostudio/runtime/RhinoEvaluator.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue(rhino.contains("base64DecodeToByteArray"))
+        assertTrue(rhino.contains("fun statusCode()"))
+        assertTrue(rhino.contains("java.lang.Thread.sleep"))
     }
 }

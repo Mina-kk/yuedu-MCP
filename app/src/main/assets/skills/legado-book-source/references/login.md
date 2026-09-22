@@ -121,13 +121,13 @@ getVariable(): String?                                // 获取变量
 
 ### AnalyzeUrl 相关函数
 
-js 中通过 `java.` 调用：
+js 中通过 `java.` 调用（以下示例省略了 `java.` 前缀，实际写全）：
 
 ```js
-initUrl() // 重新解析 url，可以用于登录检测 js 登录后重新解析 url 重新访问
-getHeaderMap().putAll(source.getHeaderMap(true)) // 重新设置登录头
-getStrResponse(jsStr: String? = null, sourceRegex: String? = null) // 返回访问结果，文本类型
-getResponse(): Response // 返回访问结果，调用登录后再调用这方法可以重新访问
+java.initUrl() // 重新解析 url，可以用于登录检测 js 登录后重新解析 url 重新访问
+java.getHeaderMap().putAll(source.getHeaderMap(true)) // 重新设置登录头
+java.getStrResponse(jsStr: String? = null, sourceRegex: String? = null) // 返回访问结果，文本类型（官方阅读可用，部分第三方分支不可用）
+java.getResponse() // 返回访问结果，调用登录后再调用这方法可以重新访问（部分第三方分支不可用，慎用）
 ```
 
 ## 登录检查（非 CF 场景）
@@ -137,6 +137,12 @@ getResponse(): Response // 返回访问结果，调用登录后再调用这方�
 登录 UI 中描述了如何使用 `loginCheckJs` 检查登录结果。
 
 > 关于 `loginCheckJs` 用于过 Cloudflare 等验证盾的用法，请参阅 `references/troubleshoot.md`。
+
+## 常见问题
+
+- `Function xxx not implements`：`loginUi` 按钮的 `action` 指向的函数未在 `loginUrl` 中定义，补上 `function xxx(){...}`。
+- 点任何按钮都触发登录：`loginUrl` 末尾写了 `login();` 自动调用，删掉末尾调用，只保留函数定义。
+- jsLib 函数在 `loginUrl` 不可用：两者上下文隔离，把函数内联进 `loginUrl`，或用 `eval(String(source.loginUrl))` 显式共享（见 [`patterns.md`](patterns.md) 第 5 节）。
 
 ## 回调操作
 

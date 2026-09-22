@@ -68,6 +68,10 @@ class StudioJsApi(
     private val cookies: RuntimeCookieStore? = null,
     private val userAgentProvider: () -> String = { HttpFetcher.DEFAULT_UA },
 ) {
+    /** 官方兼容：java.lang.Thread.sleep(ms)（沙箱仅放行这一个 java.lang 用法，其余包路径不可用） */
+    @JvmField
+    val lang: StudioLangApi = StudioLangApi()
+
     fun log(message: Any?) { logger(message?.toString().orEmpty()) }
     fun toast(message: Any?) { logger("toast: ${message?.toString().orEmpty()}") }
     fun ajax(url: String): String = fetcher.fetch(HttpFetcher.FetchRequest(url)).body
@@ -102,13 +106,16 @@ class StudioJsApi(
     }
     fun get(url: String, headers: Any? = null): StudioJsResponse = request(url, "GET", null, headers)
     fun post(url: String, body: String, headers: Any? = null): StudioJsResponse = request(url, "POST", body, headers)
+    @JvmOverloads
     fun encodeURI(value: String, charset: String = "UTF-8"): String = URLEncoder.encode(value, charset).replace("+", "%20")
     fun base64Encode(value: String): String = Base64.getEncoder().withoutPadding().encodeToString(value.toByteArray())
-    fun base64Decode(value: String): String = String(Base64.getDecoder().decode(value))
+    @JvmOverloads
+    fun base64Decode(value: String, charset: String = "UTF-8"): String = String(Base64.getDecoder().decode(value), java.nio.charset.Charset.forName(charset))
+    fun base64DecodeToByteArray(value: String): ByteArray = Base64.getDecoder().decode(value)
     fun md5Encode(value: String): String = digest(value, "MD5")
     fun md5Encode16(value: String): String = md5Encode(value).substring(8, 24)
-    fun timeFormat(value: Long): String = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(value))
-    fun timeFormat(value: Long, format: String): String = java.text.SimpleDateFormat(format, java.util.Locale.getDefault()).format(java.util.Date(value))
+    @JvmOverloads
+    fun timeFormat(value: Long, format: String = "yyyy-MM-dd HH:mm:ss"): String = java.text.SimpleDateFormat(format, java.util.Locale.getDefault()).format(java.util.Date(value))
     fun randomUUID(): String = java.util.UUID.randomUUID().toString()
     fun getWebViewUA(): String = userAgentProvider()
     fun getCookie(url: String): String = cookies?.headerFor(url).orEmpty()
@@ -145,6 +152,59 @@ class StudioJsApi(
         return StudioJsResponse(result.code, result.finalUrl, result.body, result.headers, result.elapsedMs)
     }
     private fun digest(value: String, algorithm: String): String = MessageDigest.getInstance(algorithm).digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    @JvmOverloads
+    fun createSymmetricCrypto(transformation: String, key: Any, iv: Any? = null): StudioSymmetricCrypto =
+        StudioSymmetricCrypto(transformation, key, iv)
+}
+
+/** 官方阅读兼容的对称加解密对象：java.createSymmetricCrypto("AES/CBC/PKCS5Padding", key, iv) */
+class StudioSymmetricCrypto(
+    private val transformation: String,
+    key: Any,
+    iv: Any?,
+) {
+    private val keyBytes: ByteArray = key.toBytes()
+    private val ivBytes: ByteArray? = iv?.toBytes()
+
+    private fun Any.toBytes(): ByteArray = when (this) {
+        is ByteArray -> this
+        is String -> this.toByteArray()
+        else -> this.toString().toByteArray()
+    }
+
+    private fun algorithm(): String = transformation.substringBefore('/').ifBlank { "AES" }
+
+    private fun needsIv(): Boolean = transformation.uppercase().contains("/CBC/") ||
+        transformation.uppercase().contains("/CFB/") ||
+        transformation.uppercase().contains("/OFB/") ||
+        transformation.uppercase().contains("/CTR/")
+
+    private fun newCipher(mode: Int): javax.crypto.Cipher {
+        val cipher = runCatching { javax.crypto.Cipher.getInstance(transformation) }
+            .getOrElse { javax.crypto.Cipher.getInstance(transformation.replace(Regex("(?i)pkcs7padding"), "PKCS5Padding")) }
+        val keySpec = javax.crypto.spec.SecretKeySpec(keyBytes, algorithm())
+        if (needsIv()) {
+            val vector = ivBytes ?: error("$transformation 需要 iv 参数")
+            cipher.init(mode, keySpec, javax.crypto.spec.IvParameterSpec(vector))
+        } else {
+            cipher.init(mode, keySpec)
+        }
+        return cipher
+    }
+
+    fun decrypt(data: ByteArray): ByteArray = newCipher(javax.crypto.Cipher.DECRYPT_MODE).doFinal(data)
+
+    /** 入参为 Base64 字符串，输出 UTF-8 字符串（官方 legado SymmetricCrypto.decryptStr 语义） */
+    fun decryptStr(value: String): String = String(decrypt(Base64.getDecoder().decode(value)))
+
+    fun decryptBase64Str(value: String): String = decryptStr(value)
+
+    fun encrypt(data: ByteArray): ByteArray = newCipher(javax.crypto.Cipher.ENCRYPT_MODE).doFinal(data)
+
+    fun encryptStr(value: String): ByteArray = encrypt(value.toByteArray())
+
+    fun encryptBase64Str(value: String): String = Base64.getEncoder().encodeToString(encrypt(value.toByteArray()))
 }
 
 data class StudioJsResponse(
@@ -155,6 +215,8 @@ data class StudioJsResponse(
     private val duration: Long,
 ) {
     fun code(): Int = status
+    /** 官方阅读兼容别名：部分旧书源写 r.statusCode() */
+    fun statusCode(): Int = status
     fun url(): String = finalUrl
     fun body(): String = content
     fun headers(): Map<String, String> = responseHeaders
@@ -162,4 +224,21 @@ data class StudioJsResponse(
     fun raw(): StudioJsResponse = this
     fun request(): StudioJsResponse = this
     override fun toString(): String = content
+}
+
+/** 官方兼容 java.lang 子路径：沙箱仅放行 Thread.sleep，其余 java.lang.* 一律不可用 */
+class StudioLangApi {
+    @JvmField
+    val Thread: ThreadApi = ThreadApi()
+
+    class ThreadApi {
+        fun sleep(ms: Long) {
+            val wait = if (ms < 0) 0 else ms
+            try {
+                Thread.sleep(wait)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
 }

@@ -80,24 +80,18 @@ var option = {
 
 ## 编码转换工具
 
-### java.utf8ToGbk
+### UTF-8 → GBK 字节转换（无 `java.utf8ToGbk`，该 API 不存在）
 
-将 UTF-8 编码的字符串转换为 GBK 编码。
+阅读官方没有 `java.utf8ToGbk`（写了必报 `not implements`）。需要把 UTF-8 字符串转成 GBK 字节时，用标准两件套的字节路径：
 
 ```javascript
-// utf8编码转gbk编码，返回String
-java.utf8ToGbk(str: String)
+// UTF-8 → GBK 字节数组（java.strToBytes 支持 charset 参数）
+var gbkBytes = java.strToBytes(str, "GBK");
 ```
 
 **使用场景**：
 - 需要将 UTF-8 字符串转换为 GBK 编码后发送给网站
-- 网站 POST 请求体需要 GBK 编码
-
-**示例**：
-```javascript
-var utf8Str = "你好世界";
-var gbkStr = java.utf8ToGbk(utf8Str);
-```
+- 网站 POST 请求体需要 GBK 编码（GBK 字节直接拼接进 body）
 
 ### java.encodeURI
 
@@ -247,8 +241,9 @@ var keyword = java.encodeURI(key, 'GBK');
 @js:
 var response = java.ajax(url);
 java.log("原始响应: " + response);
-var decoded = java.utf8ToGbk(response);
-java.log("GBK解码后: " + decoded);
+// 页面乱码优先用 URL 选项 {"charset":"gbk"} 或在 header 里指定；
+// 确需手动转码时用 java.strToBytes(response, "GBK") 拿 GBK 字节
+java.log("GBK字节长度: " + java.strToBytes(response, "GBK").length);
 ```
 
 ## 注意事项
@@ -263,9 +258,9 @@ java.log("GBK解码后: " + decoded);
    - 推荐使用小写 `"gbk"` 以保持一致性
 
 3. **编码转换顺序**：
-   - 如果需要从 UTF-8 转到 GBK，使用 `java.utf8ToGbk`
-   - 如果需要 URL 编码，使用 `java.encodeURI`
-   - 两个方法的顺序很重要，根据实际情况选择
+   - 需要 GBK 字节时用 `java.strToBytes(str, "GBK")`（没有 `java.utf8ToGbk`）
+   - 需要 URL 编码用 `java.encodeURI(str, "GBK")`
+   - 两者的顺序很重要，根据实际情况选择
 
 4. **字符集兼容性**：
    - GBK 是 GB2312 的超集，兼容 GB2312
@@ -286,7 +281,7 @@ java.log("GBK解码后: " + decoded);
 
 - **优先判断**：通过响应头或 HTML meta 标签判断编码
 - **正确配置**：使用 `"charset":"gbk"` 指定编码
-- **工具辅助**：使用 `java.utf8ToGbk` 和 `java.encodeURI` 处理特殊情况
+- **工具辅助**：用 `java.strToBytes(str, "GBK")` 和 `java.encodeURI(str, "GBK")` 处理特殊情况（不存在 `java.utf8ToGbk`）
 - **充分测试**：用中文关键字测试，确保无乱码
 
 掌握这些技巧，可以轻松应对各种编码场景，让书源更加稳定可靠。

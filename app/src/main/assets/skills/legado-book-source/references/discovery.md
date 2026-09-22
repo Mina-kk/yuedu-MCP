@@ -37,7 +37,7 @@
 
 ### style 属性
 
-5 个样式属性：`layout_flexGrow`、`layout_flexShrink`、`layout_alignSelf`、`layout_flexBasisPercent`、`layout_wrapBefore`
+6 个样式属性：`layout_flexGrow`、`layout_flexShrink`、`layout_alignSelf`、`layout_flexBasisPercent`、`layout_wrapBefore`，以及自定义的 `layout_justifySelf`（`flex_start`/`flex_end`/`center`）
 
 → 详见 [Flexbox 布局](https://www.jianshu.com/p/3c471953e36d)
 

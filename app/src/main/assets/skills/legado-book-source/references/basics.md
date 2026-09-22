@@ -64,7 +64,7 @@ class.odd.0@tag.a.0@text||tag.dd.0@tag.h1@text##全文阅读
 
 - `result` 是 Java 对象，字符串操作前必须 `String(result)` 转换
 - 工坊生成规则优先 CSS/XPath，不要用 JS 遍历整页猜正文。
-- 必须在 JS 中解析 HTML 时使用：`var doc = Packages.org.jsoup.Jsoup.parse(String(result));`。不要直接调用 `org.jsoup.Jsoup.parse(...)`，它在工坊内嵌 Rhino 中可能被解析成不可调用对象。
+- 必须在 JS 中解析 HTML 时使用：`var doc = Packages.org.jsoup.Jsoup.parse(String(result));`（等价于 `org.jsoup.Jsoup.parse(...)`，官方 App 两者均可用；仅 Studio 沙箱内直调 `org.jsoup.Jsoup.parse` 会报「parse 不是函数」，沙箱内优先 `java.getString`/`@css:`）。
 - 选择元素：`var element = doc.select("selector").first();`
 - 获取文本：`var text = String(element.text());`
 - 打印日志：`java.log("msg")`

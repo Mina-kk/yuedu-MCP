@@ -10,7 +10,7 @@
 | **访问 DOM** | ✅ `document.querySelector` `$('#id')` | ❌ 无 `window`/`document`/`$` |
 | **调用网站函数** | ✅ `getDecode(); doDecrypt();` | ❌ 无函数引用 |
 | **使用页面变量** | ✅ `window.x` `globalConfig` | ❌ |
-| **await/Promise** | ✅ 通过重试机制支持 | ✅ Rhino 也支持 |
+| **await/Promise** | ✅ 通过重试机制支持 | ❌ 不支持 async/await（ES6 模式可用 let/const/箭头函数）；等待用同步写法或 webJs 重试机制 |
 | **调用 Java bridge** | ✅ `ajaxAwait()` `webViewAwait()` | ✅ `java.ajax()` `java.webView()` |
 | **jQuery/React/Vue** | ✅ 直接使用页面已加载的 | ❌ |
 
@@ -45,7 +45,7 @@ getDecode()@webjs:document.querySelector('.content').innerHTML
 
 `getDecode()` 在 Rhino 环境执行，`@webjs:` 之后在 WebView 环境执行。
 
-> 通过 `@webjs:` 或 `contentRule.webJs` 调用时，超时固定为 10 秒；回退到 `BackstageWebView` 时默认 60 秒。
+> 超时与调用路径有关：**`@webjs:` 规则段固定 10 秒**；URL 选项 `{"webView":true,"webJs":...}` 与 `contentRule.webJs` 路径走 `BackstageWebView`，默认 60 秒。MCP 调试器（WebViewPageLoader）是另一套独立实现（固定 300ms 轮询、总超时 60s、无退避），重试参数表现与手机端不同，勿互相外推。
 
 ### URL 选项补充字段
 
@@ -125,7 +125,7 @@ getDecode();$('#content').html()
 
 ## Bridge API（异步，返回 Promise）
 
-由 `WebJsExtensions` 注入，均在 webJs 环境中可用：
+由 `WebJsExtensions` 注入，**仅在规则段 `@webjs:` 路径可用**（URL 选项 webJs / `ruleContent.webJs` 路径 `isRule=false`，整个 Bridge 表不注入，写了会 ReferenceError）：
 
 | 函数 | 说明 |
 |------|------|
@@ -150,7 +150,7 @@ Bridge API 的 Promise 通过独立回调通道 resolve，配合重试机制实�
 
 ## 同步方法（非 bridge，不返回 Promise）
 
-webJs 环境中可直接调用（来自 `Java.callJs`）：
+webJs 环境中可直接调用（来自注入的 `WebJsExtensions` 对象，代码里习惯写作 `java`；同样**仅 `@webjs:` 路径可用**）：
 
 | 方法 | 签名 |
 |------|------|
@@ -175,9 +175,9 @@ webJs 环境中可直接调用（来自 `Java.callJs`）：
 
 ## 注意事项
 
-- webJs 默认超时：通过 `@webjs:` 或 `contentRule.webJs` 调用时 **10 秒**；回退到 `BackstageWebView` 时默认 **60 秒**
+- 超时：`@webjs:` 规则段 **10 秒**；URL 选项与 `ruleContent.webJs` 路径默认 **60 秒**（MCP 调试器为独立实现，参数不同）
 - 返回空或 `null` 时重试最多 30 次（间隔：200ms → 400ms → 600ms → 800ms → 1000ms，之后恒定 1000ms）。重试时 JS 重新执行，不适用于有副作用的操作
 - WebView 图片加载默认关闭（`blockNetworkImage = true`），不要依赖图片触发 lazy-load
 - 网站可能检查 `event.isTrusted`，程序化触发的点击/滚动会被忽略
-- `console.log` 仅在通过 `@webjs:` 或 `contentRule.webJs` 调用时输出到调试面板；通过 URL 选项的路径无此输出
+- `console.log` 仅在 `@webjs:` 规则段输出到调试面板；URL 选项与 `ruleContent.webJs` 路径无此输出（官方 App 行为）
 - webJs 不影响的字段如 ruleContent.webJs 的 `sourceRegex` 等仍然在 Rhino 环境执行

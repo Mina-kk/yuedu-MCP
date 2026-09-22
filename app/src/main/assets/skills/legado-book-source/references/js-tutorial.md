@@ -1,6 +1,6 @@
 # 阅读书源 JS 入门教程
 
-> 基于 Legado(开源阅读) 源码与 134 个真实书源整理，所有 API 均来自官方 JS 扩展类文档。
+> 基于 Legado(开源阅读) 源码与真实书源整理，所有 API 均来自官方 JS 扩展类文档。
 > 适合不会 JS 的新手：先抄模板，再学着改。
 
 ---
@@ -13,22 +13,32 @@
 规则里包一段 `<js> ... </js>`，块里最后一行就是返回值：
 
 ```
-目录列表: <js>result.reversed()</js>
+目录列表: #chapters li a<js>result.reverse()</js>
 ```
 
 **2. @js: 前缀**
 整个字段以 `@js:` 开头，后面全是 JS：
 
 ```
+# 普通站点一律用 CSS 容器选择器 + 官方字段：
+chapterList: #chapters .direList li a
+chapterName: text
+chapterUrl: href
+
+# 仅限 API 型目录（目录由加密接口返回，如书友社 loadChapterPage）：
+# @js 只负责取数据拼 <a> 片段，仍配官方 chapterName/chapterUrl 字段解析
 chapterList: @js:
 let d = JSON.parse(result).data.list;
-d
+d.map(it => `<a href="${it.url}">${it.title}</a>`).join("")
+chapterName: text
+chapterUrl: href
 ```
 
 **3. 纯 JS 规则**
 字段值本身就是一段 JS（多行脚本场景），同样以返回值/最后一行为结果。
 
-> 记住一条：**块里最后一行（或 return 的东西）就是这条规则的结果**。
+> 记住一条：**块里最后一行就是返回值；不要写顶层 `return`（会直接报语法错误）**。
+> 目录分页只用官方字段 `nextTocUrl`（指向「下一页」目录链接）；禁止 `for(page=2..N)` / `cp=1..N` 循环发请求自建章节数组（详见 `generation-contract.md` 第 2 条）。
 
 ---
 
@@ -41,8 +51,10 @@ d
 | `book` | 书籍信息对象 | `book.bookUrl` 取书名页地址 |
 | `chapter` | 当前章节对象 | 正文规则里取章节信息 |
 | `src` | 图片原始地址 | `imageDecode` 里解析图片 |
+| `key` | 搜索关键词 | **仅 searchUrl 作用域注入**，其他字段要先 `source.put` 带过去 |
 
 列表类规则（目录列表/搜索列表）最后要**返回数组**；字段类规则返回**字符串**。
+API 型目录的 `chapterList` `@js:` 例外：返回含 `<a href>` 的 HTML 片段字符串，由 `chapterName`/`chapterUrl` 字段解析（见第一节）。
 
 ---
 
@@ -51,10 +63,11 @@ d
 ### 1. 倒序（目录是反的）
 
 ```
-<js>result.reversed()</js>
+目录列表: #chapters li a<js>result.reverse()</js>
 ```
 
-不想写 JS？装好书后在目录界面点右上角排序按钮，App 自带正序/倒序切换。
+- JS 数组用 `reverse()`（没有 `reversed()` 这个方法，写了必报 TypeError）
+- 不想写 JS？装好书后在目录界面点右上角排序按钮，App 自带正序/倒序切换；规则前置 `-` 号也可倒置列表（`-tag.dd`）
 
 ### 2. 按章节号排序（乱序目录）
 
@@ -100,12 +113,13 @@ result.filter(function(item) {
 | `connect(url)` | `java.connect(url)` | 返回 StrResponse 对象，可拿状态码 |
 | `webView(html, url, js)` | `java.webView(html, url, js)` | 需要浏览器渲染的页面用它 |
 
-示例：在目录页抓完再补一次请求拿真实目录
+网络类只用于取**单页数据**（如重定向 URL、签名接口）。目录/正文的翻页一律走官方字段 `nextTocUrl` / `nextContentUrl`，不要用循环请求自建列表。
+
+示例：配合 searchUrl 拦截重定向（page 来自搜索分页）
 
 ```
 @js:
-let html = java.ajax(baseUrl + "/allchapter");
-html
+java.post("https://example.com/e/search/", "key=" + key, {}).headers()
 ```
 
 带请求头：
@@ -116,6 +130,8 @@ let h = {"Referer": "https://example.com"};
 java.post("https://example.com/api/chapters", "bookId=" + book.getVariable("id"), h)
 ```
 
+> 若这段 JS 用作 `chapterList`（仅限 API 型目录），`@js` 只负责返回含 `<a href>` 的 HTML 片段，并配 `chapterName: text` / `chapterUrl: href`；普通站点优先 CSS 容器选择器。
+
 ---
 
 ## 五、字符串与编码类
@@ -123,9 +139,9 @@ java.post("https://example.com/api/chapters", "bookId=" + book.getVariable("id")
 | 方法 | 用法 | 场景 |
 |------|------|------|
 | `base64Encode(str)` / `base64Decode(str)` | `java.base64Encode(s)` | 接口参数加解密 |
+| `base64DecodeToByteArray(str)` | `java.base64DecodeToByteArray(s)` | 取字节做 XOR 等解码（配 `new Packages.java.lang.String(bytes, "UTF-8")` 转字符串） |
 | `hexDecodeToString(hex)` | `java.hexDecodeToString(h)` | 十六进制转文字 |
-| `strToBytes(s, charset)` | — | 转字节数组 |
-| `utf8ToGbk(str)` | `java.utf8ToGbk(s)` | 站点编码不对时转码 |
+| `strToBytes(s, charset)` | `java.strToBytes(s, "GBK")` | 转字节数组 |
 | `encodeURI(str, enc)` | `java.encodeURI(s, "GBK")` | 搜索词是中文时先编码 |
 | `t2s(text)` / `s2t(text)` | 繁简互转 | 繁体站转简体 |
 | `timeFormat(time)` | 时间戳格式化 | 处理更新时间 |
@@ -159,6 +175,26 @@ searchUrl: https://example.com/search?key={{encodeURI(key, "GBK")}}
 - `htmlFormat(str)`：正文 HTML 格式化
 - `toNumChapter(s)`：把"第一章/Chapter 1"这类标题转成数字，配排序用
 
+正文/简介的解码按页面实际机制选，**不要一律套 XOR 模板**：
+
+```js
+// ① AES 流派（语料主流，70 份 base64 源多用；沙箱已支持）：
+//    createSymmetricCrypto("AES/ECB/Pkcs7Padding", java.base64DecodeToByteArray(key)).decryptStr(b64)
+//    createSymmetricCrypto("AES/CBC/PKCS5Padding", keyStr, ivStr).decryptStr(b64)
+
+// ② base64 直出字符串（最常见）：
+java.base64Decode(b64str)
+
+// ③ XOR / 逐字节混淆（菠萝猫式，字节操作后用 Rhino 官方语法转字符串）：
+var bytes = java.base64DecodeToByteArray(b64str);
+for (var i = 0; i < bytes.length; i++) {
+    bytes[i] = bytes[i] ^ ((i % 127) + 1);
+}
+return "" + new Packages.java.lang.String(bytes, "UTF-8");
+```
+
+> `java.bytesToStr` 也可在沙箱用，但真实书源仅 2/26861 在用、官方 App 未验证；`new java.lang.String(...)` 不存在；`String(byte[])` 直转是数组 toString。
+
 ---
 
 ## 八、调试三件套（写不对先打日志）
@@ -179,7 +215,7 @@ result                 // 别忘了返回
 ```
 目录列表:
 @js:
-let list = result;            // 已抓到的章节列表
+let list = result;            // 已抓到的章节列表（由 CSS chapterList 产出）
 list = list.reverse();        // 倒序
 list = list.filter(function(it) {
     return !/最新章节|广告/.test(it.title);
@@ -192,10 +228,12 @@ list
 ## 十、常见坑
 
 1. **忘写返回值**：JS 块最后一行必须是结果，写了 `let list = ...` 就结束是不返回的
-2. **字符串比较章节数字**：必须 `parseInt` / `match(/\d+/)` 转数字
-3. **编码没设**：GBK 站点请求/编码都要带 charset，`utf8ToGbk` 救急
-4. **拿不到数据先怀疑要登录/要 Referer**：加 headers 再试
-5. **改完规则不生效**：书源详情页点"调试"，从搜索一路跑一遍看日志
+2. **顶层写 `return`**：`@js:`/`<js>` 是表达式返回，顶层 `return` 直接语法错误
+3. **字符串比较章节数字**：必须 `parseInt` / `match(/\d+/)` 转数字
+4. **编码没设**：GBK 站点请求/编码都要带 charset，搜索词用 `java.encodeURI(key, "GBK")`
+5. **java.* 返回值当 JS 字符串用**：先 `String(result)` 再 `.match`/`.replace`（Rhino 对 java 对象直接调 JS 字符串方法会报「选择不明确」）
+6. **拿不到数据先怀疑要登录/要 Referer**：加 headers 再试
+7. **改完规则不生效**：书源详情页点"调试"，从搜索一路跑一遍看日志
 
 ---
 

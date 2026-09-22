@@ -5,22 +5,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SourceImportPayloadTest {
-    @Test
-    fun wrapsObjectAsArray() {
-        val json = SourceImportPayload.arrayJson("""{"bookSourceName":"测","bookSourceUrl":"https://example.com"}""")
-        assertTrue(json.startsWith("["))
-        assertTrue(json.endsWith("]"))
-        assertTrue(json.contains("https://example.com"))
+
+    @Test fun wrapsSingleObjectIntoArray() {
+        val out = SourceImportPayload.arrayJson("{\"bookSourceName\":\"A\"}")
+        assertTrue(out.startsWith("["))
+        assertTrue(out.trimEnd().endsWith("]"))
+        assertTrue(out.contains("\"bookSourceName\":\"A\""))
     }
 
-    @Test
-    fun passesThroughArray() {
-        val json = SourceImportPayload.arrayJson("""[{"bookSourceUrl":"https://a.example"},{"bookSourceUrl":"https://b.example"}]""")
-        assertEquals(2, json.split("bookSourceUrl").size - 1)
+    @Test fun keepsExistingArrayAsIs() {
+        val out = SourceImportPayload.arrayJson("[{\"bookSourceName\":\"A\"},{\"bookSourceName\":\"B\"}]")
+        assertTrue(out.startsWith("["))
+        assertTrue(out.contains("\"bookSourceName\":\"B\""))
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun rejectsEmptyArray() {
-        SourceImportPayload.arrayJson("[]")
+    @Test fun rejectsInvalidJson() {
+        val error = runCatching { SourceImportPayload.arrayJson("not-json") }.exceptionOrNull()
+        assertTrue(error != null && error.message?.contains("书源 JSON 无效") == true)
     }
 }

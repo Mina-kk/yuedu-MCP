@@ -199,13 +199,15 @@ result;
   }
 })()
 
-// 方法二：使用 java.post 获取重定向 header
+// 方法二：用 java.post 拿响应，从 headers()（字符串）正则抓 Location
 (()=>{
   let base='https://www.yooread.net/e/search/';
   if(page==1){
     let url=base+'index.php';
     let body='show=title&tempid=1&keyboard='+key;
-    return base+source.put('surl',java.post(url,body,{}).header("Location"));
+    let resp=java.post(url,body,{});
+    let m=(''+resp.headers()).match(/Location:\s*(\S+)/i);
+    return base+source.put('surl',m?m[1]:'');
   } else {
     return base+source.get('surl')+'&page='+(page-1);
   }
@@ -261,3 +263,97 @@ decodeImage(result, key)
 上述方法覆盖了 Legado 书源最常见的反爬场景。如果遇到文档未覆盖的反爬手段（请求签名、指纹检测、字体反爬、JS 混淆等），请自行查阅 Legado 源码仓库（需询问用户阅读版本）和小说网页本身来寻找解决方案。Legado 的 `loginCheckJs`、URL 选项、JS 规则等接口足够灵活，很多反爬可以通过 JS 逆向在规则层解决。
 
 > 提醒：反爬手段千变万化，解决方案也需要针对具体情况定制，无法一概而论。过反爬能力受模型本身能力限制，建议使用更好的模型（国外模型对齐较好，可能不会帮助过反爬，建议使用 deepseek v4 pro）。
+
+## 9. searchUrl 的 @js: 报「返回的值无效」
+
+`debug_source` 调 `searchUrl` 的 `@js:` 时，脚本最后一行必须返回 http(s) URL，或 `"url," + JSON.stringify({method,body,headers})` 形式的字符串；写裸文本或非 URL 会被 EvaluatorException「返回的值无效」直接打回。
+
+```javascript
+(()=>{
+  // 正确写法一：返回 URL
+  return "https://example.com/search?key=" + encodeURIComponent(key);
+  // 正确写法二：URL + 行内选项（POST/Body 等）
+  // return "https://example.com/search," + JSON.stringify({method:"POST", body:"key="+key});
+})()
+```
+
+## 10. searchUrl 的 @js: 不能带 return，注意 key 的作用域
+
+- `@js:` 最后一行必须是**纯表达式返回**，不能带 `return`（末尾表达式的值即返回值，带 `return` 会报错）
+- `key` 变量只在 `searchUrl` 作用域注入；`ruleSearch.bookList` 的 JS 里没有 `key`，需要时先通过 `source.put` 或 URL 参数带过去
+
+## 11. rrssk 签名脚本按天滚动，不能吃跨天缓存
+
+rrssk（第三方搜索）的签名脚本地址按天滚动：`/?action=signJs&v=17-YYYYMMDD`，每天零点换版本。跨午夜若用了含旧日期的页面快照，签名脚本会 404 → 拿不到签名 → 搜索 403。
+
+每次搜索前必须重新抓取搜索页，不能吃跨天缓存；调试遇到 403 先核对签名脚本 URL 里的日期是否为当天。
+
+## 12. rrssk Cookie 三重兜底
+
+rrssk 的 `PHPSESSID` / `__snc` Cookie 在不同环境下 Set-Cookie 暴露方式不一（有的只在响应头里、不会自动进 Cookie 容器），单靠一种方式可能取不到。需要三重兜底：
+
+1. 响应头正则：从 `java.connect(url).headers()` 里正则抓 `Set-Cookie` 字段
+2. `java.getCookie(url)`
+3. `cookie.getCookie(url)` / `cookie.getKey(url, "PHPSESSID")`
+
+任一途径拿到即 `java.setCookie(url, value)` 固定下来再发搜索请求。
+
+## 13. 整包 save_source 传巨型 @js 规则：JSON 转义与 fields 分传
+
+整包 `save_source` 传巨型 `@js` 规则时，JSON 转义（`\"` `\\` `\n`）极易漏字符，导致 gson 解析报「Unterminated object」。改用 `save_source` 的 `fields` 参数分字段传入，绕开整包大 JSON 的转义地狱：
+
+```
+fields={"ruleSearch":{...}}
+```
+
+校验失败信息现在会附带错误列附近的源码片段，按提示即可定位漏转义的位置。
+
+## 14. 菠萝猫（boluomao1.com）正文 base64 + XOR 混淆
+
+菠萝猫正文/简介为 base64 + 逐字节 XOR `(i%127)+1` 混淆。**按页面实际机制选解码方式**，不要一律套 XOR——
+
+普通 base64/AES 混淆（语料主流，沙箱均已跑通）：
+
+```js
+// base64 直出字符串
+java.base64Decode(b64str)
+// AES（key/iv 兼容 String 或 ByteArray；Pkcs7Padding 自动回退 PKCS5）
+java.createSymmetricCrypto("AES/ECB/Pkcs7Padding", java.base64DecodeToByteArray(key)).decryptStr(b64str)
+java.createSymmetricCrypto("AES/CBC/PKCS5Padding", keyStr, ivStr).decryptStr(b64str)
+```
+
+XOR / 逐字节混淆（菠萝猫式，字节操作后用 Rhino 官方语法转字符串，官方 App 实测可用）：
+
+```js
+var b64 = String(src).match(/data-obf(?:-html)?="([a-zA-Z0-9+/=]+)"/); // 按实际页面取 base64 串
+if (b64) {
+    var rawBytes = java.base64DecodeToByteArray(b64[1]);
+    for (var i = 0; i < rawBytes.length; i++) {
+        rawBytes[i] = rawBytes[i] ^ ((i % 127) + 1);
+    }
+    return "" + new Packages.java.lang.String(rawBytes, "UTF-8");
+}
+return java.getString(".content p@text"); // CSS 兜底
+```
+
+要点：
+
+- 字节转字符串用 `new Packages.java.lang.String(bytes, "UTF-8")`；**不要**用 `java.bytesToStr`（真实书源仅 2/26861 在用，官方 App 未验证）、`new java.lang.String(...)`（不存在）、手写位运算拼 UTF-8（已翻车）
+- 域名替换等纯文本修正直接用 `.replace("www.boluomao.com", "www.boluomao1.com")`，不要对 java 返回值上正则 replace
+
+目录/正文分页走官方字段，**不要**写循环翻页：
+
+```json
+"ruleToc": {
+  "chapterList": "#chapters .direList li a",
+  "chapterName": "text",
+  "chapterUrl": "href",
+  "nextTocUrl": ".page2-chapter .page-range-list .cur + a@href"
+},
+"ruleContent": {
+  "content": "@js:…标准两件套解码…",
+  "nextContentUrl": ".readPage a:contains(下一页)@href"
+}
+```
+
+旧写法在 `chapterList` 里写巨型 `<js>` 用 `cp=1..60` 循环 `java.ajax` 自建章节数组，是官方机制（`nextTocUrl`）能覆盖的事，属五次翻车的典型反模式，禁止再教再写；唯一例外是目录由加密 API 返回（见 `generation-contract.md` 第 2 条）。

@@ -65,11 +65,13 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 
 ### 0.0 语料命中（省 token 第一步）
 
-写任何规则前先查内置语料（4256 个现成书源、696 个模板族，返回字段详见 [`references/corpus.md`](references/corpus.md)）：
+写任何规则前先查内置语料（26861 个现成书源、1838 个模板族，返回字段详见 [`references/corpus.md`](references/corpus.md)）：
 
 1. `match_sources(目标域名或站名)`：命中同域 → `get_corpus_source(i)` 取现成源做底本，按 0.1 查重流程最小修改。
 2. 未命中同域 → 从结果取 `f`（族 ID）→ `get_corpus_shard(f)` 读同模板族代表样例（≤6 个最完整），参考其结构改写到目标站。
 3. 都未命中 → 再走 `fetch_page` 探索。**不要一上来就抓网页。**
+
+> **rrssk 搜索外包型站点铁律**：主站搜索框跳外站（rrssk 联盟）时，写任何搜索规则前先读 `knowledge/第三方搜索逆向实战-rrssk.md` 第 0 节——一律以书友社成品为模板骨架起步，只重取证第 8 节清单的站点差异，禁止从零试错。
 
 ### 0.1 查重
 
@@ -145,7 +147,8 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 2. `get_source` 重新读取，确认 `bookSourceUrl`、规则、分组与注释符合预期。
 3. `check_source(refresh=true)` 全程实时联网做上线验收（默认缓存结果不代表线上表现）。
 4. 再用一组不同于开发样本的关键词或书籍执行烟雾测试。
-5. 若开启了 HTTP 日志，任务结束时恢复用户原来的记录设置；`clear_context` 释放任务槽位。
+5. 本地产物（构建脚本、jsLib 分部文件、HTML 快照、调试日志）统一放当前工作目录下 `work/{书源名称}/` 独立文件夹，一个书源一个目录，禁止散落到项目根目录。
+6. 若开启了 HTTP 日志，任务结束时恢复用户原来的记录设置；`clear_context` 释放任务槽位。
 
 完成汇报必须包含：
 
@@ -169,4 +172,9 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 - 漫画：[`references/comic.md`](references/comic.md)
 - 登录与交互：[`references/login.md`](references/login.md)
 - 高级模式：[`references/patterns.md`](references/patterns.md)
+- 正文避坑（result 类型/翻页机制/净化验收）：[`references/content-rules.md`](references/content-rules.md)
+- 单站深案·番茄小说（签名/AES/字体混淆/插图保护）：[`references/fanqie.md`](references/fanqie.md)
+- **第三方搜索（rrssk）逆向 / 搜索外包型站点**：知识库 `第三方搜索逆向实战-rrssk.md`（第 0 节模板铁律：一律以书友社成品为骨架起步；第 8 节换站复用清单；`search_knowledge("rrssk")` 找到它）
+- 英文/国际站书源（收录现状 + royalroad 实测规则 + 反推制法）：[`references/english-sites.md`](references/english-sites.md)
 - 领域知识（验证码、编码、模板）：`search_knowledge(关键词)` → `read_knowledge(path)`
+- **官方规则教程（最高准则）**：知识库 `legado-rules-map.md`（字段地图 / 搜索地址 / 调试方法 / 列表规则三语法；`search_knowledge("规则字段")` 找到它）。一切规则语义争议以官方为准，在线原文：https://mgz0227.github.io/The-tutorial-of-Legado/

@@ -45,8 +45,12 @@ object TaskContextSnapshot {
             pendingJob?.cancel()
             pendingJob = scope.launch {
                 delay(2000)
+                // 取消只发生在挂起点：旧任务被防抖取消后仍可能带着过期快照跑完 save，把取消后新建的上下文文件删掉。
+                // supplier 求值与保存必须在锁内原子完成，任意时刻只有一个保存在写，最终态由最后启动的任务写入。
                 runCatching {
-                    save(dir, tasksSupplier())
+                    synchronized(lock) {
+                        save(dir, tasksSupplier())
+                    }
                 }
             }
         }
