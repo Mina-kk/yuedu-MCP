@@ -30,4 +30,19 @@ bash scripts/verify_release_contract.sh
 
 `verify_release_contract.sh` 会校验 Release 混淆 mapping 中 MCP/Runtime 的 JSON 契约类未被混淆。
 
+## 构建纪律（volc 打包机）
+
+在 volc-mfgy（8C16G）上出正式 APK 时遵守，避免多个构建并发把机器压垮：
+
+- **单飞**：全局同时只允许一个构建（测试 + assemble + 验约）。发起构建前先确认没有其他 Gradle 在跑。
+- **flock 硬锁**：构建命令必须套远程锁，拿不到锁立即失败，不要排队硬闯：
+
+  ```bash
+  source /etc/profile.d/android-sdk.sh && source /opt/keystores/legado-source-studio.env && \
+  cd ~/workspace/yuedu-MCP && \
+  flock -n /tmp/yuedu-mcp-build.lock bash -c "./gradlew :app:testDebugUnitTest :app:assembleRelease && bash scripts/verify_release_contract.sh"
+  ```
+
+- **内存上限**（`gradle.properties` 已设）：`org.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m`、`kotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=384m`；`org.gradle.parallel=false`、`org.gradle.workers.max=2` 不要调高。构建前留意 `free -m`，可用内存低于 ~2GB 时先释放再构建。
+
 不得把密码、密钥或 MCP Token 写入仓库。本 App 不保存任何模型密钥。

@@ -72,7 +72,9 @@ chapterUrl: "href\n@js:\nresult += '/?shunt=' + SH[Get('shunt')]"
 ```javascript
 function url() {
     const baseUrl = java.connect(Get('rel')).url();
-    const html = java.ajax(baseUrl);
+    // java.ajax 返回 java.lang.String（Java 对象）：
+    // 字符串操作前必须先 String() 包裹，正则 replace 只能用在 JS 字符串上
+    const html = String(java.ajax(baseUrl));
     let allUrls = [];
     ['china', 'first_line', 'second_line'].forEach(key => {
         const reg = new RegExp(`${key}\\"><span>(.*?)<\\/span`);
@@ -85,6 +87,8 @@ function url() {
     put($$$);
 }
 ```
+
+> 要点：`java.*` 返回的都是 Java 对象。`.match`/`.replace` 前先 `String()` 包裹；域名等纯文本修正也可直接 `.replace("a.com", "b.com")`。对 java 裸值直接 `.replace(/正则/, ...)` 会报「选择不明确」（Rhino）。
 
 ---
 
@@ -469,3 +473,41 @@ ruleContent.imageStyle: FULL
 | 自定义按钮 | 看评论/额外功能 | `eventListener` + `callBackJs` |
 | 过验证盾 | CF/人机验证 | `loginCheckJs` + `startBrowserAwait` |
 | URL后处理 | 参数拼接 | `<js>result += '?param=val'</js>` |
+
+---
+
+## 附录：官方写法 vs 翻车写法（基准 = 官方规则机制 + 26,861 份真实书源语料共识）
+
+**先看语料再动手**：写任何字段前，用 `match_sources`/`get_corpus_source` 查同族真实书源怎么写的。菠萝猫正反样板只是实战参考，不是标准。语料实测共识（2026-09-22 统计）：
+
+| 维度 | 语料共识 |
+|------|----------|
+| chapterList 纯 CSS | **23,496/26,861（87.5%）** |
+| JS 型 chapterList 配 chapterName+chapterUrl | 1,784/1,817（98.2%） |
+| nextTocUrl / nextContentUrl 出现率 | 31.5% / 43.1%；最常见惯用法 `text.下一页@href` |
+| 手动循环翻页建目录 | 少数（JS 型内严格信号约 22%），且官方 `nextTocUrl` 可覆盖——**禁止** |
+| 官方字段 | weight 26857、lastUpdateTime 26859、customOrder 26856、enabledExplore 26856、respondTime 25591、enabledCookieJar 25590、bookSourceComment 25064 份源在写 |
+| 坏 API（utf8ToGbk/currentTimeMillis/decodeURI/reversed） | **0 份真实源在用**，坐实不存在，别写 |
+
+真实样例（语料直取，CSS 目录 + nextTocUrl 的六种典型）：
+
+```json
+{"chapterList": "id.nr_body", "chapterName": "tag.a.1@text", "chapterUrl": "-", "nextTocUrl": "text.下一章.0@href"}
+{"chapterList": "-class.article-list@li", "chapterName": "tag.a@text##>", "chapterUrl": "tag.a@href", "nextTocUrl": "text.下一页@href"}
+{"chapterList": "-class.chapterlist@li", "chapterName": "a.0@text", "chapterUrl": "a.0@href", "nextTocUrl": "class.next number@href"}
+{"chapterList": "class.chapters.1@tag.li", "chapterName": "tag.a@text", "chapterUrl": "tag.a@href", "nextTocUrl": "text.下一页@href"}
+{"chapterList": "id.chapterlist@li@a", "chapterName": "text", "chapterUrl": "href", "nextTocUrl": "text.下一页.0@href"}
+```
+
+同一站点、同一功能，两种写法的关键差异。**左列是已翻车五次的非官方写法，右列是官方阅读规则下的成品形态**，新写书源一律以右列为准。
+
+| 维度 | ❌ 翻车写法（禁止） | ✅ 官方写法（照这个来） |
+|------|------|------|
+| 目录列表 | `chapterList` 巨型 `<js>`：`for(var cp=1;cp<=60;cp++){ java.ajax(...) }` 循环扒 `<a>` 自建 HTML 数组 | `"chapterList": "#chapters .direList li a"` + `"chapterName": "text"` + `"chapterUrl": "href"` |
+| 目录分页 | 循环计数 `cp=1..N` 手动翻页，「当前页为空即停」 | `"nextTocUrl": ".page2-chapter .page-range-list .cur + a@href"`（官方字段，自动翻页） |
+| 正文解码 | 巨型 `<js>` 手写 base64 码表 + XOR + 手写 UTF-8 位运算重组 | `@js:` 标准两件套：`java.base64DecodeToByteArray(s)` + `new Packages.java.lang.String(bytes, "UTF-8")`，正文兜底 `java.getString(".content p@text")` |
+| 域名修正 | `String(java.base64Decode(...)).replace(/正则/, ...)`（Rhino 报「选择不明确」） | `.replace("www.boluomao.com", "www.boluomao1.com")` 纯字符串替换 |
+| 章节内分页 | 在 content 的 JS 里反复发请求拼多页 | `"nextContentUrl": ".readPage a:contains(下一页)@href"` |
+| 官方字段 | 缺 `customButton/customOrder/eventListener/lastUpdateTime/respondTime/weight/enabledExplore/enabledCookieJar/bookSourceComment` | 按 `template.yaml` 出全（菠萝猫成品即此形态） |
+
+> 唯一允许的 JS 型目录：目录本体由加密 API 返回时（如书友社 `loadChapterPage`，AES 加密 POST 换 JSON）。此时 `@js` 只负责取数据、拼 `<a href>` 片段数组，仍必须配 `chapterName`/`chapterUrl` 字段解析，且文档须标注「仅限 API 型目录」。

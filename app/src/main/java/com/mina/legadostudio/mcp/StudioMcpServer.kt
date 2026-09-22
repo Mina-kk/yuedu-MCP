@@ -72,7 +72,15 @@ class StudioMcpServer(context: Context) {
     }
     private fun registerContextTools(server: Server) {
         server.tool("create_context", "创建独立任务上下文。保存 contextId，后续每次调用传入，可在重连后继续。内存保存，闲置30分钟或进程结束后失效。", schema(mapOf("label" to "任务名，最多120字符"), emptyList()), toolAnnotations = write) { req ->
-            runCatching { ok(app.gson.toJson(contexts.describe(contexts.create(req.arguments.str("label").orEmpty())))) }.getOrElse { err(it.message.orEmpty()) }
+            runCatching {
+                val label = req.arguments.str("label").orEmpty()
+                val id = contexts.create(label)
+                // describe 偶发失败（极端竞态）也必须返回新建 id：把 CONTEXT_EXPIRED_OR_UNKNOWN
+                // 抛回 create_context 会让客户端认为创建失败并反复重试同一流程
+                val summary = runCatching { contexts.describe(id) }
+                    .getOrElse { mapOf("contextId" to id, "label" to label, "entries" to emptyList<Map<String, Any>>()) }
+                ok(app.gson.toJson(summary))
+            }.getOrElse { err(it.message.orEmpty()) }
         }
         server.tool("get_context", "恢复任务摘要、notes与网页/结果引用目录，不返回完整正文。notes是客户端记录，不是已验证事实。", schema(emptyMap(), emptyList()), toolAnnotations = readOnly) { req ->
             runCatching { ok(app.gson.toJson(contexts.describe(contextId(req.arguments)))) }.getOrElse { err(it.message.orEmpty()) }
@@ -148,7 +156,7 @@ class StudioMcpServer(context: Context) {
 
     /** 语料命中与知识/参考读取工具：做源前先 match_sources，可大幅减少抓网页与试错次数。 */
     private fun registerCorpusTools(server: Server) {
-        server.tool("match_sources", "在内置4256书源语料中按域名/名称查现成书源与模板族。做书源前先查", schema(mapOf("query" to "域名、URL或站点名称关键词", "limit" to "1..20，默认10"), listOf("query")), toolAnnotations = readOnly) { req ->
+        server.tool("match_sources", "在内置26861书源语料中按域名/名称查现成书源与模板族。做书源前先查", schema(mapOf("query" to "域名、URL或站点名称关键词", "limit" to "1..20，默认10"), listOf("query")), toolAnnotations = readOnly) { req ->
             runCatching {
                 val query = req.arguments.str("query") ?: error("query 不能为空")
                 val limit = (req.arguments.int("limit") ?: 10).coerceIn(1, 20)
@@ -237,7 +245,7 @@ class StudioMcpServer(context: Context) {
                 "version" to BuildConfig.VERSION_NAME,
                 "mcpPath" to McpAccess.PATH,
                 "contextProtocol" to mapOf("version" to 2, "workflow" to "match_sources(语料命中) → create_context → fetch_page → read_page/inspect_rule/analyze_html/eval_js(pageId) → update_context；重连后get_context或list_contexts", "cacheTtlSeconds" to 300, "idleTtlSeconds" to 1800, "persistence" to "memory+snapshot", "maxInlineChars" to 12000, "hint" to "调用时传contextId；并行做多个书源时每个任务各自 create_context 并全程显式传同一 contextId，互不串数据；POST搜索也入缓存；大结果用read_result不重复运行；check_source/debug_source默认复用本任务快照，最终验收传refresh=true"),
-                "corpus" to mapOf("sources" to 4256, "hint" to "内置语料特征索引，做源前先 match_sources(域名)"),
+                "corpus" to mapOf("sources" to 26861, "hint" to "内置语料特征索引，做源前先 match_sources(域名)"),
                 "license" to "GPL-3.0",
                 "ai" to false,
                 "role" to "mcp-runtime",
@@ -290,15 +298,23 @@ class StudioMcpServer(context: Context) {
             val ids = (req.arguments?.get("ids") as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
             ok("已删除 ${app.projects.delete(ids)} 个项目")
         }
-        server.tool("save_source", "校验并写入 BookSource JSON。同一 bookSourceUrl 默认覆盖当前成品（内部保留修订历史）；只有 newVersion=true 才追加一条新版本，供下一轮修复使用。", ToolSchema(properties = buildJsonObject {
-            put("source", stringProp("BookSource JSON"))
+        server.tool("save_source", "校验并写入 BookSource JSON。同一 bookSourceUrl 默认覆盖当前成品（内部保留修订历史）；只有 newVersion=true 才追加一条新版本，供下一轮修复使用。巨型 @js 规则务必用 fields 分字段传入（如 fields={\"ruleSearch\":{...}}），避免整包 source 手写 JSON 转义漏字符；解析失败会回传错误列附近源码片段。", ToolSchema(properties = buildJsonObject {
+            put("source", stringProp("BookSource JSON（与 fields 至少传一个；fields 会按顶层键覆盖合并进 source）"))
             putJsonObject("newVersion") { put("type", "boolean"); put("description", "true 时追加新版本；默认 false 覆盖同 URL 当前成品") }
-        }, required = listOf("source")), toolAnnotations = write) { req ->
+            putJsonObject("fields") {
+                put("type", "object")
+                put("description", "可选：分字段覆盖，键为书源顶层字段（bookSourceName/bookSourceUrl/searchUrl/ruleSearch/ruleToc/ruleContent/header 等）。与 source 合并后整体校验保存；适合逐字段修补、免去整包转义")
+            }
+        }, required = emptyList()), toolAnnotations = write) { req ->
             runCatching {
-                val source = req.arguments.str("source") ?: error("source 不能为空")
+                val sourceText = req.arguments.str("source").orEmpty().ifBlank { "{}" }
+                val fields = (req.arguments?.get("fields") as? JsonObject)?.let { app.gson.fromJson(it.toString(), com.google.gson.JsonObject::class.java) }
+                require(sourceText != "{}" || fields != null) { "source 不能为空（或改用 fields 分字段传入）" }
+                val obj = runCatching { JsonParser.parseString(sourceText).asJsonObject }.getOrNull()
+                    ?: error("source 不是合法 JSON 对象")
+                fields?.entrySet()?.forEach { (key, value) -> obj.add(key, value) }
                 val newVersion = req.arguments.bool("newVersion") ?: false
-                val report = app.validator.validate(source); require(report.isValid) { "书源验证未通过：${app.gson.toJson(report.issues)}" }
-                val obj = JsonParser.parseString(source).asJsonObject
+                val report = app.validator.validate(app.gson.toJson(obj)); require(report.isValid) { "书源验证未通过：${app.gson.toJson(report.issues)}" }
                 // 缺省时按用户在 MCP 页选择的目标类型写入 bookSourceType(0 文本/1 音频/2 图片/3 文件/4 视频)；「自动」时不干预，保留 JSON 原样
                 if (app.runtimeConfig.bookSourceType >= 0 && (!obj.has("bookSourceType") || obj.get("bookSourceType").isJsonNull)) obj.addProperty("bookSourceType", app.runtimeConfig.bookSourceType)
                 val finalSource = app.gson.toJson(obj)
@@ -377,23 +393,31 @@ class StudioMcpServer(context: Context) {
                     "elements" to report.elements, "elementWarning" to report.elementWarning, "contextId" to contextId(req.arguments), "pageId" to e?.id, "cacheHit" to (hit?.reused ?: (pageId != null)), "snapshot" to (e?.let { contexts.metadata(it) } ?: mapOf("live" to true)))))
             }.getOrElse { verificationAware(it) }
         }
-        server.tool("debug_source", "使用 App 内运行时调试 BookSource JSON；entry 支持关键词、详情 URL、++目录、--正文、分类::URL。默认复用本任务快照，refresh=true 全程实时", schema(mapOf("source" to "BookSource JSON", "entry" to "调试入口", "refresh" to "可选，true=不使用缓存"), listOf("source", "entry")), toolAnnotations = openWrite) { req ->
+        server.tool("debug_source", "使用 App 内运行时调试 BookSource JSON；entry 支持关键词、详情 URL、++目录、--正文、分类::URL。默认复用本任务快照，refresh=true 全程实时。注意 searchUrl 的 @js: 最后一行必须以纯表达式返回 http(s) URL 或 \"url,\"+JSON.stringify({method,body,headers})，带 return 或返回裸文本会报「返回的值无效」。", schema(mapOf("source" to "BookSource JSON", "entry" to "调试入口", "refresh" to "可选，true=不使用缓存"), listOf("source", "entry")), toolAnnotations = openWrite) { req ->
             runCatching {
+                val source = req.arguments.str("source") ?: return@tool err("source 不能为空")
+                val entry = req.arguments.str("entry") ?: return@tool err("entry 不能为空")
                 val cache = runtimeCache(req.arguments, req.arguments.bool("refresh") == true)
-                ok(app.gson.toJson(app.runtime.debug(req.arguments.str("source")!!, req.arguments.str("entry")!!, cache)))
-            }.getOrElse { verificationAware(it, req.arguments) }
+                ok(app.gson.toJson(app.runtime.debug(source, entry, cache)))
+            }.getOrElse { e ->
+                val hint = if (e.message?.contains("返回的值无效") == true) {
+                    "；searchUrl 的 @js: 最后一行必须纯表达式返回 http(s) URL 或 \"url,\"+JSON.stringify({method,body,headers})，不能带 return、不能返回裸文本"
+                } else ""
+                if (hint.isEmpty()) verificationAware(e, req.arguments) else err(e.message.orEmpty() + hint)
+            }
         }
         server.tool("eval_js", "Legado Rhino执行JS；可传pageId，将完整已存正文注入result/src，免去复制HTML。已注入官方同名对象：java（ajax/connect/加解密）、cookie（getCookie/getKey/setCookie=合并/replaceCookie=替换/removeCookie）、cache（put/get/delete/putMemory/getFromMemory，进程内有效）、source（put/get/getVariable/setVariable，debug_source时与书源变量互通）。JS内ajax/connect仍会联网。", schema(mapOf("js" to "JavaScript", "baseUrl" to "基础URL", "pageId" to "可选网页快照ID"), listOf("js")), toolAnnotations = openWrite) { req ->
             runCatching {
                 val e = req.arguments.str("pageId")?.let { savedEntry(req.arguments, it) }
                 require(e == null || e.kind == "page") { "需要pageId" }
-                val output = app.runtime.evaluate(req.arguments.str("js")!!, req.arguments.str("baseUrl") ?: e?.page?.finalUrl.orEmpty(), e?.text)
+                val js = req.arguments.str("js") ?: return@tool err("js 不能为空")
+                val output = app.runtime.evaluate(js, req.arguments.str("baseUrl") ?: e?.page?.finalUrl.orEmpty(), e?.text)
                 ok(app.gson.toJson(if (e == null) output else mapOf("snapshot" to contexts.metadata(e), "output" to output)))
             }.getOrElse { verificationAware(it) }
         }
         server.tool("browser_verify", "创建站点验证会话（验证码/登录/WAF/CF）。waitSec=0 立即返回；1..120 阻塞等待用户在验证中心完成后自动取证重试并返回 evidence", schema(mapOf("url" to "验证 URL", "purpose" to "用途说明", "waitSec" to "0..120，阻塞等待完成的最长秒数"), listOf("url")), toolAnnotations = openWrite) { req ->
             runCatching {
-                val url = req.arguments.str("url")!!
+                val url = req.arguments.str("url") ?: return@tool err("url 不能为空")
                 val session = app.verification.create("mcp", url, req.arguments.str("purpose") ?: "MCP 请求验证")
                 val waitSec = (req.arguments.int("waitSec") ?: 0).coerceIn(0, 120)
                 var done = app.database.dao().verificationSession(session.id)?.status == "COMPLETED"
@@ -411,7 +435,7 @@ class StudioMcpServer(context: Context) {
                 }
                 // 完成后用 WebView 通道取证一次，AI 直接拿到验证是否真正生效
                 val evidence = runCatching {
-                    val r = app.pageLoader.load(HttpFetcher.FetchRequest(url = url, method = "GET", timeoutSec = 45))
+                    val r = app.pageLoader.load(HttpFetcher.FetchRequest(url = url, method = "GET", timeoutSec = 45, maxBodyBytes = 4_000_000))
                     mapOf("code" to r.code, "finalUrl" to r.finalUrl, "marker" to app.fetcher.verificationMarker(200, r.finalUrl, r.body))
                 }.getOrElse { mapOf("code" to 0, "finalUrl" to url, "marker" to "load_error:" + (it.message?.take(80) ?: "")) }
                 ok(app.gson.toJson(mapOf(
@@ -428,8 +452,8 @@ class StudioMcpServer(context: Context) {
         }
         server.tool("set_cookie", "写入指定 URL 所属域的 Runtime/WebView Cookie。默认 merge=true 按 Cookie 名合并，该域其他 Cookie（如登录态）保留；merge=false 整串替换", schema(mapOf("url" to "URL", "cookie" to "name=value; ...", "merge" to "默认 true：按名合并；false=整串替换"), listOf("url", "cookie")), toolAnnotations = write) { req ->
             runCatching {
-                val url = req.arguments.str("url")!!
-                val cookie = req.arguments.str("cookie")!!
+                val url = req.arguments.str("url") ?: return@tool err("url 不能为空")
+                val cookie = req.arguments.str("cookie") ?: return@tool err("cookie 不能为空")
                 if (req.arguments.bool("merge") != false) app.cookieStore.merge(url, cookie) else app.cookieStore.set(url, cookie)
                 ok("Cookie 已写入")
             }.getOrElse { err(it.message.orEmpty()) }
@@ -555,8 +579,11 @@ class StudioMcpServer(context: Context) {
         val id = contextId(args)
         val fingerprint = contextFingerprint()
         return { r ->
+            // 反爬签名脚本按天滚动版本（如 rrssk 的 action=signJs&v=17-YYYYMMDD，零点换版）：
+            // 缓存命中=跨午夜拿到昨日脚本=404=签名失败=搜索 403。这类 URL 永不走缓存，强制刷新重存。
+            val volatileScript = r.url.orEmpty().contains("action=signJs", ignoreCase = true)
             val key = TaskContextStore.digest((r.method ?: "GET") + "\n" + r.url.orEmpty() + "\n" + r.body.orEmpty())
-            contexts.fetch(id, key, fingerprint, reusable = true, refresh = false) {
+            contexts.fetch(id, key, fingerprint, reusable = !volatileScript, refresh = volatileScript) {
                 withContext(Dispatchers.IO) { app.pageLoader.load(r) }
             }.entry.page!!
         }
@@ -646,11 +673,24 @@ class StudioMcpServer(context: Context) {
         return try {
             val result = block()
             val ok = result.isError != true
+            // 错误结果的 message 必须落盘：isError 的文本是排障唯一线索，曾因只记 keys 导致所有
+            // 「tool ... err」日志看不到原因，无法区分是书源规则问题还是上下文/会话问题。
+            val detail = buildString {
+                if (keys.isNotBlank()) append("keys=$keys")
+                if (!ok) {
+                    val message = (result.content.firstOrNull() as? TextContent)?.text
+                        .orEmpty().replace('\n', ' ').take(300)
+                    if (message.isNotBlank()) {
+                        if (isNotEmpty()) append("; ")
+                        append("err=$message")
+                    }
+                }
+            }
             StudioLog.add(
                 "tool $name ${if (ok) "ok" else "err"} ${System.currentTimeMillis() - started}ms",
                 if (ok) "I" else "W",
                 "tool",
-                if (keys.isBlank()) "" else "keys=$keys",
+                detail,
             )
             result
         } catch (error: Throwable) {

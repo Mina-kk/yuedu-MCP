@@ -24,8 +24,7 @@ class McpSessionsTest {
     @After fun cleanup() {
         McpSessions.clear()
         McpSessions.clock = { System.currentTimeMillis() }
-        McpSessions.reapIdleMs = 5 * 60_000L
-        McpSessions.maxLifetimeMs = 2 * 60 * 60_000L
+        McpSessions.reapIdleMs = 30 * 60_000L
         McpSessions.closeTimeoutMs = 3_000L
         McpSessions.closeServer = { it.close() }
         McpSessions.sessionIdsOf = { server -> runCatching { server.sessions.keys.toList() }.getOrDefault(emptyList()) }
@@ -95,19 +94,19 @@ class McpSessionsTest {
         assertEquals(true, McpSessions.isKnown("sid-a"))
     }
 
-    @Test fun hardCapClosesKeepAliveSession() = runBlocking {
+    @Test fun activeLongLivedSessionIsNeverForceClosed() = runBlocking {
         useClock()
-        McpSessions.reapIdleMs = 10 * 60_000L
-        McpSessions.maxLifetimeMs = 1000
+        // 交互式客户端的长任务会话：持续有工具调用即使跨越数小时也不得被强杀
         val server = server()
         attach(server, "sid-keep")
         McpSessions.register(server)
-        McpSessions.touchToolCall(server)
-        now = 900
-        McpSessions.touchToolCall(server)
-        assertEquals(0, McpSessions.reap().closed)
-        now = 1000
-        assertEquals(1, McpSessions.reap().closed)
+        repeat(40) {
+            now += 5 * 60_000L
+            McpSessions.touchToolCall(server)
+            assertEquals("第 $it 轮 5 分钟间隔不应触发回收", 0, McpSessions.reap().closed)
+        }
+        assertEquals(1, McpSessions.trackedSessions())
+        assertEquals(true, McpSessions.isKnown("sid-keep"))
     }
 
     @Test fun closeFailureDoesNotStopOtherSessions() = runBlocking {

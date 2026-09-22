@@ -3,7 +3,7 @@
 """
 Build the book-source corpus assets for yuedu-MCP (WP3).
 
-Input : sources-4256.json (Legado export)
+Input : bookSource-merged.json (Legado export, deduped by bookSourceUrl)
 Output: index.json
         shards/<fid>.json (or <fid>-0.json, <fid>-1.json if > 1.5MB)
 """
@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+from datetime import date
 from urllib.parse import urlparse
 
 # 白名单字段
@@ -96,23 +97,43 @@ def clean_source(raw):
     return {k: v for k, v in raw.items() if k in ALLOWED_FIELDS}
 
 
+def safe_extract_host(url):
+    """提取 bookSourceUrl 的 host；对畸形 URL（假 IPv6 括号、[图片] 前缀、嵌 JSON 等）做防御，绝不抛异常。"""
+    url = str(url or '').strip()
+    if not url:
+        return 'invalid'
+    # 形如 "[图片]http://x.com" 的带前缀 URL：从第一个 http(s):// 处截取
+    m = re.search(r'https?://', url)
+    if m and m.start() > 0:
+        url = url[m.start():]
+    try:
+        if url.startswith(('http://', 'https://')):
+            host = urlparse(url).netloc.lower()
+        elif '://' in url:
+            host = urlparse(url).netloc.lower()
+        else:
+            host = urlparse('http://' + url).netloc.lower()
+    except ValueError:
+        # urlparse 对畸形括号 URL 抛 Invalid IPv6 URL；退化为字符串切分（括号/路径/参数/userinfo 全切断）
+        rest = url.split('://', 1)[-1]
+        host = re.split(r'[/?#\[]', rest, 1)[0].lower().split('@')[-1]
+    return host or 'invalid'
+
+
 def extract_features(raw):
     """分析单条源的聚类与位掩码特征"""
     url = str(raw.get('bookSourceUrl', '') or '').strip()
-    if url.startswith('http://') or url.startswith('https://'):
-        host = urlparse(url).netloc.lower()
-    else:
-        # 处理可能没有 scheme 的 url
-        cleaned_url = url.lstrip()
-        if '://' in cleaned_url:
-            host = urlparse(cleaned_url).netloc.lower()
-        else:
-            host = urlparse('http://' + cleaned_url).netloc.lower() if cleaned_url else 'invalid'
-    if not host:
-        host = 'invalid'
+    host = safe_extract_host(url)
 
     stype = raw.get('bookSourceType', 0)
-    stype = int(stype) if stype is not None else 0
+    try:
+        stype = int(stype) if stype is not None else 0
+    except (TypeError, ValueError):
+        # 脏数据防御："" / "abc" / "1.5" 等一律退化为 0，绝不让构建崩
+        try:
+            stype = int(float(str(stype).strip()))
+        except (TypeError, ValueError):
+            stype = 0
 
     su = raw.get('searchUrl', '')
     smethod = extract_search_method(su)
@@ -363,7 +384,7 @@ def main():
     index_obj = {
         "v": 1,
         "n": total_n,
-        "gen": "2026-09-12",
+        "gen": date.today().isoformat(),
         "fam": fam_meta,
         "rec": rec_list
     }

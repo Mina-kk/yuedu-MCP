@@ -11,18 +11,20 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * SDK 的 Streamable HTTP 只有在客户端发 DELETE 时才关闭会话，且没有空闲超时；
  * 客户端重连或长期保活时会一直占用内存，因此由本对象按会话主动关闭：
- * - 空闲超过 [reapIdleMs]（默认 5 分钟）即回收；
- * - 存活超过 [maxLifetimeMs]（默认 2 小时）强制回收，防止客户端持续保活导致永不释放。
+ * - 空闲超过 [reapIdleMs]（默认 30 分钟）即回收；活跃度只由真实工具调用刷新，
+ *   保活/SSE 等传输层请求不计入（否则 ping 流量会让会话永不释放）。
+ * - 默认 30 分钟是面向交互式 MCP 客户端（Kimi/Claude 等）的取值：真人思考、
+ *   翻阅页面、跨任务切换都可能超过 5 分钟，过早回收会让客户端在下次调用时
+ *   撞到 404 被迫重新握手，表现为「自动断开 / 连不上」。
+ * - 不再按绝对存活时间强杀：持续有工具调用的长任务会话应一直存活；
+ *   只 ping 不干活的会话同样会在 [reapIdleMs] 到期时回收，内存不会泄漏。
  * 被回收的会话 id 记入 closedIds，后续请求返回 404，客户端应重新 initialize。
  */
 object McpSessions {
     @Volatile internal var clock: () -> Long = { System.currentTimeMillis() }
 
     /** 无请求超过该时长即主动关闭会话。 */
-    @Volatile var reapIdleMs: Long = 5 * 60_000L
-
-    /** 会话绝对存活上限，兜底释放长期保活的会话。 */
-    @Volatile var maxLifetimeMs: Long = 2 * 60 * 60_000L
+    @Volatile var reapIdleMs: Long = 30 * 60_000L
 
     /** 单个 Server 的关闭超时，避免个别 SDK 调用卡死回收线程。 */
     @Volatile var closeTimeoutMs: Long = 3_000L
@@ -119,10 +121,12 @@ object McpSessions {
     /** 记录一次真实工具调用；只有工具调用才刷新活跃时间，保活/SSE 等传输层请求不计入。 */
     fun touchToolCall(server: Server) {
         val now = clock()
-        val existing = sessions.values.firstOrNull { it.server === server }
-        if (existing != null) {
-            existing.lastSeen = now
-            McpStats.touch(existing.id)
+        // 同一 Server 理论上只挂一个会话（SDK 按会话建 Server）；若因 adopt/竞态出现
+        // 多个条目，全部刷新，避免活跃会话因只刷到旧条目而被误回收。
+        val existing = sessions.values.filter { it.server === server }
+        if (existing.isNotEmpty()) {
+            existing.forEach { it.lastSeen = now }
+            existing.forEach { McpStats.touch(it.id) }
             return
         }
         val id = sessionIdsOf(server).firstOrNull()?.take(128) ?: return
@@ -142,7 +146,7 @@ object McpSessions {
         }
     }
 
-    /** 关闭闲置或超龄会话；单个会话关闭失败不影响其它会话。 */
+    /** 关闭闲置会话；单个会话关闭失败不影响其它会话。不再按绝对存活时间强杀活跃会话。 */
     suspend fun reap(): Scan {
         val now = clock()
         scans.incrementAndGet()
@@ -151,9 +155,7 @@ object McpSessions {
         adopt(now)
         var closed = 0
         for (entry in sessions.values.toList()) {
-            val idle = now - entry.lastSeen
-            val age = now - entry.created
-            if (idle < reapIdleMs && age < maxLifetimeMs) continue
+            if (now - entry.lastSeen < reapIdleMs) continue
             sessions.remove(entry.id)
             closedIds[entry.id] = now
             closeQuietly(entry.server)

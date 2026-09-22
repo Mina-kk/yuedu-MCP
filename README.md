@@ -3,7 +3,7 @@
 本机 **Legado 运行时 + MCP Server**（原「书源工坊」）。App 内不调用任何模型、不保存任何模型密钥。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.0.130`（versionCode 150）
+- 当前版本：`1.0.128`（versionCode 148）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK；仓库 `apks/` 目录保留最新 APK）
@@ -11,8 +11,6 @@
 ## 界面
 
 iOS 简约白风格：液态玻璃顶栏/底栏（高斯模糊）、大圆角卡片、底部悬浮标签栏。底栏为 **MCP / 书源 / 技能 / 验证中心 / 日志**。
-
-验证中心运行时提供圆形 **M** 字悬浮球：可自由拖动到任意位置，松手时若靠近屏幕左右边缘会自动吸附并半隐一半（点按展开）；人工验证 alert 气泡弹出时自动贴边完整显示，不打断当前 App 操作。
 
 ## 连接 MCP
 
@@ -57,7 +55,7 @@ match_sources 语料命中（同域/同模板族现成书源）
   → save_source 保存，get_source 回读确认
 ```
 
-`save_source` 默认按书源 URL 覆盖更新同站记录；需要保留历史版本时传 `newVersion=true` 追加。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码、Web JS 逆向（方法论 / 入门 SOP / 进阶对抗 / 书源迁移四篇专题）等知识库；另附《书源 JS 入门教程》知识包（零基础语法到书源 `<js>` 实战），技能参考文档同步收录。
+`save_source` 默认按书源 URL 覆盖更新同站记录；需要保留历史版本时传 `newVersion=true` 追加。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码、Web JS 逆向（方法论 / 入门 SOP / 进阶对抗 / 书源迁移四篇专题）等知识库。
 
 ### eval_js 与书源 JS 环境
 
@@ -71,7 +69,7 @@ match_sources 语料命中（同域/同模板族现成书源）
 
 ### 语料命中（省 token 第一步）
 
-内置 **4256 个现成书源**，按内容规则签名聚成 **696 个模板族**（同族 = 同 CMS / 同模板结构）：
+内置 **26861 个现成书源**，按内容规则签名聚成 **1838 个模板族**（同族 = 同 CMS / 同模板结构）：
 
 - `match_sources(域名或站名)`：返回 `i`（序号）、`d`（域名）、`f`（族 ID）、`t`（类型）、`g`（特征位掩码：CookieJar / 登录 / 验证码 / Cloudflare / 禁用等）；
 - 命中同域 → `get_corpus_source(i)` 取完整书源做底本最小修改；

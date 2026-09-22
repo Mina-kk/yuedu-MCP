@@ -1,6 +1,6 @@
 # JS API 参考
 
-> 阅读使用 [Rhino v1.8.1](https://github.com/mozilla/rhino) 作为 JavaScript 引擎以便于[调用 Java 类和方法](https://m.jb51.net/article/92138.htm)，查看 [ECMAScript 兼容性表格](https://mozilla.github.io/rhino/compat/engines.html)
+> 阅读内置 htmlunit-core-js（Rhino 分支，ES6 模式）作为 JavaScript 引擎以便于调用 Java 类和方法；`java` 变量指向已被阅读修改，想要调用 `java.*` 下的包，请使用 `Packages.java.*`
 
 > [Rhino 运行时](https://github.com/mozilla/rhino/blob/master/rhino/src/main/java/org/mozilla/javascript/ScriptRuntime.java)懒加载导入的 Java 类和方法
 
@@ -36,11 +36,105 @@
 | title | 章节当前标题 String |
 | src | 请求返回的源码 |
 | nextChapterUrl | 下一章节 url |
-| isFromBookInfo | 是否为详情页刷新 |
+| fromBookInfo | 是否为详情页刷新（官方绑定名，无 is 前缀） |
 
 ## java 对象方法
 
 函数带有默认值的函数会自动重载，可以不填。
+
+### Studio 沙箱可用 API 清单（与原版阅读的差异）
+
+> 本节针对 Studio 沙箱（MCP 工具 `eval_js` / `debug_source` / `save_source`）内的 JS 环境。沙箱的 `java` 对象由 `StudioJsApi` 提供，与原版阅读并不完全一致：**清单之外的方法缺一个都报错**，写书源前先对照本节，不要按上文原版阅读的清单想当然。
+
+沙箱内 `java` 对象实际提供的方法（以 StudioJsApi 为准）：
+
+**网络：**
+```js
+java.ajax(url)
+java.connect(url, header?, timeout?)
+java.get(url, headers?)
+java.post(url, body, headers?)
+java.ajaxAll(urls)
+java.webView(url)             // 单参形式
+java.webView(html, url, js)   // 三参形式
+```
+
+**响应对象方法：**
+```js
+code()          // 注意是 code()，不是 statusCode()
+statusCode()    // code() 的别名，刚加；推荐用官方 code()
+url()
+body()
+headers()       // 响应头（字符串/Map 视实现），取单个头用 ''+headers() 后正则
+callTime()
+raw()
+request()
+```
+
+**编码：**
+```js
+java.encodeURI(value, charset? = "UTF-8")
+java.base64Encode(value)
+java.base64Decode(value, charset? = "UTF-8")
+java.base64DecodeToByteArray(value)
+java.md5Encode(str) / java.md5Encode16(str)
+java.sha1Encode(value)
+java.sha256Encode(value)
+java.hexEncodeToString(utf8) / java.hexDecodeToString(hex)
+java.strToBytes(v) / java.strToBytes(v, charset)
+java.bytesToStr(b) / java.bytesToStr(b, charset)   // 沙箱注册，但真实书源仅 2/26861 在用、官方 App 未验证；字节转字符串优先 new Packages.java.lang.String(b, "UTF-8")
+java.createSymmetricCrypto(transformation, key, iv?) // AES/DES 等，key/iv 兼容 String/ByteArray；.decrypt(bytes) / .decryptStr(base64String) / .encrypt(bytes) / .encryptBase64Str(str)；Pkcs7Padding 自动回退 PKCS5
+java.timeFormat(value) / java.timeFormat(value, format)
+java.htmlFormat(str)
+java.randomUUID()
+java.getWebViewUA()
+```
+
+**Cookie：**
+```js
+java.getCookie(url) / java.getCookie(url, key)
+java.setCookie(url, cookie)
+```
+
+**睡眠：**
+```js
+java.lang.Thread.sleep(ms)   // 仅此一个 java.lang 用法可用
+```
+
+**全局同名对象：**
+```js
+// cookie
+cookie.getCookie(url)
+cookie.getKey(url, key)
+cookie.setCookie(url, cookie)
+cookie.replaceCookie(url, cookie)
+cookie.removeCookie(url)
+cookie.setWebCookie(url, cookie)
+
+// cache
+cache.put(key, value)
+cache.get(key)
+cache.delete(key)
+cache.putMemory(key, value)
+cache.getFromMemory(key)
+cache.deleteMemory(key)
+
+// source
+source.getVariable / source.setVariable / source.putVariable
+source.put(key, value)
+source.get(key)
+```
+
+**明确不可用（写了必报错，不要用）：**
+
+- `java.lang.*` 除 `Thread.sleep` 外全部不可用（`java.util.List`、`java.lang.System` 等都拿不到）；需显式构造 String 对象用 `new Packages.java.lang.String(...)`，没有 `new java.lang.String(...)`
+- `java.currentTimeMillis` / `java.decodeURI` / `java.utf8ToGbk` / `java.getElement` / `java.getElements`：任何环境都没有，别按「原版清单」想当然
+- `java.bytesToStr` 是 Studio 沙箱专有，官方 App 未验证；跨环境书源字节转字符串一律用标准两件套 `java.base64DecodeToByteArray(s)` + `new Packages.java.lang.String(bytes, "UTF-8")`
+- （仅 Studio 沙箱）`org.jsoup.Jsoup.parse` 等 Java 静态类直调不可用，会报 "parse 不是函数，它是 object"；官方 App 中该调用可用，但两环境下都建议优先 `java.getString`/`@css:` 规则
+- Rhino 里 java 方法返回的 `java.lang.String` 直接 `.replace(/正则/, ...)` 会报「选择不明确」，必须先 `String()` 包一层；域名等纯文本替换直接 `.replace("a","b")`
+- `'+'` 拼接产生的是 ConsString，直接传给 java 方法当 `java.lang.String` 参数可能 `ClassCastException`，包 `String()` 兜底
+
+> 更多沙箱实测坑点（searchUrl 返回值校验、save_source 转义等）见 `troubleshoot.md` 第 9 节起。
 
 ### RssJsExtensions 独有函数
 
@@ -144,7 +238,7 @@ java.setContent(content: Any?, baseUrl: String? = null)
 ```
 
 **获取 Element/Element 列表：**
-> 如果要改变解析源代码，请先使用 `java.setContent`
+> 官方 App 的 `AnalyzeRule` 有 `getElement/getElements`，但 **Studio 沙箱未实现，调试期调用必报错**；取元素一律改用 CSS 选择器 + `java.getString('div.x@text', html)`，列表用 `java.getStringList`。
 ```js
 java.getElement(ruleStr: String)
 java.getElements(ruleStr: String)
@@ -263,11 +357,13 @@ eval(String(java.cacheFile(url)))
 cache.delete(java.md5Encode16(url))
 ```
 
-**获取网络压缩文件里面指定路径的数据（可替换 Zip Rar 7Z）：**
+**获取网络压缩文件里面指定路径的数据（按压缩格式选对应方法，无泛名 getStringContent）：**
 ```js
-java.getStringContent(url: String, path: String): String
-java.getStringContent(url: String, path: String, charsetName: String): String
-java.getByteArrayContent(url: String, path: String): ByteArray?
+java.getZipStringContent(url: String, path: String): String
+java.getZipStringContent(url: String, path: String, charsetName: String): String
+java.getZipByteArrayContent(url: String, path: String): ByteArray?
+java.getRarStringContent(url: String, path: String): String        // Rar 同理
+java.get7zStringContent(url: String, path: String): String         // 7z 同理
 ```
 
 **URI 编码：**
@@ -289,9 +385,20 @@ java.base64Encode(str: String, flags: Int)
 // Str 转 Bytes
 java.strToBytes(str: String)
 java.strToBytes(str: String, charset: String)
-// Bytes 转 Str
+// Bytes 转 Str（沙箱注册但真实书源仅 2/26861 在用；跨环境书源一律用
+// new Packages.java.lang.String(bytes, "UTF-8")）
 java.bytesToStr(bytes: ByteArray)
 java.bytesToStr(bytes: ByteArray, charset: String)
+```
+
+**对称加解密（AES/DES，官方 legado SymmetricCrypto 语义）：**
+```js
+// transformation 如 "AES/CBC/PKCS5Padding"、"AES/ECB/Pkcs7Padding"（Pkcs7 自动回退 PKCS5）
+// key/iv 兼容 String 与 ByteArray；iv 仅 CBC/CFB/OFB/CTR 需要
+java.createSymmetricCrypto(transformation: String, key: Any, iv: Any? = null)
+// 返回对象方法：
+//   decrypt(bytes): ByteArray        decryptStr(base64): String
+//   encrypt(bytes): ByteArray        encryptStr(str): ByteArray   encryptBase64Str(str): String
 ```
 
 **Hex：**
@@ -587,7 +694,7 @@ URL 末尾以 `,{JSON}` 追加行内选项，格式如 `https://example.com/page
 | `charset` | string | 编码，如 `utf-8`、`gbk` |
 | `retry` | number | 重试次数 |
 | `header` | object | 自定义请求头，如 `{"User-Agent":"..."}` |
-| `headers` | array | 同上，数组格式 |
+| `headers` | object / JSON 字符串 | 同上（**不支持数组格式**，数组会静默解析失败→不加头） |
 | `body` | string | POST 请求体 |
 | `js` | string | 访问前执行 JS，结果替换 URL |
 | `bodyJs` | string | 获取响应后执行 JS，结果替换 body |
@@ -598,8 +705,8 @@ URL 末尾以 `,{JSON}` 追加行内选项，格式如 `https://example.com/page
 **js 参数示例**（访问前处理 URL）：
 
 ```
-https://www.baidu.com,{"js":"java.headerMap.put('xxx', 'yyy')"}
-https://www.baidu.com,{"js":"java.url=java.url+'yyyy'"}
+https://www.baidu.com,{"js":"java.headerMap.put('xxx', 'yyy')"}   // headerMap 仅官方 App 可用，Studio 沙箱不可用
+https://www.baidu.com,{"js":"java.url+'yyyy'"}                    // 表达式返回式 URL 处理，无赋值写法
 ```
 
 **bodyJs 参数示例**（响应后处理）：

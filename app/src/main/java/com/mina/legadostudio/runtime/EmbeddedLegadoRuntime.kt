@@ -197,7 +197,8 @@ class EmbeddedLegadoRuntime(
             }
             HttpFetcher.FetchResult(200, loaded.finalUrl, emptyMap(), loaded.html, loaded.elapsedMs)
         } else {
-            val cached = cacheFetch?.invoke(HttpFetcher.FetchRequest(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset))
+            val request = HttpFetcher.FetchRequest(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset, maxBodyBytes = MAX_BODY_BYTES)
+            val cached = cacheFetch?.invoke(request)
             cached ?: fetchAbsolute(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset)
         }
         parsed.bodyJs?.takeIf { it.isNotBlank() }?.let { js ->
@@ -208,7 +209,7 @@ class EmbeddedLegadoRuntime(
     }
 
     private fun fetchAbsolute(url: String, method: String, headers: Map<String, String>, body: String?, charset: String?): HttpFetcher.FetchResult =
-        fetcher.fetch(HttpFetcher.FetchRequest(url, method, headers, body, charset))
+        fetcher.fetch(HttpFetcher.FetchRequest(url, method, headers, body, charset, maxBodyBytes = MAX_BODY_BYTES))
 
     private fun requestValue(template: String, root: JsonObject, bindings: Map<String, Any?>): String {
         if (template.startsWith("@js:")) {
@@ -322,6 +323,8 @@ class EmbeddedLegadoRuntime(
     private fun JsonObject.text(key: String): String? = get(key)?.takeUnless { it.isJsonNull }?.asString
 
     companion object {
+        /** debug/check 抓取上限，与 StudioMcpServer.contextFetch 一致：超限报 CONTENT_TOO_LARGE，避免大页 OOM。 */
+        internal const val MAX_BODY_BYTES = 4_000_000L
         // Android ICU treats unescaped `}` as a quantifier; both braces must be escaped.
         internal val JS_TEMPLATE = Regex("\\{\\{([^{}]+)\\}\\}")
     }

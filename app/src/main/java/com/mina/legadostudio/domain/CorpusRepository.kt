@@ -5,6 +5,7 @@ import androidx.annotation.Keep
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonArray
 import java.net.URI
 
 /**
@@ -170,10 +171,11 @@ class CorpusIndex(
     }
 
     /**
-     * 根据书源全局序号 i 获取所属族 ID
+     * 根据书源全局序号 i 获取所属族 ID。
+     * 位置命中必须校验全局序号一致：rec 数组一旦被过滤或重排，位置不再等价于 i，错位时回退按序号查找。
      */
     fun sourceFamily(i: Int): String? {
-        if (i in records.indices) {
+        if (i in records.indices && records[i].i == i) {
             return records[i].family
         }
         return records.firstOrNull { it.i == i }?.family
@@ -202,6 +204,57 @@ class CorpusIndex(
         }
         return null
     }
+}
+
+/**
+ * 合并多分片文本为单一分片结构。
+ * 输入：同一族的各 part 文本（顺序任意，函数内部按 "p" 字段/文件名序号排序），每个 part 为
+ * {"f":..,"p":..,"ids":[...],"n":[...]}；输出：{"f":fid,"ids":[合并...],"n":[合并...]} 的 JSON 字符串。
+ * 无法解析的 part 跳过；全部失败返回 null。
+ */
+fun mergeShardParts(fid: String, partTexts: List<String>): String? {
+    if (partTexts.isEmpty()) return null
+
+    val parsed = partTexts.mapNotNull { text ->
+        try {
+            JsonParser.parseString(text).asJsonObject
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (parsed.isEmpty()) return null
+
+    val sorted = parsed.sortedBy { obj ->
+        val p = obj.get("p")
+        if (p != null && p.isJsonPrimitive && p.asJsonPrimitive.isNumber) {
+            p.asInt
+        } else {
+            Int.MAX_VALUE
+        }
+    }
+
+    val mergedIds = JsonArray()
+    val mergedN = JsonArray()
+
+    for (obj in sorted) {
+        val ids = obj.getAsJsonArray("ids")
+        val n = obj.getAsJsonArray("n")
+        if (ids == null || n == null) continue
+        if (ids.size() != n.size()) continue
+        for (i in 0 until ids.size()) {
+            mergedIds.add(ids.get(i))
+            mergedN.add(n.get(i))
+        }
+    }
+
+    if (mergedIds.size() == 0) return null
+
+    val result = JsonObject()
+    result.addProperty("f", fid)
+    result.add("ids", mergedIds)
+    result.add("n", mergedN)
+    return result.toString()
 }
 
 /**
@@ -234,21 +287,25 @@ class CorpusRepository(private val context: Context) {
             }.getOrNull()
         }
 
-        // 尝试多分片合并或查找 <fid>-0.json ...
-        val partMatches = shardFileNames.filter { it.startsWith("$fid-") && it.endsWith(".json") }
-        if (partMatches.isEmpty()) return null
+        val partNames = shardFileNames
+            .filter { it.startsWith("$fid-") && it.endsWith(".json") }
+            .map { name ->
+                val numStr = name.substringAfter("$fid-").removeSuffix(".json")
+                name to numStr.toIntOrNull()
+            }
+            .filter { it.second != null }
+            .sortedBy { it.second }
+            .map { it.first }
 
-        // 单独一个 part 或依次读取
-        for (partName in partMatches) {
-            val text = runCatching {
+        if (partNames.isEmpty()) return null
+
+        val partTexts = partNames.mapNotNull { partName ->
+            runCatching {
                 context.assets.open("corpus/shards/$partName").bufferedReader().use { it.readText() }
-            }.getOrNull() ?: continue
-
-            // 检查当前 part 是否包含我们可能需要的数据（或者直接返回第一段）
-            return text
+            }.getOrNull()
         }
 
-        return null
+        return mergeShardParts(fid, partTexts)
     }
 
     fun match(query: String, limit: Int = 20): List<CorpusMatch> = index.match(query, limit)

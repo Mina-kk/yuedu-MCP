@@ -225,7 +225,6 @@ class McpService : Service() {
                 "reapScans" to McpSessions.scanCount(),
                 "lastScanAt" to McpSessions.lastScan(),
                 "reapIdleSeconds" to McpSessions.reapIdleMs / 1000,
-                "maxLifetimeSeconds" to McpSessions.maxLifetimeMs / 1000,
             )
         }
     }
