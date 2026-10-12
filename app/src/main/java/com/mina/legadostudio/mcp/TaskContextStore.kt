@@ -26,8 +26,11 @@ class TaskContextStore(
     data class Hit(val entry: Entry, val reused: Boolean)
     private data class Task(val id: String, val label: String, var touched: Long,
         var notes: String = "", val entries: LinkedHashMap<String, Entry> = linkedMapOf())
+    /** 已失效上下文的墓碑：id→(最后活动 ms, 失效原因 idle/evicted/cleared)，最多留最近 50 个。 */
+    private data class Tomb(val touched: Long, val reason: String)
     private val mutex = Mutex()
     private val tasks = linkedMapOf<String, Task>()
+    private val tombstones = LinkedHashMap<String, Tomb>()
     init {
         require(maxEntryChars > 0 && maxEntryChars <= maxChars && maxContexts > 0)
         // 必须排在 tasks 声明之后：恢复快照会写 tasks，初始化顺序错误会在升级后把整个存储打成 NPE
@@ -38,7 +41,6 @@ class TaskContextStore(
         require(label.length <= 120) { "label 最多 120 字符" }
         expire()
         if (tasks.size >= maxContexts) evictOldest()
-        if (tasks.size >= maxContexts) evictLruIfNeeded()
         require(tasks.size < maxContexts) { "上下文数量已达上限，请先 clear_context" }
         val id = UUID.randomUUID().toString()
         tasks[id] = Task(id, label, clock())
@@ -46,38 +48,57 @@ class TaskContextStore(
         id
     }
     private fun expire() {
-        val expired = tasks.entries.filter { clock() - it.value.touched >= idleMs }
-        expired.forEach { (_, t) -> t.entries.keys.forEach(binaryDecodedCache::remove) }
-        tasks.entries.removeAll { clock() - it.value.touched >= idleMs }
+        val now = clock()
+        val expired = tasks.entries.filter { now - it.value.touched >= idleMs }
+        expired.forEach { (id, t) ->
+            t.entries.keys.forEach(binaryDecodedCache::remove)
+            rememberTomb(id, Tomb(t.touched, "idle"))
+        }
+        tasks.entries.removeAll { now - it.value.touched >= idleMs }
     }
 
-    /** 达到上限时优先回收最久未使用且已闲置的上下文，避免默认上下文把普通工具挤到报错。 */
+    /** 留墓碑（FIFO 最多 [MAX_TOMBSTONES] 个）：墓碑 id 之后报错时给得出「何时失效、为何失效」。 */
+    private fun rememberTomb(id: String, tomb: Tomb) {
+        tombstones.remove(id)
+        tombstones[id] = tomb
+        while (tombstones.size > MAX_TOMBSTONES) tombstones.remove(tombstones.keys.first())
+    }
+
+    /**
+     * 达到上限时优先回收最久未使用且已闲置（超过 minEvictIdleMs）的上下文，
+     * 避免默认上下文把普通工具挤到报错。全部上下文都在活跃使用时保持硬上限——
+     * 宁可靠 create 报错让调用方 clear_context，也不能偷走仍在使用的上下文使其引用瞬间失效。
+     */
     private fun evictOldest() {
         val deadline = clock() - minEvictIdleMs
         val victim = tasks.values.filter { it.touched <= deadline }.minByOrNull { it.touched } ?: return
         victim.entries.keys.forEach(binaryDecodedCache::remove)
         tasks.remove(victim.id)
+        rememberTomb(victim.id, Tomb(victim.touched, "evicted"))
     }
 
-    /**
-     * 硬上限兜底：evictOldest 没找到超 minEvictIdleMs 的上下文（全部最近还在用）时，
-     * 驱逐全局 LRU 一个——丢一个旧任务引用好过硬性报「上限已满」中断批量调用。
-     * 优先偷未命名的（label 为空或 "MCP connection"）；全部有名字时也退到全局 LRU。
-     */
-    private fun evictLruIfNeeded() {
-        if (tasks.size < maxContexts) return
-        val victim = tasks.values
-            .filter { it.label.isBlank() || it.label == "MCP connection" }
-            .minByOrNull { it.touched }
-            ?: tasks.values.minByOrNull { it.touched }
-            ?: return
-        victim.entries.keys.forEach(binaryDecodedCache::remove)
-        tasks.remove(victim.id)
-    }
     private fun task(id: String): Task {
         expire()
-        return (tasks[id] ?: error("CONTEXT_EXPIRED_OR_UNKNOWN：请 create_context；旧引用不能恢复")).also { it.touched = clock() }
+        return (tasks[id] ?: run {
+            val tomb = tombstones[id]
+            if (tomb != null) {
+                val agoMin = ((clock() - tomb.touched).coerceAtLeast(0)) / 60_000L
+                val lastAt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                    .format(java.util.Date(nowEpochMs(tomb.touched)))
+                val why = when (tomb.reason) {
+                    "idle" -> "闲置上限 ${idleMs / 60_000L} 分钟"
+                    "evicted" -> "上下文数超上限被回收"
+                    else -> "已删除"
+                }
+                error("CONTEXT_EXPIRED_OR_UNKNOWN：原 context 于 ${agoMin} 分钟前失效（最后活动 $lastAt，$why）；请 create_context，旧引用不能恢复")
+            }
+            error("CONTEXT_EXPIRED_OR_UNKNOWN：请 create_context；旧引用不能恢复")
+        }).also { it.touched = clock() }
     }
+
+    /** 相对时钟（System.nanoTime/ms）→ 绝对 epoch ms（墓碑显示用）。 */
+    private fun nowEpochMs(touched: Long): Long =
+        System.currentTimeMillis() - (clock() - touched).coerceAtLeast(0)
     private fun insert(task: Task, entry: Entry): Entry {
         require(entry.text.length <= maxEntryChars) { "CONTENT_TOO_LARGE：单项超出 $maxEntryChars 字符；未截断保存" }
         while (task.entries.isNotEmpty() && (task.entries.size >= 32 || task.entries.values.sumOf { it.text.length } + entry.text.length > maxChars)) {
@@ -192,9 +213,16 @@ class TaskContextStore(
         notes?.let { require(it.length <= 4000) { "notes 最多 4000 字符" }; task.notes = it; scheduleSnapshot() }
         mapOf("contextId" to task.id, "label" to task.label, "notes" to task.notes,
             "idleTtlSeconds" to idleMs / 1000, "persistence" to if (snapshotDir != null) "memory+snapshot" else "memory-only",
+            "renewed" to true,
             "entries" to task.entries.values.map { metadata(it) },
             "usedChars" to task.entries.values.sumOf { it.text.length }, "maxChars" to maxChars)
     }
+
+    /** 供诊断/测试：某 id 是否留了失效墓碑（true=见过但已失效，报错会带失效详情）。 */
+    suspend fun hasTombstone(id: String): Boolean = mutex.withLock { tombstones.containsKey(id) }
+
+    /** 与 Entry.created/Task.touched 同一时钟域的当前值（相对 ms）；快照年龄换算用它，不要用 epoch 时钟。 */
+    fun nowMs(): Long = clock()
 
     fun limits(): Map<String, Int> = mapOf(
         "maxContexts" to maxContexts, "maxChars" to maxChars, "maxEntryChars" to maxEntryChars,
@@ -217,7 +245,10 @@ class TaskContextStore(
     suspend fun clear(id: String): Boolean = mutex.withLock {
         val removed = tasks.remove(id)
         removed?.entries?.keys?.forEach(binaryDecodedCache::remove)
-        if (removed != null) scheduleSnapshot()
+        if (removed != null) {
+            rememberTomb(id, Tomb(removed.touched, "cleared"))
+            scheduleSnapshot()
+        }
         removed != null
     }
 
@@ -291,6 +322,8 @@ class TaskContextStore(
     }
     companion object {
         const val KIND_BINARY = "binary"
+        /** 失效上下文墓碑上限：只留最近 50 个，报错时给得出失效时间与原因。 */
+        const val MAX_TOMBSTONES = 50
         const val MAX_BINARY_BYTES = 4 * 1024 * 1024
         const val MAX_BINARIES_PER_CONTEXT = 8
         const val MAX_BINARY_TOTAL_BYTES = 16 * 1024 * 1024

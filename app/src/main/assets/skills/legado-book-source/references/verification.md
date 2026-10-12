@@ -37,7 +37,15 @@
    - `waitSec=1..120` 阻塞等待完成；完成后自动用 WebView 通道取证一次，返回 `evidence`（code / finalUrl / marker）。
 2. 验证完成 → **重试原工具**（原参数原样再调一次）。快照缓存对验证后的首次重试不碍事。
 3. `evidence.marker` 仍非空，或同一站每个请求都触发验证 → `set_domain_mode(domain, "always")`。
-4. 普通抓取反复 403 但验证已完成 → 系统会自动把该域切到 `webview` 模式（你会先看到 `webview_mode_enabled`），之后抓取走 WebView，无需手动改书源 URL。
+4. 普通抓取反复 403 但验证已完成 → 系统会自动把该域切到 `webview` 模式（你会先看到 `webview_mode_enabled`），之后抓取走 WebView，无需手动改书源 URL。需要恢复普通路径时调用 `set_domain_mode(domain, "auto")`。
+
+## 图片验证码（手机验证中心）
+
+`browser_verify(url, imageUrl=图片地址, waitSec=0..120)` 会先**单次**通过受限 HTTP 通道拉取公网图片，再建立 `image_code` 会话；用户可在本手机验证中心看图、输入验证码，完成后拿到 `answer`，也可用 `get_verification_status(sessionId)` 轮询。`java.getVerificationCode(imageUrl)` 同样拉图并等待用户输入最多 120 秒，用户取消/超时返回空串；**图片抓取失败会报错，不会展示空图或冒充取消**。图片 URL 不可指向私网，重定向和 DNS 解析到私网也会拒绝；仅放行不超过 2MB、真实格式为 PNG/JPEG/GIF/WebP 的图片。图片字节不会记入 HTTP 日志。
+
+图拉取不走 WebView；站点返回 HTTP 403、CF/HTML 挑战或其它非图片响应时，先在本手机验证中心打开**原站页面**人工过盾，再重试原图片请求。WebView Cookie/通行态不保证能被 HTTP 图请求复用，若仍失败应报告该限制；不要反复请求一次性验证码 URL，也不要声称已支持 WebView 拉图。
+
+`java.startBrowserAwait(url, title?, refetch?, html?)` 在沙箱已接通：调用时创建 webview 验证会话，用户在手机验证中心 WebView 里过盾后，沙箱用 WebView 通道抓取该 URL（`html` 非空时作 `loadDataWithBaseURL` 交接文档）返回整页源码——与官方「弹浏览器过盾后返回 StrResponse」语义一致，用户取消/超时返回空 body。这条链路让「CF/登录盾 → startBrowserAwait 过盾 → 继续抓」的成品源逻辑在沙箱也能端到端验收。官方阅读 App 的具体弹窗交互仍需在真机上对照验收。
 
 ## 不要做
 

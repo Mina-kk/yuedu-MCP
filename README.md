@@ -3,7 +3,7 @@
 本机 **Legado 运行时 + MCP Server**（原「书源工坊」）。App 内不调用任何模型、不保存任何模型密钥。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.1.003`（versionCode 182）
+- 当前源码构建版本：`1.1.008`（versionCode 187；以 `app/build.gradle.kts` 为准，不能据此认定 Release 已发布）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
@@ -41,8 +41,8 @@ MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文�
 |---|---|
 | 语料 / 知识 / 技能 | `match_sources` `get_corpus_source` `get_corpus_shard` `search_knowledge` `read_knowledge` `list_skills` `get_skill` `get_skill_reference` |
 | 任务上下文 | `create_context` `get_context` `list_contexts` `update_context` `clear_context` `read_page` `read_result` |
-| 抓取与解析 | `fetch_page` `analyze_html` `inspect_rule` `eval_js` |
-| 书源 | `validate_source` `list_sources` `get_source` `save_source` `export_source` `debug_source` `check_source` `list_projects` `get_project` `delete_projects` |
+| 抓取与解析 | `fetch_page` `analyze_html` `inspect_rule` `eval_js` `webview_render` `webview_eval` |
+| 书源 | `validate_source` `list_sources` `get_source` `save_source` `export_source` `debug_source` `check_source` `analyze_sources` `export_checked_sources` `archive_source_versions` `import_reader` `list_projects` `get_project` `delete_projects` |
 | 验证与 Cookie | `browser_verify` `get_verification_status` `get_domain_modes` `set_domain_mode` `get_cookies` `set_cookie` `clear_cookies` |
 | 状态与日志 | `get_app_info` `app_status` `set_http_log_recording` `get_http_logs` `get_http_log` `get_logs` `get_log` `get_crash_logs` `get_crash_log` `get_diagnostic_snapshots` `get_diagnostic_snapshot` `capture_once` `webview_capture` `list_captures` `get_capture` `poll_capture` `get_capture_resource` |
 
@@ -53,21 +53,23 @@ match_sources 语料命中（同域/同模板族现成书源）
   → create_context 建任务，全程显式传 contextId
   → fetch_page 抓页存快照；read_page / inspect_rule / analyze_html / eval_js 在快照上作业
   → 编写 BookSource JSON → debug_source 逐阶段调试（正文→目录→详情→搜索→发现）
-  → check_source(refresh=true) 全程实时验收
-  → save_source 保存，get_source 回读确认
+  → check_source(auto=true, refresh=true, searchKey="实际关键词") 按搜索结果贯通详情/目录/正文取证
+  → save_source 保存，get_source 按保存结果的项目 ID 回读确认
 ```
 
-`save_source` 默认按书源 URL 覆盖更新同站记录；需要保留历史版本时传 `newVersion=true` 追加。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码、Web JS 逆向（方法论 / 入门 SOP / 进阶对抗 / 书源迁移四篇专题）等知识库；另附《书源 JS 入门教程》知识包（零基础语法到书源 `<js>` 实战），技能参考文档同步收录。
+`save_source` 仅在同一完整 `bookSourceUrl` 且 JSON 内容相同时幂等更新；同 URL 规则不同会新增版本并报告冲突，**不再按同域或去掉 URL 尾部 `/` 自动合并、删除**。`newVersion=true` 也不会为相同内容创建空副本。保存返回的 `VALIDATED` 只表示静态结构校验通过，不表示联网可用。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码、Web JS 逆向（方法论 / 入门 SOP / 进阶对抗 / 书源迁移四篇专题）等知识库；另附《书源 JS 入门教程》知识包（零基础语法到书源 `<js>` 实战），技能参考文档同步收录。
 
 ### eval_js 与书源 JS 环境
 
-`eval_js` 与书源 `<js>` / `{{}}` 段运行在 vendored 官方 Rhino + analyzeRule 引擎上，除 `java`（ajax/connect/加解密）外还注入官方同名对象：`cookie`（`getCookie`/`getKey`/`setCookie`/`replaceCookie`/`removeCookie`）、`cache`（`put`/`get`/`delete`/`putMemory`/`getFromMemory`，进程内有效）、`source`（`put`/`get`/`getVariable`/`setVariable`，`debug_source` 时与书源变量互通）。`java.getStringList(...)` 返回真正的 JS `Array`（可 `.length` / `.map` / 下标访问），与官方阅读一致。规则链路全程保留元素对象：CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性；多段落 `@text` 按官方语义 join 全部段落。
+`eval_js` 与书源 `<js>` / `{{}}` 段运行在 vendored 官方 Rhino + analyzeRule 引擎上，除 `java`（ajax/connect/加解密）外还注入官方同名对象：`cookie`（`getCookie`/`getKey`/`setCookie`/`replaceCookie`/`removeCookie`）、`cache`（`put`/`get`/`delete`/`putMemory`/`getFromMemory`，进程内有效）、`source`（`put`/`get`/`getVariable`/`setVariable`，`debug_source` 时与书源变量互通）。规则链路全程保留元素对象：CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性；多段落 `@text` 按官方语义 join 全部段落。
 
 `set_cookie` 默认 `merge=true` 按 Cookie 名合并（不会冲掉该域其他 Cookie，如登录态），`merge=false` 为整串替换。
 
 ### 验收闭环
 
-`validate_source` 检查联动完整性：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`，缺一直接判非法。`check_source` 在书源含 `searchUrl` 而未传 `searchKey` 时，自动用关键词「我」探测搜索链路并在 `warnings` 标注——搜索结果页结构与列表页常常是两套 DOM，漏验会导致真机搜索零结果；正式验收请显式传 `searchKey` 并配 `refresh=true`。
+`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用真实搜索结果中的详情 URL 继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照，不能宣称实时。未传 `searchKey` 而源有 `searchUrl` 时自动用「我」探测并在 `warnings` 标注；零结果、验证墙和脚本错误应分开处理，任何一次通过也不保证今后站点永远可用。
+
+`analyze_sources` 只读分析本地书源（可传 `ids`）或外部 JSON 数组 `sources`：同 URL 但规则不同是冲突，不按域名、响应速度合并；`list_sources` 默认逐条列出各版本；同 URL 多版本用项目 ID `get_source`，URL 歧义时不会擅自取第一条。`export_checked_sources(ids=[…])` 仅导出显式选中的本地项目，排除开关 `exclude.excludeLogin`、`excludeCaptcha`、`excludeFailed`、`excludeUnverified` 默认全部关闭；`collapseIdentical=true` 只折叠身份确定、JSON 完全一致且无冲突的副本。校验过滤只采信本 App 的 `check_source` 最近 30 分钟按书源原文绑定的证据；客户端传入的 `checkResults` 仅作未核验自述展示，不影响判定。输出为阅读兼容 JSON 数组且不删除原项目；MCP 单次结果超过 11,500 字符会报错，请缩小 `ids` 或分批导出，不截断 JSON。书源页「分析/过滤」提供静态预览、逐条检测和不受该 MCP 回包上限约束的本地复制/分享/导入入口；外部数组静态分析**不会执行陌生书源的 JS 或批量探测网络**，未实测记录应保持未验证。
 
 ### 语料命中（省 token 第一步）
 
@@ -92,14 +94,6 @@ match_sources 语料命中（同域/同模板族现成书源）
 - WebView 通道的 Cookie 与 OkHttp 通道 TLS 指纹不一致（如 `cf_clearance`）：系统对被 JS 盾拦截的站点自动改用 WebView 通道抓取，而不是把无效 Cookie 灌进规则。
 - 成品源在官方阅读 App 内过盾靠书源 `loginCheckJs` + `java.startBrowserAwait`，与调试期验证中心互补。
 
-#### 图文验证码（image_code）
-
-部分站点在搜索/详情页弹出**纯图片验证码**（输字符进框，非滑块/点选）。这一链路已闭环：
-
-- 书源 JS 内 `java.getVerificationCode(imageUrl)` 会挂起当前调用：App 把图片下载回本地，在验证中心弹出「看图输字符」会话，用户输入答案后自动把答案写回、原 JS 继续跑；
-- MCP 侧 `browser_verify(url, imageUrl=...)` 同样可发起 image_code 会话（直接传验证码图 URL，不必先走网页）；`get_verification_status` 轮询到 `answered` 后取 `answer` 字段；
-- image_code 会话**不采 Cookie**（图片验证不建立登录态），验证中心按 `kind` 区分 image_code / challenge 两类入口，UI 分别渲染「图片+输入框」与「WebView 内嵌页」。
-
 ### 并行多书源
 
 同时制作多个书源时：
@@ -111,7 +105,7 @@ match_sources 语料命中（同域/同模板族现成书源）
 
 ## 书源与技能
 
-书源页按站点域名分组，组内按保存时间倒序展开。每个书源版本支持点击查看格式化 JSON 详情（全屏独立滚动、支持文本自由选中复制），并在版本操作栏提供「复制源」一键写入剪贴板及「导入至阅读」。技能页可查看内置 Skill 并控制启用/停用（停用后对 MCP 不可见）；自定义 Skill 支持新增、导入、导出和删除。`save_skill` / `delete_skill` 不能改写内置 Skill。
+书源页按站点域名分组，组内按保存时间倒序展开；「分析/过滤」先展示重复候选、冲突和默认关闭的登录/验证码/失败/未验证排除开关，导出只影响本次预览，不删除项目，也不更改阅读客户端已有源。逐条「检测」会联网运行该源的规则/JS，需用户主动确认。每个书源版本仍可查看 JSON 详情、复制、分享与导入至阅读。技能页可查看内置 Skill 并控制启用/停用（停用后对 MCP 不可见）；自定义 Skill 支持新增、导入、导出和删除。`save_skill` / `delete_skill` 不能改写内置 Skill。
 
 ## 日志与诊断
 
@@ -121,7 +115,6 @@ match_sources 语料命中（同域/同模板族现成书源）
 - HTTP 记录含时间、状态码与耗时；自动过滤本地回环与私网探测流量，点击进入全屏详情页（请求/响应头、正文、重定向链），详情页内滚动与列表互不影响，系统返回键只关闭详情、回到列表；打开详情时隐藏底部标签栏；
 - HTTP 列表停留在顶部时自动跟随最新记录，翻历史时不被打断；
 - **「抓包」页签是三个独立页的入口**：「逐次抓包」表单发一次请求并看逐跳结果；「浏览器抓包」是可见可交互的 WebView；「抓包会话历史」按 `cap:contextId` 分组持久化（逐次/可见浏览器/无头 webview 三类，重启可回看），分页加载 + 按抓包 ID 全库精确查找；该页并可开关 HTTP 事务记录；抓包事务不进入 HTTP 标签、不参与锚点分桶与按天导出；
-- 抓包引擎对 `application/octet-stream` 等无明确 MIME 的响应用**魔数嗅探**（PNG/JPEG/GIF/WebP/WOFF/WOFF2/zip 等）自动归类，字体/封面图落盘为二进制资源而不是文本乱码；
 - 操作日志与 HTTP 日志支持**按天导出为文本**（经系统分享发给电脑/AI 排查），导出含请求/响应头与正文；
 - 诊断快照只含版本、MCP 状态和前置条件，不含 HTTP 或崩溃正文。
 
@@ -135,7 +128,7 @@ match_sources 语料命中（同域/同模板族现成书源）
 
 使用 `create_context` 创建任务，后续调用传入 `contextId`。`fetch_page` 保存网页并返回 `pageId`；相同 method+URL+body（**含 POST 搜索**）在 5 分钟内复用快照，只返回引用。正文通过 `read_page` 分段或搜索，也可直接交给 `inspect_rule`、`analyze_html`、`eval_js`（传 `pageId` 即可，免传 HTML）。工具结果超过 12000 字符自动转 `resultId` + 预览，用 `read_result` 分段取回，不重复执行原工具；`list_contexts` 可列出当前任务与占用，不返回正文。
 
-`update_context` 保存阶段笔记，重连后使用 `get_context` 恢复目录与进度，完成后 `clear_context`。上限 **16 个任务**（LRU 兜底：满员时自动回收最久未用的空闲任务，不顶掉正在被引用的）、每任务 32 项 / 200 万字符 / 单项 100 万字符；快照 5 分钟内新鲜、闲置 30 分钟过期。上下文持久化到应用私有目录（memory + snapshot）：进程重启后自动恢复，但恢复条目标记 `stale`，先 `refresh=true` 刷新再依赖其内容。MCP 令牌、User-Agent 或书源类型变化会使旧引用失效；它不自动读取、总结或裁剪客户端的聊天历史。
+`update_context` 保存阶段笔记，重连后使用 `get_context` 恢复目录与进度，完成后 `clear_context`。上限 **16 个任务**、每任务 32 项 / 200 万字符 / 单项 100 万字符；快照 5 分钟内新鲜、闲置 30 分钟过期。上下文持久化到应用私有目录（memory + snapshot）：进程重启后自动恢复，但恢复条目标记 `stale`，先 `refresh=true` 刷新再依赖其内容。MCP 令牌、User-Agent 或书源类型变化会使旧引用失效；它不自动读取、总结或裁剪客户端的聊天历史。
 
 `fetch_page` 支持 `responseMode=reference`（不回传正文，仅存快照）与 `maxChars`（预览大小）进一步省流量；`debug_source` / `check_source` 默认复用本任务快照，**最终验收传 `refresh=true` 全程实时**；调试输出有意截断（正文 4000 字符、目录 20 章、搜索 10 条等），均带全量计数字段。
 

@@ -27,9 +27,9 @@
 | java | 当前类 |
 | baseUrl | 当前 url, String |
 | result | 上一步的结果 |
-| book | [书籍类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/data/entities/Book.kt) |
-| rssArticle | [Article 类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/data/entities/RssArticle.kt) |
-| chapter | [章节类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/data/entities/BookChapter.kt) |
+| book | [书籍类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/data/entities/Book.kt)（沙箱实现 `BookJsApi`，属性/方法与官方同名） |
+| rssArticle | [Article 类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/data/entities/RssArticle.kt)（沙箱未注入） |
+| chapter | [章节类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/data/entities/BookChapter.kt)（沙箱实现 `ChapterJsApi`，属性/方法与官方同名） |
 | source | [基础书源类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/data/entities/BaseSource.kt) |
 | cookie | [cookie 操作类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/help/http/CookieStore.kt) |
 | cache | [缓存操作类](https://github.com/gedoor/legado/blob/master/app/src/main/java/io/legado/app/help/CacheManager.kt) |
@@ -67,13 +67,37 @@ java.fetchFont(url)             // Studio 沙箱专有：仅放行字体响应�
 java.decodeWoff2(data)          // Studio 沙箱专有：解 WOFF2（内部 Brotli）/WOFF/TTF/OTTO 的 cmap；
                                 // 入参 ByteArray 或 base64 字符串；返回 {"U+4E2D":1,...} 码点→glyphId。
                                 // 注意：glyphId 是字形序号，不等于汉字；gid→汉字要字形轮廓比对
+java.queryTTF(data)             // 官方同名 API：解析字体为 QueryTTF（码点↔字形轮廓指纹映射）。
+                                // 入参 ByteArray / base64 字符串 / http(s) URL（URL 走 fetchFont 同套抓取校验）。
+                                // 支持 TTF/OTF/WOFF/WOFF2：woff/woff2 自动解包成 sfnt；
+                                // 限制：woff2 的 glyf/loca 若带 transformed glyf（transformVersion≠3）
+                                // 会报错（沙箱未实现逆变换），请换未变换的 woff2/woff/ttf 或先用工具转成 TTF。
+                                // 结果按字体字节 sha256 缓存（LRU 8 份），同字体重复调用不重解析。
+                                // 返回对象方法：getGlyfByUnicode(码点) 取轮廓指纹、getGlyfIdByUnicode(码点)
+                                // 取 glyphId、getUnicodeByGlyf(指纹) 反查码点、isBlankUnicode(码点)、
+                                // 以及 unicodeToGlyph/glyphToUnicode/unicodeToGlyphId 三个映射表。
+java.replaceFont(text, errFont, correctFont[, filter])
+                                // 官方同名 API：通用字体反爬替换（字形轮廓比对，不依赖 GB2312 顺序表，
+                                // 任意 cmap 打乱的字体都能用）。errFont=页面声明的错误字体（文本按它编码），
+                                // correctFont=轮廓相同的正确字体；逐码点取 errFont 轮廓到 correctFont 反查汉字。
+                                // filter=true 时删掉 errFont 里无轮廓的字符；空白字符恒保留；任一字体 null 返回原文。
+                                // 典型用法（参照官方 ruleHelp）：先按字符把网页字体存成错误字体，再拿站点
+                                // 原字体作正确字体：
+                                //   var err = java.queryTTF(java.fetchFont("https://x/enc.woff2"));
+                                //   var ok  = java.queryTTF("https://x/orig.ttf");
+                                //   java.replaceFont(正文, err, ok, true)
+                                // 若确认字体只是 GB2312 顺序 gid 映射（无需轮廓），也可继续用
+                                // decodeWoff2 拿码点→gid 再按 gid 表映射——两条路都支持。
 java.ajaxAll(urls)
 java.webView(url)             // 单参形式：loadUrl 抓渲染后页面
 java.webView(html, url, js)   // 三参形式：html 非空时以 url 为 baseURL 直接渲染交接文档（loadDataWithBaseURL），
                               // html 为 null/空白仍 loadUrl；url 必须是公网 http/https（拒绝 file/javascript/回环私网），
                               // js 返回 null 会按固定间隔轮询重试直到超时
-java.startBrowserAwait(url, title?, refetch?) // 沙箱内不弹浏览器：直接抛验证异常（等效「需要验证」信号）
+java.startBrowserAwait(url, title?, refetch?, html?) // 创建 webview 验证会话→用户在手机验证中心 WebView 过盾→沙箱 WebView 通道抓该 URL（html 非空作交接文档）返回整页源码 StrResponse；取消/超时返回空 body
+java.getVerificationCode(imageUrl) // 单次受限 HTTP 拉真实图片（PNG/JPEG/GIF/WebP，最多 2MB）→手机验证中心看图输入（最长 120 秒）；取消/超时返回空串，拉图失败抛错
 ```
+
+图片验证码请求拒绝私网入口、DNS/重定向私网以及 HTML/CF 挑战响应，不写入图片日志。403/Cloudflare 时先用本手机验证中心在**原站页面**人工过盾再重试；图片本身不经 WebView，Cookie/通行态跨 HTTP/WebView 通道复用不保证成功。不要反复请求一次性图片 URL；详见 [`verification.md`](verification.md)。
 
 **响应对象方法（`java.connect`/`java.get`/`java.post`/`java.ajaxAll` 元素均返回此对象）：**
 ```js
@@ -142,6 +166,27 @@ cache.deleteMemory(key)
 source.getVariable / source.setVariable / source.putVariable
 source.put(key, value)
 source.get(key)
+
+// book（官方 Book 属性在沙箱可读写；一次 debug 链路内同一实例，调试阶段会逐字段回填）
+book.bookUrl / book.tocUrl / book.origin / book.originName
+book.name / book.author / book.kind / book.coverUrl / book.intro
+book.type / book.latestChapterTitle / book.totalChapterNum
+book.durChapterTitle / book.durChapterIndex / book.canUpdate / book.variable
+book.putVariable(key, value)   // value=null 删除该键；变量池一次 debug 内跨规则共享
+book.getVariable(key?)         // 无参返回变量池 JSON 串
+book.putCustomVariable(json) / book.getVariableMap() / book.setVariableMap(map)
+book.upCustomIntro(v) / book.setReverseToc(b) / book.getUseReplaceRule() / book.setUseReplaceRule(b)
+// 语义差异：eval_js 里 book 是空对象兜底（属性为空串/0，不报错）；
+// debug_source 里 book.origin/originName/type 取书源头字段，
+// 详情阶段 book.bookUrl=详情页地址且 name/author/kind/intro/coverUrl/tocUrl/latestChapterTitle 逐字段写回，
+// 目录阶段 book.tocUrl=目录页地址，正文阶段 chapter.url=章节地址。
+// 各阶段 book.putVariable 的写入跨规则求值共享（与 source 变量同理）。
+
+// chapter（官方 BookChapter 属性；目录阶段逐条实例化 index/url/title/bookUrl/baseUrl，正文阶段 chapter.url=目标章节）
+chapter.url / chapter.title / chapter.baseUrl / chapter.bookUrl / chapter.index
+chapter.resourceUrl / chapter.tag / chapter.start / chapter.end / chapter.variable
+chapter.putVariable(key, value) / chapter.getVariable(key?)
+chapter.putLyric(v) / chapter.putImgUrl(v) / chapter.update()
 ```
 
 **明确不可用（写了必报错，不要用）：**

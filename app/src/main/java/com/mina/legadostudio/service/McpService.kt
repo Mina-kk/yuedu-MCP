@@ -49,20 +49,20 @@ class McpService : Service() {
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, notification("MCP 服务启动中", "正在绑定本机回环 Endpoint"))
-
+        
         runCatching {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "yueduMCP:service")
             wakeLock?.acquire()
         }.onFailure { StudioLog.add("wakelock acquire err", "W", "mcp", it.localizedMessage.orEmpty()) }
-
+        
         @Suppress("DEPRECATION")
         runCatching {
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "yueduMCP:service")
             wifiLock?.acquire()
         }.onFailure { StudioLog.add("wifilock acquire err", "W", "mcp", it.localizedMessage.orEmpty()) }
-
+        
         McpStats.setListener(::scheduleNotificationUpdate)
         VerificationOverlayManager.refresh(this)
         registerNetworkCallback()
@@ -72,12 +72,12 @@ class McpService : Service() {
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val callback = object : ConnectivityManager.NetworkCallback() {
             private val debounceRunnable = Runnable { checkNetworkChange() }
-
+            
             override fun onAvailable(network: Network) {
                 networkHandler.removeCallbacks(debounceRunnable)
                 networkHandler.postDelayed(debounceRunnable, 2000)
             }
-
+            
             override fun onLinkPropertiesChanged(network: Network, linkProperties: android.net.LinkProperties) {
                 networkHandler.removeCallbacks(debounceRunnable)
                 networkHandler.postDelayed(debounceRunnable, 2000)
@@ -88,7 +88,7 @@ class McpService : Service() {
             connectivityManager.registerDefaultNetworkCallback(callback)
         }.onFailure { StudioLog.add("network callback register err", "W", "mcp", it.localizedMessage.orEmpty()) }
     }
-
+    
     private fun checkNetworkChange() {
         val current = McpAccess.localAddresses().map { it.hostAddress ?: "" }.toSet()
         if (current != lastAddresses) {
@@ -116,17 +116,17 @@ class McpService : Service() {
         }
         networkCallback = null
         networkHandler.removeCallbacksAndMessages(null)
-
+        
         wakeLock?.let {
             if (it.isHeld) it.release()
         }
         wakeLock = null
-
+        
         wifiLock?.let {
             if (it.isHeld) it.release()
         }
         wifiLock = null
-
+        
         McpStats.setListener(null)
         VerificationOverlayManager.hideAll()
         // 关停引擎丢到后台线程，避免主线程被阻塞

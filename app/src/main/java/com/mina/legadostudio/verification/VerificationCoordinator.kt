@@ -71,6 +71,21 @@ class VerificationCoordinator(
         return null
     }
 
+    /**
+     * webview 会话专用：轮询等用户在验证中心 WebView 里完成过盾（status==COMPLETED），
+     * 返回完成后的 finalUrl；超时/用户取消返回 null。由 java.startBrowserAwait 的沙箱实现调用。
+     */
+    suspend fun awaitCompleted(id: String, timeoutSec: Int = 120): String? {
+        var waited = 0
+        while (waited < timeoutSec) {
+            val s = dao.verificationSession(id) ?: return null
+            if (s.status == "COMPLETED") return s.finalUrl.ifBlank { s.url }
+            if (s.status != "WAITING") return null
+            delay(1_000); waited++
+        }
+        return null
+    }
+
     /** 该域最近一次 COMPLETED 会话是否仍在 ttl 内（ALWAYS 模式调用方应跳过本检查）。 */
     suspend fun isCompletedFresh(domain: String, ttlMs: Long = 30 * 60_000L): Boolean {
         val latest = dao.latestVerification("mcp", domain) ?: return false

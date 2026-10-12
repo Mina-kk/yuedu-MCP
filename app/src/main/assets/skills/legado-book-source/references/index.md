@@ -26,6 +26,7 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 | 目标站即爱书网 dm.aqxsw66.com 时的整本 TXT 伪目录取证 | 知识库 `TXT整本站伪目录实战-爱书网.md`（仅同站取证参考，非通用模板；通用整本站先查语料 `references/corpus.md` + `references/content-rules.md`） |
 | 初始化、基础字段、详情、搜索、目录、正文 | `references/basics.md` |
 | 生成 JSON 的字段清单与硬性合同（必填字段、分页/JS 位置约束） | `references/generation-contract.md`，字段逐项说明见 `references/template.yaml`（字段清单，非必套站点结构） |
+| 取证口径：证据分级、观察/推导/运行/未知标注、覆盖边界、台账格式 | `references/evidence-methodology.md` |
 | 正文多页合并 / 翻页 / 净化验收 | `references/content-rules.md` |
 | 单站深案：番茄小说（官方接口/AES/字体混淆/插图） | `references/fanqie.md` |
 | 英文/国际站书源（查重 → royalroad 底本 → 适配仓反推 → 活页验收） | `references/english-sites.md` |
@@ -85,6 +86,8 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 - 候选选择器匹配数量
 - 第一个节点的文本、属性和链接
 - JavaScript 的输入值、输出值和异常
+
+取证口径（证据分级、快照/实跑/静态校验的覆盖边界、unknown 登记、notes 台账格式）见 `references/evidence-methodology.md`；探针产出按该文四级标注，结论强度不超过证据强度。
 
 需要网络级证据时：开启 HTTP 日志 → 复现一次 → 读取该次请求详情；要逐跳重定向或整会话取证时用 SKILL.md「抓包取证」里的抓包工具。不要批量复现制造噪音。
 

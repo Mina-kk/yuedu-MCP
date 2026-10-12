@@ -80,6 +80,32 @@ class BookSourceValidatorTest {
         assertTrue(validator.validate(json).issues.any { it.path == "bookSourceType" })
     }
 
+    @Test fun stringBookSourceTypeDoesNotCrash() {
+        // 回归：bookSourceType 给字符串（真机会 ClassCastException）时 validator 不能抛异常，只能记 issue
+        val json = """{
+          "bookSourceName":"示例","bookSourceUrl":"https://example.com",
+          "bookSourceType":"abc",
+          "ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#content"}
+        }"""
+        val report = validator.validate(json)
+        assertTrue(report.issues.any { it.path == "bookSourceType" })
+        assertFalse(report.isValid)
+    }
+
+    @Test fun mediaSourceMissingContentRuleIsWarningNotIssue() {
+        // 音频源缺 ruleContent.content：是非阻断 warning（isValid 不受影响），不是硬 issue
+        val json = """{
+          "bookSourceName":"音频","bookSourceUrl":"https://example.com",
+          "bookSourceType":1,
+          "ruleToc":{"chapterList":"a"}
+        }"""
+        val report = validator.validate(json)
+        assertTrue("媒体源缺正文规则不应影响 isValid：${report.issues}", report.isValid)
+        val warning = report.warnings.firstOrNull { it.path == "ruleContent.content" }
+        assertTrue("预期 warning 提示资源取证：${report.warnings}", warning != null)
+        assertTrue(warning!!.message.contains("资源"))
+    }
+
     @Test fun requiresSearchListWhenSearchEnabled() {
         val json = """{
           "bookSourceName":"示例",

@@ -140,4 +140,61 @@ class RhinoEvaluatorEnvTest {
         assertTrue(error != null)
         assertTrue(!error!!.message.orEmpty().contains("【API 提示】"))
     }
+
+    @Test fun bookAndChapterObjectsAreInjected() {
+        val out = rhino().evaluate(
+            """
+            var parts = [];
+            parts.push(typeof book);
+            parts.push(typeof chapter);
+            parts.push(typeof book.putVariable);
+            parts.push(typeof book.getVariable);
+            parts.push(typeof chapter.putVariable);
+            parts.push(book.name);
+            parts.push(chapter.index);
+            parts.join('|')
+            """.trimIndent()
+        )
+        assertEquals("object|object|function|function|function||0", out.value)
+    }
+
+    @Test fun bookVariableRoundTripsWithinDebug() {
+        val book = com.mina.legadostudio.runtime.BookJsApi()
+        val out = rhino().evaluate(
+            """
+            book.name = '测试书';
+            book.putVariable('token', 'abc');
+            book.putVariable('gone', 'x'); book.putVariable('gone', null);
+            [book.name, book.getVariable('token'), String(book.getVariable('gone'))].join('|')
+            """.trimIndent(),
+            bindings = mapOf("book" to book),
+        )
+        assertEquals("测试书|abc|null", out.value)
+        assertEquals("abc", book.getVariable("token"))
+        assertEquals("测试书", book.name)
+    }
+
+    @Test fun chapterFieldsAndVariablePoolWork() {
+        val chapter = com.mina.legadostudio.runtime.ChapterJsApi()
+        val out = rhino().evaluate(
+            """
+            chapter.index = 3; chapter.title = '第四章';
+            chapter.putVariable('k', 'v1');
+            chapter.putLyric('歌词'); chapter.putImgUrl('https://x/i.png');
+            chapter.update();
+            [chapter.index, chapter.title, chapter.getVariable('k'), chapter.getLyric(), chapter.getImgUrls().length].join('|')
+            """.trimIndent(),
+            bindings = mapOf("chapter" to chapter),
+        )
+        assertEquals("3|第四章|v1|歌词|1", out.value)
+    }
+
+    @Test fun bookMapBindingIsWrappedIntoBookJsApi() {
+        // debug 链路里 bindings["book"] 是 BookJsApi；外部塞 Map 也要被包成同名对象（不裸丢 NativeObject）
+        val out = rhino().evaluate(
+            "book.name + '|' + book.origin + '|' + book.bookUrl",
+            bindings = mapOf("book" to mapOf("name" to "甲", "origin" to "https://src.test", "extra" to "e1")),
+        )
+        assertEquals("甲|https://src.test|", out.value)
+    }
 }

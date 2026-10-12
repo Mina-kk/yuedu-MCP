@@ -10,8 +10,10 @@ import com.mina.legadostudio.data.db.OperationLogEntity
 import com.mina.legadostudio.diagnostic.CrashLogStore
 import com.mina.legadostudio.diagnostic.DiagnosticSnapshotStore
 import com.mina.legadostudio.domain.BookSourceValidator
+import com.mina.legadostudio.domain.LogFilterUtils
 import com.mina.legadostudio.mcp.StudioLog
 import com.mina.legadostudio.network.HttpFetcher
+import com.mina.legadostudio.network.HttpOrigin
 import com.mina.legadostudio.network.HttpLogRecorder
 import com.mina.legadostudio.network.RuntimeConfigStore
 import com.mina.legadostudio.skills.KnowledgeRepository
@@ -28,6 +30,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.time.Instant
 
 class StudioApplication : Application() {
@@ -129,28 +132,67 @@ class StudioApplication : Application() {
     val corpus by lazy { com.mina.legadostudio.domain.CorpusRepository(this) }
     val taskContexts by lazy { com.mina.legadostudio.mcp.TaskContextStore(snapshotDir = java.io.File(filesDir, "contexts")) }
     val analyzer by lazy { HtmlAnalyzer() }
+    fun fetchCaptchaImage(imageUrl: String, origin: HttpOrigin): String {
+        val url = imageUrl.trim()
+        require(url.startsWith("http://", true) || url.startsWith("https://", true)) { "验证码图仅支持公网 HTTP/HTTPS URL" }
+        val parsed = url.toHttpUrlOrNull()
+            ?: throw IllegalArgumentException("验证码图 URL 无法解析")
+        require(parsed.username.isEmpty() && parsed.password.isEmpty()) { "验证码图 URL 不允许内嵌凭据" }
+        require(!LogFilterUtils.isLoopbackOrPrivate(url)) { "验证码图 URL 不允许私网/回环/保留地址" }
+        val captchaFetcher = HttpFetcher(
+            cookieStore::headerFor, sessionCookieJar, httpLogs, runtimeConfig::userAgent, { runtimeConfig.bookSourceType },
+            unsafeRedirectGuard = { target ->
+                val next = target.toHttpUrlOrNull()
+                when {
+                    next == null -> "目标不是有效的 HTTP/HTTPS URL"
+                    next.username.isNotEmpty() || next.password.isNotEmpty() -> "目标内嵌凭据"
+                    LogFilterUtils.isLoopbackOrPrivate(target) -> "目标为私网/回环/保留地址"
+                    else -> null
+                }
+            },
+            unsafeDnsGuard = { address ->
+                if (LogFilterUtils.isLoopbackOrPrivate(address.hostAddress.orEmpty())) "解析到私网/回环/保留地址" else null
+            },
+        )
+        val fetched = captchaFetcher.fetch(HttpFetcher.FetchRequest(
+            url = url, method = "GET", timeoutSec = 30, maxBodyBytes = HttpFetcher.MAX_IMAGE_BYTES,
+            allowImageBinary = true, origin = origin,
+        ))
+        val bytes = fetched.rawBytes ?: error("验证码图拉取失败：没有图片字节")
+        val mime = fetched.headers.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value
+            ?: error("验证码图拉取失败：没有可验证的图片格式")
+        return "data:$mime;base64,${java.util.Base64.getEncoder().encodeToString(bytes)}"
+    }
+
     val runtime by lazy {
-        // verificationProvider：java.getVerificationCode 的搬运工——拉图→base64→建 image_code 会话→等答案。
-        // 做成懒挂：RhinoEvaluator 在 runtime 初始化前就要构造，而 verification 依赖 dao，避免环。
-        val vprov: suspend (String) -> String? = vprov@{ imageUrl ->
-            if (imageUrl.isBlank()) return@vprov null
-            val fetched = runCatching {
-                fetcher.fetch(com.mina.legadostudio.network.HttpFetcher.FetchRequest(
-                    imageUrl, "GET", origin = com.mina.legadostudio.network.HttpOrigin(originKind = "js_captcha_fetch"),
-                    maxBodyBytes = 2_000_000,
-                ))
-            }.getOrNull() ?: return@vprov null
-            val mime = fetched.headers.entries.firstOrNull { it.key.equals("Content-Type", true) }?.value
-                ?.substringBefore(';')?.trim().orEmpty().ifBlank { "image/png" }
-            val b64 = java.util.Base64.getEncoder().encodeToString(fetched.rawBytes ?: fetched.body.toByteArray())
-            val session = verification.create("mcp", imageUrl, "图片验证码（java.getVerificationCode）", kind = "image_code", imageData = "data:$mime;base64,$b64")
+        val vprov: suspend (String) -> String? = { imageUrl ->
+            val imageData = fetchCaptchaImage(imageUrl, HttpOrigin(originKind = "js_captcha_fetch"))
+            val session = verification.create("mcp", imageUrl, "图片验证码（java.getVerificationCode）", kind = "image_code", imageData = imageData)
             verification.awaitAnswer(session.id, 120)
+        }
+        // java.startBrowserAwait：手机验证中心 WebView 过盾 → WebView 通道抓该 URL 取整页源码，
+        // 与官方「弹浏览器过盾后（refetch）返回页面」语义一致；html 非空时作交接文档渲染。
+        val browserAwait: suspend (String, String?) -> String? = { pageUrl, handoffHtml ->
+            val session = verification.create("mcp", pageUrl, "浏览器验证（java.startBrowserAwait）", kind = "webview")
+            val finalUrl = verification.awaitCompleted(session.id, 120)
+            if (finalUrl == null) null else runCatching {
+                webViewLoader.load(finalUrl.ifBlank { pageUrl }, timeoutMs = 60_000, html = handoffHtml).html
+            }.getOrNull()
         }
         EmbeddedLegadoRuntime(
             fetcher, validator,
-            rhino = RhinoEvaluator(fetcher, gson, webViewLoader, cookieStore, runtimeConfig::userAgent, httpLogs = httpLogs, verificationProvider = vprov),
+            rhino = RhinoEvaluator(fetcher, gson, webViewLoader, cookieStore, runtimeConfig::userAgent, httpLogs = httpLogs, verificationProvider = vprov, browserAwaitProvider = browserAwait),
             webViewLoader = webViewLoader, domainModes = domainModes, httpLogs = httpLogs,
         )
+    }
+
+    /** 已安装、能处理 legado://import/bookSource 的阅读分支（含上次所用包名置顶）。 */
+    fun readerTargets(): List<com.mina.legadostudio.export.ReaderCatalog.App> =
+        com.mina.legadostudio.export.ReaderImport.resolve(this)
+
+    /** 把书源 JSON 经回环端点 + legado://import 推送给指定阅读包名（包名须为 readerTargets 之一）。 */
+    fun importToReader(sourceJson: String, packageName: String) {
+        com.mina.legadostudio.export.ReaderImport.launch(this, sourceJson, packageName)
     }
 
     private fun wireOperationLogs() {

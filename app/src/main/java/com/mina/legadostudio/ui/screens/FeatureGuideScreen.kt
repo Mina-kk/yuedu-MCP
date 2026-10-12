@@ -58,8 +58,9 @@ fun FeatureGuideScreen(onBack: () -> Unit = {}) {
                     GuideStep("②  list_captures / get_capture(contextId)：翻历史会话、按会话分页回看逐跳；活会话用 poll_capture 增量拉新事务")
                     GuideStep("③  get_http_log(id)：查看单条请求/响应头及脱敏、截断的正文片段；字体/图片等二进制用 get_capture_resource(logId) 分片取")
                     GuideStep("④  也可由用户在 App「日志→抓包→浏览器抓包」手动点页，AI 凭同一 cap:contextId 回看（MCP 不能遥控该浏览器）")
-                    GuideStep("⑤  debug_source(source, entry)：用 App 内 Legado 运行时按入口（关键词/详情 URL/++目录/--正文）跑整源")
-                    GuideStep("⑥  check_source(source)：按搜索/详情/目录/正文链路批量校验，返回各阶段耗时")
+                    GuideStep("⑤  debug_source(source, entry)：用 App 内 Legado 运行时按入口（关键词/详情 URL/++目录/--正文/分类::发现URL）跑整源；JS 渲染页用 webview_render(url 或 url+pageId) 转真实 DOM")
+                    GuideStep("⑥  check_source(source, auto=true, refresh=true, searchKey)：逐源联网检查搜索→详情→目录→正文（exploreUrl/exploreKey 可加发现链），返回各阶段耗时与证据；未覆盖阶段不能算可用")
+                    GuideStep("⑦  半成品存 save_project、成品 save_source 入书源库；同 URL 旧版本用 archive_source_versions 清理；import_reader(projectId, packageName) 推送到本机阅读客户端（包名缺省先回目标列表）")
                 }
             }
             item {

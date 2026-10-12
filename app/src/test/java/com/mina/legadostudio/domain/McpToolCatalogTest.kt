@@ -76,10 +76,16 @@ class McpToolCatalogTest {
             "clear_cookies",
             "capture_once",
             "webview_capture",
+            "webview_render",
+            "webview_eval",
+            "archive_source_versions",
+            "import_reader",
             "list_captures",
             "get_capture",
             "poll_capture",
             "get_capture_resource",
+            "analyze_sources",
+            "export_checked_sources",
         )
         val missing = required - toolNames()
         assertTrue("missing required tools: $missing", missing.isEmpty())
@@ -91,7 +97,8 @@ class McpToolCatalogTest {
         assertTrue(source.contains("\"ai\" to false"))
         assertTrue(source.contains("\"role\" to \"mcp-runtime\""))
         assertTrue(source.contains("\"ui\" to listOf(\"mcp\", \"sources\", \"skills\", \"verification\", \"logs\")"))
-        assertTrue(source.contains("默认覆盖当前成品"))
+        // save_source 契约已改：同 URL 不同 JSON 保留为新版本（不再 trimEnd('/') 归并、不静默覆盖）
+        assertTrue(source.contains("同 URL 不同 JSON"))
         assertTrue(source.contains("newVersion"))
     }
 }

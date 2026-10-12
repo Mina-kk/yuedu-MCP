@@ -11,6 +11,75 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HttpFetcherTest {
+    private fun png(): ByteArray = java.util.Base64.getDecoder().decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+    )
+
+    @Test fun captchaImageBinaryIsValidatedAndNeverLogged() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeader("Content-Type", "image/png").setBody(Buffer().write(png())))
+            server.enqueue(MockResponse().setHeader("Content-Type", "image/png").setBody(Buffer().write(png())))
+            server.start()
+            val drafts = mutableListOf<com.mina.legadostudio.network.HttpLogRecorder.Draft>()
+            val fetcher = HttpFetcher(unsafeSyncRecorder = { drafts += it })
+            val url = server.url("/captcha.png").toString()
+            val normal = fetcher.fetch(HttpFetcher.FetchRequest(url))
+            assertTrue(normal.rawBytes == null)
+            assertTrue(normal.bodyNote.contains("二进制"))
+            val image = fetcher.fetch(HttpFetcher.FetchRequest(url, allowImageBinary = true))
+            assertEquals("", image.body)
+            assertEquals("image/png", image.headers["Content-Type"])
+            assertTrue(image.rawBytes!!.contentEquals(png()))
+            assertTrue(drafts.last().responseBody.contains("验证码图片已验证"))
+            assertTrue(!drafts.last().responseBody.contains("base64"))
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun captchaRejectsEmptyHtmlAndSpoofedImage() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeader("Content-Type", "image/png").setBody(""))
+            server.enqueue(MockResponse().setHeader("Content-Type", "image/png").setBody("<html>Cloudflare challenge</html>"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/html").setBody(Buffer().write(png())))
+            server.start()
+            val fetcher = HttpFetcher()
+            val url = server.url("/captcha.png").toString()
+            for (reason in listOf("CAPTCHA_EMPTY", "CAPTCHA_NOT_IMAGE", "CAPTCHA_NOT_IMAGE")) {
+                val error = runCatching { fetcher.fetch(HttpFetcher.FetchRequest(url, allowImageBinary = true)) }.exceptionOrNull()
+                assertTrue(error?.message.orEmpty(), error?.message.orEmpty().contains(reason))
+            }
+        }
+    }
+
+    @Test fun captchaRejectsHttpErrorAndOversizedBody() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(403).setBody("challenge"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "image/png")
+                .setBody(Buffer().write(ByteArray(HttpFetcher.MAX_IMAGE_BYTES.toInt() + 1))))
+            server.start()
+            val url = server.url("/captcha.png").toString()
+            val fetcher = HttpFetcher()
+            val forbidden = runCatching { fetcher.fetch(HttpFetcher.FetchRequest(url, allowImageBinary = true)) }.exceptionOrNull()
+            assertTrue(forbidden?.message.orEmpty().contains("CAPTCHA_HTTP_403"))
+            val tooLarge = runCatching { fetcher.fetch(HttpFetcher.FetchRequest(url, allowImageBinary = true)) }.exceptionOrNull()
+            assertTrue(tooLarge?.message.orEmpty().contains("CAPTCHA_TOO_LARGE"))
+        }
+    }
+
+    @Test fun captchaRedirectGuardBlocksPrivateTargetWithoutSecondRequest() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "http://127.0.0.1/secret"))
+            server.start()
+            val fetcher = HttpFetcher(unsafeRedirectGuard = { target ->
+                if (LogFilterUtils.isLoopbackOrPrivate(target)) "私网地址" else null
+            })
+            val error = runCatching { fetcher.fetch(HttpFetcher.FetchRequest(
+                server.url("/captcha.png").toString(), allowImageBinary = true)) }.exceptionOrNull()
+            assertTrue(error?.message.orEmpty().contains("重定向被拦截"))
+            assertEquals(1, server.requestCount)
+        }
+    }
+
     @Test fun stripsCallerAcceptEncodingSoOkHttpReturnsDecodedHtml() {
         MockWebServer().use { server ->
             val raw = "<!DOCTYPE html><meta property='og:novel:book_name' content='测试书'>"

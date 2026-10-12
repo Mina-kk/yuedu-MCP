@@ -73,13 +73,38 @@ object Woff2Decoder {
         return SFNT_MAGICS.any { it.toLong() == magic }
     }
 
+    /**
+     * 输入任意支持字体（WOFF2/WOFF/TTF/OTTO），解包/还原成 sfnt(TTF/OTF) 裸字节流：
+     * - wOF2/wOFF → 逐表解压重建 SFNT 目录+数据；裸 sfnt（TTF/OTTO/true/typ1）原样返回。
+     * - woff2 的 glyf/loca 若带 transformed glyf（transformVersion≠3）会在内部抛
+     *   IllegalArgumentException：此处不实现 glyf 逆变换，重建出的占位数据对轮廓解析无意义。
+     *   未变换的 woff2（fontTools 等产出 transformVersion=3 的 glyf/loca）与 woff/ttf/otf 正常。
+     * 供 QueryTTF 这类需要完整 sfnt（glyf/loca 轮廓）的消费方使用；只要 cmap 用 decode()。
+     */
+    fun unpackToSfnt(font: ByteArray): ByteArray {
+        require(font.size >= 4) { "输入太短，不是字体文件" }
+        require(font.size <= MAX_INPUT_BYTES) { "FONT_TOO_LARGE：输入超过 ${MAX_INPUT_BYTES / 1024 / 1024}MB" }
+        val signature = font.copyOfRange(0, 4).decodeToString()
+        return when (signature) {
+            "wOF2" -> unpackWoff2(font, forGlyph = true)
+            "wOFF" -> unpackWoff(font)
+            else -> {
+                val magic = be32(font, 0)
+                require(SFNT_MAGICS.any { it.toLong() == magic }) { "不支持的字体魔数 $signature（仅支持 wOF2/wOFF/TTF/OTTO）" }
+                font
+            }
+        }
+    }
+
     /** 输入任意支持字体（WOFF2/WOFF/TTF/OTTO），返回解析结果；非字体输入抛 IllegalArgumentException。 */
     fun decode(font: ByteArray): Decoded {
         require(font.size >= 4) { "输入太短，不是字体文件" }
         require(font.size <= MAX_INPUT_BYTES) { "FONT_TOO_LARGE：输入超过 ${MAX_INPUT_BYTES / 1024 / 1024}MB" }
         val signature = font.copyOfRange(0, 4).decodeToString()
+        // decode 只读 cmap：glyf/loca 的 transform 不逆变换也能正确读出 cmap（占位+按 origLength 布局，
+        // cmap 内容与偏移不受影响）——这里 forGlyph=false 容忍变换，与 unpackToSfnt（forGlyph=true 严格拒绝）区分。
         val sfnt = when (signature) {
-            "wOF2" -> unpackWoff2(font)
+            "wOF2" -> unpackWoff2(font, forGlyph = false)
             "wOFF" -> unpackWoff(font)
             else -> {
                 val magic = be32(font, 0)
@@ -174,7 +199,7 @@ object Woff2Decoder {
 
     // ---------- WOFF2 ----------
 
-    private fun unpackWoff2(src: ByteArray): ByteArray {
+    private fun unpackWoff2(src: ByteArray, forGlyph: Boolean = false): ByteArray {
         val r = Reader(src)
         require(r.u32s() == 0x774F4632) { "非 wOF2 签名" }
         val flavor = r.u32s()
@@ -218,11 +243,18 @@ object Woff2Decoder {
         check(dirs.sumOf { it.orig.toLong() } <= totalSfntSize + numTables * 16 + 64) {
             "各表 origLength 之和超过 totalSfntSize"
         }
-        // 只关心 cmap：glyf/loca 的 transform 不逆变换也能正确读出 cmap（cmap 自身要求无变换）。
-        // 变换表按 transformLength 从 brotli 流取出占位字节，重建 SFNT 时按其 origLength 布局即可——
-        // cmap 表内容与偏移不受 glyf/loca 变换影响，产出仍然正确。其他表带变换也容忍（不读其内容）。
+        // cmap 自身必须无变换才能正确读出码点映射。
         dirs.firstOrNull { it.tag == "cmap" && it.hasTransform }
             ?.let { throw IllegalArgumentException("cmap 表带变换（transformVersion≠0），无法安全还原码点映射") }
+        // transformed glyf 逆变换（三角化点阵→二次轮廓）未实现：
+        // - forGlyph=true（QueryTTF 轮廓解析路径）：带变换时 brotli 流里只有变换态数据，重建出的
+        //   glyf/loca 是占位字节，轮廓指纹必错——直接拒绝而不是静默产出错误指纹；
+        // - forGlyph=false（decode 只读 cmap）：按 transformLength 读占位、目录仍按 origLength 布局，
+        //   cmap 内容与偏移不受影响，容忍并正常产出。
+        if (forGlyph) {
+            dirs.firstOrNull { (it.tag == "glyf" || it.tag == "loca") && it.hasTransform }
+                ?.let { throw IllegalArgumentException("woff2 glyf/loca 表带 transformed glyf（transformVersion≠3），未实现逆变换：请改用未变换的 woff2/woff/ttf，或先拿到解码后的明文 TTF") }
+        }
 
         val compressedStart = r.pos
         check(compressedStart <= src.size) { "压缩数据区起点越界" }

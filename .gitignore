@@ -8,3 +8,5 @@ build-logs/
 *.jks
 *.keystore
 *.env
+work/
+.kotlin/

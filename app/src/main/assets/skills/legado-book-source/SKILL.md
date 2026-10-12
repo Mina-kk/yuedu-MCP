@@ -16,14 +16,14 @@ description: 创建、修改、保存、调试或校验阅读（Legado）书源�
 3. 用书源工坊 MCP 读取现状：新源先 `match_sources` 语料命中再查重，旧源先 `get_source` 读原源。
 4. 一次只处理一个阶段；拿到运行时调试结果后再进入下一阶段。
 
-完成标准：书源已保存，正文、目录、详情、搜索、发现中所有声明支持的阶段均调试通过；最终 `check_source(refresh=true)` 实时验收，并 `get_source` 回读确认内容一致。
+完成标准：书源已保存，正文、目录、详情、搜索、发现中所有声明支持的阶段均调试通过；最终 `check_source(auto=true, refresh=true, searchKey="实际关键词")` 按搜索→详情→目录→正文取证，再用另一组样本复验，并 `get_source` 按项目 ID 回读。`verdict` 只能说明当前证据覆盖的阶段；无搜索的源、媒体资源、验证码/登录墙等必须列为未覆盖或待人工确认，不能把静态 `VALIDATED` 当作站点可用。全程按 [`references/evidence-methodology.md`](references/evidence-methodology.md) 的证据分级标注取证口径：快照=观察、规则命中=推导、实跑=运行时证据、未覆盖项登记 unknown。
 
 ## 任务上下文与省 token 纪律
 
 - 开始任务先 `create_context(label)`，记住 `contextId` 并**全程显式传入**；继续任务先 `get_context(contextId)` 读 notes 与引用目录。**并行做多个书源时每个任务各用一个 contextId，绝不共用**；共用会导致缓存互相挤占、引用失效。
 - `fetch_page(url)` 首次返回最多 6000 字符预览与 `pageId`（`maxChars` 调预览大小，`responseMode="reference"` 可完全不回正文，最省）。`truncated=true` 只是预览截断，完整正文在 App 侧快照里。
 - 相同 method+URL+body（**含 POST 搜索**）5 分钟内复用快照，返回 `cacheHit=true`、body 为空属正常，**不要重抓**。读内容用 `read_page(pageId, query/offset/limit)`，测规则用 `inspect_rule(pageId, rule)` / `analyze_html(pageId, selector)` / `eval_js(pageId, js)`，全部直接作用于完整快照。
-- `debug_source` / `check_source` 默认复用本任务快照；**最终验收必须 `refresh=true` 全程实时**。
+- `debug_source` / `check_source` 默认复用本任务快照；**最终验收必须 `refresh=true` 全程实时**。`check_source` 可加 `exploreUrl`/`exploreKey` 附带跑一次「发现」段（不进四段 verdict 口径）；正文是 JS 渲染页时用 `webview_render(url+pageId)` 把已存快照在 WebView 里还原成真实 DOM 再测规则，不要拿静态抓取的当正文证据。
 - 调试输出故意截断：正文 4000 字符、replaceRegex 前样本 800、目录 20 章、搜索 10 条、简介 120（均有 total 字段标注全量大小）。需要全文时 `fetch_page` 抓该 URL 再 `read_page` 分段，不要要求调试工具吐全文。
 - 工具结果超过 12000 字符自动转 `resultId` + 3000 字符预览，用 `read_result(contextId, resultId, offset, limit)` 分段拼接，不要重复执行原工具。
 - 每完成一阶段 `update_context(contextId, notes)` 记录目标、已验证规则、失败尝试与下一步（≤4000 字符，整体替换；不写密码/Cookie/令牌）。完成后 `clear_context(contextId)`。
@@ -49,9 +49,12 @@ description: 创建、修改、保存、调试或校验阅读（Legado）书源�
 | 目的 | 工具 |
 |---|---|
 | 语料命中：查现成源 / 模板族 | `match_sources`、`get_corpus_source`、`get_corpus_shard` |
-| 查重 / 读取 / 保存 / 删除书源 | `list_sources`、`get_source`、`save_source`、`delete_projects` |
-| 逐步调试 / 批量校验 | `debug_source`、`check_source` |
+| 读取 / 保存 / 删除书源 | `list_sources`（latestOnly=true 每 URL 只看最新一条+versionCount）、`get_source`、`save_source`、`archive_source_versions`（按 URL 清旧版本，先 dryRun）、`delete_projects` |
+| 只读去重分析 / 按选择导出 | `analyze_sources`、`export_checked_sources` |
+| 逐源调试 / 联网检查 | `debug_source`、`check_source`（auto=true 链路推进整链检查一本书；exploreUrl/exploreKey 附加发现段） |
 | 抓页 / 读快照 / 测选择器规则 / 跑 JS | `fetch_page`、`read_page`、`analyze_html`、`inspect_rule`、`eval_js` |
+| 真实 WebView 渲染转 DOM / 页面内取值 | `webview_render`（url 在线页，或 url+pageId 把已存快照经 loadDataWithBaseURL 渲染成最终正文存 pageId，等价 java.webView(html,url,js)）、`webview_eval`（url+script 只取一个 JS 返回值，不落快照，探测/断言用） |
+| 推送书源到阅读客户端 | `import_reader`（projectId 或 source + packageName；包名缺省返回本机目标列表） |
 | 大结果分段读取 | `read_result` |
 | 站点验证与每域模式 | `browser_verify`、`get_verification_status`、`set_domain_mode`、`get_domain_modes` |
 | Cookie | `get_cookies`、`set_cookie`、`clear_cookies` |
@@ -75,7 +78,7 @@ description: 创建、修改、保存、调试或校验阅读（Legado）书源�
 
 文档/测试示例一律用虚构域名；任何已取证的单站做法只对该站有效，不上升为模板。
 
-MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`save_source` 覆盖当前记录；只有下一轮专门修复时才传 `newVersion=true` 追加。调试阶段把 JSON 直接传给 `debug_source`，不要每改一次规则就 save。App 底栏为 MCP / 书源 / 技能 / 验证中心 / 日志；排查故障用 MCP 读日志，**不要**引导用户打开已删除的「项目列表」。
+MCP 是默认入口。`save_source` 对同一完整 `bookSourceUrl` 且内容相同的书源幂等处理；同 URL 而规则不同则保留新版本并提示冲突，不因同域或尾部 `/` 自动覆盖。`analyze_sources` 先只读预览，`export_checked_sources` 只处理显式选中的项目；登录、验证码、失败、未验证排除均默认关闭，冲突由人判断。调试阶段把 JSON 直接传给 `debug_source`，不要每改一次规则就 save。App 底栏为 MCP / 书源 / 技能 / 验证中心 / 日志；排查故障用 MCP 读日志，**不要**引导用户打开已删除的「项目列表」。
 
 ## Phase 0：基线与探针
 
@@ -93,10 +96,10 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 
 ### 0.1 查重
 
-用名称和域名各 `list_sources` 查一次：
+`list_sources` 分页读出本地各版本摘要，用 `analyze_sources` 查看完全相同的副本、同 URL 不同规则的冲突及同域候选；同域只作为提示，不是删除依据。
 
-- 无同域源：创建新源。
-- 有同域源：先 `get_source`，在原源上最小修改，保留用户的启用状态、排序、权重和分组。
+- 无同 URL 候选：创建新源；同域不同 URL 也先核查内容和用途。
+- 有同 URL 候选：按项目 ID `get_source` 精确读取每个版本，在确认目标版本后最小修改，保留用户的启用状态、排序、权重和分组；规则不同不自动覆盖。
 
 ### 0.2 RED：记录样本预期
 
@@ -167,10 +170,10 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 
 所有支持阶段通过后：
 
-1. **只调用一次** `save_source` 写入成品（同 URL 覆盖）。下一轮用户要求修复时才 `save_source` + `newVersion=true`。
-2. `get_source` 重新读取，确认 `bookSourceUrl`、规则、分组与注释符合预期。
-3. `check_source(refresh=true)` 全程实时联网做上线验收（默认缓存结果不代表线上表现）。
-4. 再用一组不同于开发样本的关键词或书籍执行烟雾测试。
+1. **只调用一次** `save_source` 写入成品，记录返回的项目 ID 和同 URL 冲突；不同内容会保留另一版本，不自动覆盖或删除旧源。调试期的半成品用 `save_project` 存草稿、不冒充成品；要推送本机阅读用 `import_reader`（包名缺省先回目标列表由人/AI 选）。
+2. `get_source` 按项目 ID 重新读取，确认 `bookSourceUrl`、规则、分组与注释符合预期。
+3. 对支持搜索的书源用 `check_source(auto=true, refresh=true, searchKey="实际关键词")` 联网沿搜索→详情→目录→正文取证（默认复用任务快照时返回带 `fromCache`/`snapshotAgeSeconds` 标记，**最终验收必须 refresh=true**）；其他源逐阶段提供实际入口调试，不能因静态 `VALIDATED` 或未覆盖阶段宣称完整可用。
+4. 再用一组不同于开发样本的关键词或书籍执行烟雾测试；验证码/登录墙及失败阶段如实记录。
 5. 本地产物（构建脚本、jsLib 分部文件、HTML 快照、调试日志）统一放当前工作目录下 `work/{书源名称}/` 独立文件夹，一个书源一个目录，禁止散落到项目根目录。
 6. 若开启了 HTTP 日志，任务结束时恢复用户原来的记录设置；`clear_context` 释放任务槽位。
 
@@ -197,6 +200,7 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 - 登录与交互：[`references/login.md`](references/login.md)
 - 高级模式：[`references/patterns.md`](references/patterns.md)
 - 正文避坑（result 类型/翻页机制/净化验收）：[`references/content-rules.md`](references/content-rules.md)
+- 取证口径（证据分级/覆盖边界/unknown 登记/台账格式）：[`references/evidence-methodology.md`](references/evidence-methodology.md)
 - 单站深案·番茄小说（签名/AES/字体混淆/插图保护）：[`references/fanqie.md`](references/fanqie.md)
 - **第三方搜索（rrssk）逆向 / 搜索外包型站点**：知识库 `第三方搜索逆向实战-rrssk.md`（第 0 节模板铁律：一律以书友社成品为骨架起步；第 8 节换站复用清单；`search_knowledge("rrssk")` 找到它）
 - 英文/国际站书源（收录现状 + royalroad 实测规则 + 反推制法）：[`references/english-sites.md`](references/english-sites.md)

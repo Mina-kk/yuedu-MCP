@@ -90,6 +90,36 @@ class CheckSourceRunnerTest {
         }
     }
 
+    @Test fun exploreStageRunsAndFeedsEvidenceButNotCoreVerdict() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("<div class='book'><a href='/b/1'>书名</a></div>"))
+            server.start()
+            val source = Gson().toJson(
+                mapOf(
+                    "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                    "exploreUrl" to "explore?page={{page}}",
+                    "ruleExplore" to mapOf("bookList" to ".book", "name" to "a@text", "bookUrl" to "a@href"),
+                    "ruleToc" to mapOf("chapterList" to "a"), "ruleContent" to mapOf("content" to "#content@html"),
+                )
+            )
+            val result = CheckSourceRunner.run(
+                CheckSourceRunner.Request(source, exploreKey = "玄幻", exploreUrl = server.url("/explore").toString()),
+                runtime(), null,
+            )
+            // 发现阶段跑过且是 DebugReport
+            assertTrue(result["发现"] is LegadoRuntime.DebugReport)
+            @Suppress("UNCHECKED_CAST")
+            val evidence = result["evidence"] as Map<String, SourceCheckEvidence.StageEvidence>
+            // 发现进 evidence 展示
+            assertTrue(evidence.containsKey("发现"))
+            // 但 verdict 只按核心四段计（无搜索/详情/目录/正文 → unverified，发现不救场）
+            @Suppress("UNCHECKED_CAST")
+            val verdict = result["verdict"] as Map<String, Any>
+            assertEquals("unverified", verdict["summary"])
+            assertEquals(0, verdict["stagesOk"])
+        }
+    }
+
     @Test fun malformedSourceThrowsUnifiedJsonHint() {
         val error = runCatching {
             runBlocking { CheckSourceRunner.run(CheckSourceRunner.Request("{"), runtime(), null) }

@@ -24,6 +24,12 @@ class RhinoEvaluator(
     private val httpLogs: com.mina.legadostudio.network.HttpLogRecorder? = null,
     /** 图片验证码：入参图 URL，返回用户输入的答案（null=超时/取消）；由 StudioApplication 注入 */
     private val verificationProvider: (suspend (String) -> String?)? = null,
+    /**
+     * 浏览器等待（java.startBrowserAwait）：入参验证页 URL 与可选交接 html，先在手机验证中心
+     * WebView 让用户过盾，完成后返回过盾页的整页源码（官方 StrResponse.body）。null=超时/取消。
+     * 由 StudioApplication 注入；为 null 时 startBrowserAwait 退化为抛 VerificationRequiredException。
+     */
+    private val browserAwaitProvider: (suspend (url: String, html: String?) -> String?)? = null,
 ) {
     @Keep data class Result(
         @SerializedName("value") val value: String?,
@@ -44,12 +50,15 @@ class RhinoEvaluator(
         // 优先书源锚点（debug 链路经 BINDING_SOURCE_ANCHOR 传入 bookSourceUrl），退到 origin 锚点、baseUrl。
         val loginAnchor = (bindings[BINDING_SOURCE_ANCHOR] as? String)
             ?: (origin ?: originProvider())?.sourceAnchor ?: baseUrl
+        @Suppress("UNCHECKED_CAST")
+        val jsLogSink = bindings[BINDING_JS_LOG] as? (String) -> Unit
         val api = StudioJsApi(
-            fetcher, logs::add, webViewLoader, cookies, userAgentProvider, httpLogs,
+            fetcher, { line -> logs += line; jsLogSink?.invoke(line) }, webViewLoader, cookies, userAgentProvider, httpLogs,
             useCookieJar = bindings[BINDING_USE_COOKIE_JAR] as? Boolean ?: true,
             loginAnchor = loginAnchor,
             originProvider = { origin ?: originProvider() },
             verificationProvider = verificationProvider,
+            browserAwaitProvider = browserAwaitProvider,
         )
         val started = System.currentTimeMillis()
         // 每次求值挂一套全新标准对象作用域：var 声明与原型修改都不跨调用泄漏；
@@ -61,18 +70,32 @@ class RhinoEvaluator(
         scope.put("src", previous)
         // 官方同名对象：cookie/cache/source。bindings 传入的 source 状态图包成 SourceJsApi，JS 写入回传调试流程
         scope.put("cookie", CookieJsApi(cookies))
-        scope.put("cache", CacheJsApi())
+        // bindings 指定 cache 实现时用同一个实例（debug 链路要共享一份观测缓存——
+        // 否则每个 JS 段各自拿到全新的 CacheJsApi，SnapshottingCache 的写入痕迹会分段丢失）
+        scope.put("cache", bindings["cache"] as? CacheJsApi ?: CacheJsApi())
         val jsoup = JsoupJsApi()
         scope.put("Jsoup", jsoup)
         // AI 常把官方 java.ajax 风格与 org.jsoup.Jsoup 包路径混写；沙箱没有 Java 包树，
         // 用 Map 桥出 org.jsoup.Jsoup 的常用静态入口，调用落到同一 JsoupJsApi 代理。
         scope.put("org", mapOf("jsoup" to mapOf("Jsoup" to jsoup)))
-        bindings.forEach { (key, item) -> if (key != "source" && key != BINDING_JSLIB && key != BINDING_SOURCE_ANCHOR) scope.put(key, item) }
+        bindings.forEach { (key, item) -> if (key !in RESERVED_BINDING_KEYS) scope.put(key, item) }
         @Suppress("UNCHECKED_CAST")
         scope.put("source", when (val bound = bindings["source"]) {
             is SourceJsApi -> bound
             is MutableMap<*, *> -> SourceJsApi(bound as MutableMap<String, String>, loginAnchor, logs::add)
             else -> SourceJsApi(anchor = loginAnchor, warn = logs::add)
+        })
+        // 官方同名内置变量：book / chapter。debug 链路传入共享实例（字段抽取写回、变量池跨阶段共享）；
+        // eval_js 不传时兜底空对象，保证 book.name / book.getVariable / chapter.index 等惯用法不报错。
+        scope.put("book", when (val bound = bindings["book"]) {
+            is BookJsApi -> bound
+            is Map<*, *> -> BookJsApi().also { book -> bound.forEach { (k, v) -> book[k?.toString().orEmpty()] = v } }
+            else -> BookJsApi()
+        })
+        scope.put("chapter", when (val bound = bindings["chapter"]) {
+            is ChapterJsApi -> bound
+            is Map<*, *> -> ChapterJsApi().also { ch -> bound.forEach { (k, v) -> ch[k?.toString().orEmpty()] = v } }
+            else -> ChapterJsApi()
         })
         // jsLib 装载：官方 BookSource 的 jsLib 字段是纯 JS 片段（函数/全局 var 声明），
         // 官方 App 把它 eval 进该书源的共享作用域供所有规则 JS 直接调用。沙箱按书源隔离实现：
@@ -85,16 +108,17 @@ class RhinoEvaluator(
         // eval_js 不传该 binding 时不会凭空装载任何 jsLib。
         @Suppress("UNCHECKED_CAST")
         val jsLibProvider = bindings[BINDING_JSLIB] as? () -> String?
-        val parent = jsLibProvider?.let { provider ->
-            val libSource = provider()
-            if (libSource.isNullOrBlank()) null
-            else RhinoScriptEngine.newStandardTopLevel().also { libScope ->
+        // 先取一次 jsLib 源码：装载失败时错误包装需要原样引用，行归属回退也要这份文本
+        val jsLibSource = jsLibProvider?.invoke()?.takeIf { it.isNotBlank() }
+        val parent = jsLibSource?.let { libSource ->
+            RhinoScriptEngine.newStandardTopLevel().also { libScope ->
                 try {
                     RhinoScriptEngine.eval(libSource, libScope)
                 } catch (error: Exception) {
                     throw decorateApiError(
                         com.script.ScriptException("jsLib 执行失败：${error.message.orEmpty()}", "jsLib", -1)
-                            .also { it.initCause(error) }
+                            .also { it.initCause(error) },
+                        js, jsLibSource,
                     )
                 }
             }
@@ -103,26 +127,66 @@ class RhinoEvaluator(
         val value = try {
             RhinoScriptEngine.eval(js, scope)
         } catch (error: Exception) {
-            throw decorateApiError(error)
+            throw decorateApiError(error, js, jsLibSource)
         }
         return RawResult(value, logs, System.currentTimeMillis() - started)
     }
 
     /**
-     * 只对确凿的「方法不存在 / 签名不匹配 / 调用的不是函数」异常追加沙箱 API 清单提示；
-     * 其余 JS 一般异常原样抛出，不猜测改写。
+     * 错误包装，两件事：
+     * 1) 报错行号归属：Rhino 的行号按「编译单元」给（jsLib 与规则脚本各是独立编译单元，
+     *    但 fileName 都是 <script-N> 匿名标签），这里把第 N 行内容（截断 200 字符，带前后各 1 行）
+     *    附到错误里；行号超出当前规则脚本但落在 jsLib 范围内时，按「可能对应 jsLib」标注——
+     *    这是真机修书源最常见的迷惑点（书源报错指着规则行号，实际炸在 jsLib 里的函数）。
+     * 2) 确凿的「方法不存在 / 签名不匹配 / 调用的不是函数」异常追加沙箱 API 清单提示；
+     *    方法确实存在但重载都对不上（如 java.get(url, headers, timeout) 这类真机签名）
+     *    额外标注「沙箱不支持该签名（验收环境限制，非书源错误）」，并解析出 java.xxx(参数类型)。
+     * 其余 JS 一般异常只做行归属，不改写文案。
      */
-    private fun decorateApiError(error: Exception): Exception {
+    private fun decorateApiError(error: Exception, script: String? = null, jsLib: String? = null): Exception {
+        val scriptError = error as? com.script.ScriptException
+        val scriptContext = scriptError?.lineNumber?.takeIf { it > 0 }?.let { line ->
+            lineContext(script.orEmpty(), line)?.let { "\n[规则 JS 第${line}行] $it" }
+                ?: lineContext(jsLib.orEmpty(), line)?.let { "\n[jsLib 第${line}行（可能对应）] $it" }
+        }.orEmpty()
         val message = error.message.orEmpty()
         val firstLine = message.substringBefore('\n')
         val sureMissingApi = MISSING_API_PATTERNS.any { it.containsMatchIn(firstLine) }
-        if (!sureMissingApi) return error
+        if (!sureMissingApi) {
+            if (scriptContext.isEmpty()) return error
+            return com.script.ScriptException(
+                message + scriptContext,
+                scriptError?.fileName,
+                scriptError?.lineNumber ?: -1,
+                scriptError?.columnNumber ?: -1,
+            ).also { it.initCause(error.cause ?: error) }
+        }
+        val signatureNote = MISSING_API_METHOD.find(firstLine)?.let { match ->
+            val call = match.groupValues[1]                                   // e.g. "...StudioJsApi.get(string,object,number,string)"
+            val method = call.substringBefore('(').substringAfterLast('.')    // e.g. "get"
+            val known = method in STUDIO_API_METHODS
+            if (!known) null
+            else {
+                val argTypes = call.substringAfter('(').substringBeforeLast(')')
+                    .split(',').joinToString(",") { it.trim().substringAfterLast('.') }
+                "\n【签名提示】沙箱不支持该签名：java.$method($argTypes)；属验收环境限制，非书源错误。真机有对应重载的话请改写调用或改用 connect/ajax。（原始：$call）"
+            }
+        }.orEmpty()
         return com.script.ScriptException(
-            message + API_HINT,
-            (error as? com.script.ScriptException)?.fileName,
-            (error as? com.script.ScriptException)?.lineNumber ?: -1,
-            (error as? com.script.ScriptException)?.columnNumber ?: -1,
+            message + scriptContext + signatureNote + API_HINT,
+            scriptError?.fileName,
+            scriptError?.lineNumber ?: -1,
+            scriptError?.columnNumber ?: -1,
         ).also { it.initCause(error.cause ?: error) }
+    }
+
+    /** 取脚本第 [line] 行内容（截断 200 字符）+ 前后各 1 行，供错误归属提示；行号越界返回 null。 */
+    private fun lineContext(source: String, line: Int): String? {
+        if (source.isBlank()) return null
+        val lines = source.lines()
+        if (line !in 1..lines.size) return null
+        return (maxOf(1, line - 1)..minOf(lines.size, line + 1))
+            .joinToString(" ⏎ ") { i -> "${i}:${lines[i - 1].trim().take(200)}" }
     }
 
     companion object {
@@ -148,6 +212,23 @@ class RhinoEvaluator(
          * 由 EmbeddedLegadoRuntime.debug 按书源注入；不传则回退 origin 锚点 / baseUrl。
          */
         const val BINDING_SOURCE_ANCHOR = "__legadoSourceAnchor"
+
+        /**
+         * bindings 内部保留键：值是 `((String) -> Unit)?` 的 JS 日志汇出回调——
+         * 该次求值里 java.log/toast/桩提示除进 Result.logs 外，同步推给此回调
+         * （debug 报告 jsLogs 字段用它汇聚跨求值的全部输出）。
+         */
+        const val BINDING_JS_LOG = "__legadoJsLog"
+
+        /**
+         * 注入对象时单独处理/跳过的 bindings 保留键：source/book/chapter 包成官方同名 API 对象，
+         * cache 取传入实例（debug 链路注入 SnapshottingCache 观测写入），
+         * jsLib/锚点/cookieJar 开关/日志汇出是内部传递键不进作用域。
+         */
+        private val RESERVED_BINDING_KEYS = setOf(
+            "source", "book", "chapter", "cache", BINDING_JSLIB, BINDING_SOURCE_ANCHOR,
+            BINDING_USE_COOKIE_JAR, BINDING_JS_LOG,
+        )
         /**
          * htmlunit-core-js 对「方法不存在/签名不匹配」的固定报错文案。
          * jar 内带 Messages_zh_CN 本地化资源，错误文案随 JVM Locale 走——
@@ -174,11 +255,29 @@ class RhinoEvaluator(
             Regex("Java 方法 .* 的选择不明确"),
             Regex("未找到 “\\S+” 的构造函数"),
         )
+        /** Rhino「找不到方法」消息里完整方法引用，如 com.mina...StudioJsApi.get(...) / "io.x.Y.z(...)" */
+        private val MISSING_API_METHOD = Regex("[\"“]([\\w.$]+\\([^\"”]*\\))[\"”]")
+        /**
+         * StudioJsApi 上确实存在的方法名：「找不到方法」且方法名在本集合 = 签名不支持的调用
+         * （真机有该重载而沙箱没有），错误里附加「属验收环境限制」的明确提示。
+         */
+        private val STUDIO_API_METHODS = setOf(
+            "log", "logType", "toast", "longToast", "upLoginData", "getVerificationCode",
+            "ajax", "ajaxAll", "connect", "get", "post", "head", "startBrowserAwait", "webView",
+            "setContent", "getString", "getStringList", "put",
+            "encodeURI", "base64Encode", "base64Decode", "base64DecodeToByteArray",
+            "md5Encode", "md5Encode16", "sha1Encode", "sha256Encode", "digestHex", "digestBase64Str",
+            "HMacHex", "HMacBase64", "hexEncodeToString", "hexDecodeToString", "hexDecodeToByteArray",
+            "strToBytes", "bytesToStr", "htmlFormat", "timeFormat", "timeFormatUTC", "toURL",
+            "randomUUID", "getWebViewUA", "getCookie", "setCookie", "createSymmetricCrypto",
+            "fetchFont", "decodeWoff2", "queryTTF", "replaceFont",
+        )
         // 与 evaluateRaw 实际注入的对象/方法保持一致；新增 API 时同步更新本清单与
         // references/js-api.md「Studio 沙箱可用 API 清单」一节。
         private const val API_HINT = "\n【API 提示】以上是确凿的「方法不存在/签名不匹配」错误。沙箱实际可用 API：\n" +
             "java.*：log(msg) logType(obj) toast(msg) longToast(msg)；ajax(url) ajaxAll(urls) connect(url[,header][,methodOrTimeout][,body][,charset]) " +
-            "get(url,headers?) post(url,body,headers?) head(url,headers?) webView(url|html,url,js) startBrowserAwait(url,title?,refetch?) fetchFont(url) decodeWoff2(data)；" +
+            "get(url[,headers][,timeout毫秒]) post(url,body[,headers][,timeout毫秒]) head(url[,headers][,timeout毫秒]) webView(url|html,url,js) startBrowserAwait(url,title?,refetch?) fetchFont(url) " +
+            "decodeWoff2(data) queryTTF(data) replaceFont(text,errFont,correctFont[,filter])；" +
             "setContent(html) getString(rule,content?) getStringList(rule,content?) put(key,value) get(key或url[,headers])；" +
             "encodeURI(str,charset?) base64Encode(str) base64Decode(str,charset?) base64DecodeToByteArray(str) " +
             "md5Encode(str) md5Encode16(str) sha1Encode(str) sha256Encode(str) digestHex(str,算法) digestBase64Str(str,算法) HMacHex(str,算法,key) HMacBase64(str,算法,key) " +
@@ -190,8 +289,14 @@ class RhinoEvaluator(
             "cache.*：put(key,value,saveTime秒?) get(key) delete(key) putMemory(key,value) getFromMemory(key) deleteMemory(key)\n" +
             "source.*：getVariable() setVariable(json) putVariable(json) put(key,value) get(key) " +
             "getLoginInfo([key]) getLoginInfoMap() putLoginInfo(json或map或key,value)（登录信息为进程内桩存储，默认空）\n" +
-            "内置变量：java result(上一步结果) src(同 result) baseUrl cookie cache source。\n" +
-            "java.getVerificationCode(url)：真实实现——拉验证码图→验证中心 image_code 会话等用户输入（最长120s），返回用户输入的字符串；\n" +
+            "book.*（官方 Book 属性可读写）：bookUrl tocUrl origin originName name author kind coverUrl intro type " +
+            "latestChapterTitle totalChapterNum durChapterTitle durChapterIndex canUpdate variable 等；" +
+            "putVariable(key,value) getVariable(key?) putCustomVariable(json) getVariableMap() setVariableMap(map) " +
+            "upCustomIntro(v) setReverseToc(b) getUseReplaceRule()/setUseReplaceRule(b)\\n" +
+            "chapter.*（官方 BookChapter 属性）：url title baseUrl bookUrl index resourceUrl tag start end variable；" +
+            "putVariable/getVariable putLyric putImgUrl update\\n" +
+            "内置变量：java result(上一步结果) src(同 result) baseUrl cookie cache source book chapter。\\n" +
+            "java.getVerificationCode(url)：拉验真图片→手机验证中心 image_code 会话等输入（最长120s）；取消/超时返回空串，拉图失败抛错。\n" +
             "官方有但沙箱为桩实现（能调用、返回空值并记日志提示，真机行为不同）：java.upLoginData(data?)\n" +
             "官方有但沙箱未实现（写了必报错）：java.getElement/getElements java.importScript java.cacheFile java.toNumChapter java.t2s/s2t " +
             "java.androidId java.openUrl java.searchBook java.startBrowser java.getReadBookConfig/getThemeConfig " +
@@ -223,6 +328,11 @@ class StudioJsApi(
      * 由 RhinoEvaluator 构造时注入（包 VerificationCoordinator.create+awaitAnswer 与抓图）。
      */
     private val verificationProvider: (suspend (String) -> String?)? = null,
+    /**
+     * 浏览器等待（java.startBrowserAwait）：入参验证页 URL 与可选交接 html，先在手机验证中心
+     * WebView 让用户过盾，完成后返回过盾页的整页源码（官方 StrResponse.body）。null=超时/取消。
+     */
+    private val browserAwaitProvider: (suspend (url: String, html: String?) -> String?)? = null,
 ) {
     /** 官方兼容：java.lang.Thread.sleep(ms)（沙箱仅放行这一个 java.lang 用法，其余包路径不可用） */
     @JvmField
@@ -260,26 +370,17 @@ class StudioJsApi(
 
     /**
      * 官方 java.getVerificationCode(imageUrl)：拉验证码图 → 在 App 验证中心弹 image_code 会话等用户输入。
-     * 返回用户在验证中心提交的验证码文本；超时/用户关闭返回空串（官方约定书源脚本对空值降级）。
-     *
-     * 沙箱行为对齐真机语义：真机弹 VerificationCodeDialog 阻塞等输入；这里创建
-     * kind=image_code 的验证会话走「验证中心」UI，等 answer 写回。需要 [verificationProvider]
-     * 由 StudioApplication 注入（把 VerificationCoordinator.create+awaitAnswer 包成一个函数）。
+     * 返回用户在验证中心提交的验证码文本；超时/用户关闭返回空串，拉图失败抛错。
+     * 验证会话由 StudioApplication 注入的 [verificationProvider] 创建并等待回答。
      */
     fun getVerificationCode(imageUrl: Any? = null): String {
         val url = imageUrl?.toString().orEmpty()
-        val provider = verificationProvider
-        if (provider == null) {
-            logger("java.getVerificationCode($url) 需要验证中心支持：当前沙箱未注入 verificationProvider，返回空串")
-            return ""
-        }
-        logger("java.getVerificationCode($url)：拉取验证码图并在验证中心等待用户输入（最长 120s）…")
-        return try {
-            kotlinx.coroutines.runBlocking { provider(url) ?: "" }
-        } catch (e: Exception) {
-            logger("java.getVerificationCode 失败：${e.message.orEmpty().take(120)}")
-            ""
-        }
+        require(url.isNotBlank()) { "java.getVerificationCode：验证码图片 URL 不能为空" }
+        val provider = verificationProvider ?: error("java.getVerificationCode：验证中心未初始化，无法拉取验证码图片")
+        logger("java.getVerificationCode：正在拉图并等待手机验证中心输入（最长 120s）")
+        val answer = kotlinx.coroutines.runBlocking { provider(url) }
+        if (answer == null) logger("java.getVerificationCode：用户取消或等待超时")
+        return answer.orEmpty()
     }
 
     fun ajax(url: String): String = fetcher.fetch(HttpFetcher.FetchRequest(url, origin = withKind("js_ajax"), useCookieJar = useCookieJar)).body
@@ -305,11 +406,7 @@ class StudioJsApi(
 
     private fun connectInternal(url: String, header: Any?, explicitMethod: String?, explicitBody: String?, explicitCharset: String?): StudioJsResponse {
         val parsed = LegadoUrlOptions.parse(url)
-        val extra = when (header) {
-            is Map<*, *> -> header.entries.associate { it.key.toString() to it.value.toString() }
-            is CharSequence -> runCatching { com.google.gson.JsonParser.parseString(header.toString()).asJsonObject.entrySet().associate { it.key to it.value.asString } }.getOrDefault(emptyMap())
-            else -> emptyMap()
-        }
+        val extra = headerMap(header, "connect")
         val absolute = parsed.url.ifBlank { url }
         val finalMethod = explicitMethod ?: parsed.method
         val finalBody = explicitBody ?: parsed.body
@@ -317,12 +414,32 @@ class StudioJsApi(
         val result = fetcher.fetch(HttpFetcher.FetchRequest(absolute, finalMethod, parsed.headers + extra, finalBody, finalCharset, origin = withKind("js_connect"), useCookieJar = useCookieJar))
         return StudioJsResponse(result.code, result.finalUrl, result.body, result.headers, result.elapsedMs, result.rawBytes)
     }
+    /**
+     * 官方 java.startBrowserAwait(url, title, refetchAfterSuccess, html?)：弹浏览器让用户过盾，
+     * refetchAfterSuccess=true 时过盾后重抓该 URL，返回整页 StrResponse。沙箱经手机验证中心的
+     * webview 会话完成同一链路：用户在 App 内 WebView 过盾 → 用 WebView 通道抓该 URL（可选 html
+     * 作 loadDataWithBaseURL 交接文档）返回源码。用户取消/超时返回空 body 的响应；
+     * 未注入 provider 时退化为抛 VerificationRequiredException。
+     */
     @JvmOverloads
-    fun startBrowserAwait(url: String, title: Any? = null, refetch: Any? = null): String {
-        throw com.mina.legadostudio.verification.VerificationRequiredException(url, com.mina.legadostudio.verification.DomainKey.fromUrl(url))
+    fun startBrowserAwait(url: String, title: Any? = null, refetch: Any? = null, html: Any? = null): StudioJsResponse {
+        val provider = browserAwaitProvider
+            ?: throw com.mina.legadostudio.verification.VerificationRequiredException(url, com.mina.legadostudio.verification.DomainKey.fromUrl(url))
+        logger("java.startBrowserAwait：已转交手机验证中心，等待在 WebView 里过盾（最长 120s）${title?.let { "，$it" }.orEmpty()}")
+        val started = System.currentTimeMillis()
+        val body = kotlinx.coroutines.runBlocking { provider(url, html?.toString()) }
+        if (body == null) logger("java.startBrowserAwait：用户取消或等待超时")
+        return StudioJsResponse(if (body == null) 0 else 200, url, body.orEmpty(), emptyMap(), System.currentTimeMillis() - started)
     }
     private var currentDocument: org.jsoup.nodes.Document? = null
     private val memoryStore = java.util.concurrent.ConcurrentHashMap<String, Any?>()
+    /** 「真机 java.get/post 传 null headers 可能 NPE」警告每次求值只记一次 */
+    private var nullHeadersWarned = false
+
+    /** queryTTF 结果缓存：按字体字节 sha256 作键，LRU 上限 8 份（反爬字体通常几十 KB，解析一次够用整轮调试） */
+    private val ttfCache = object : LinkedHashMap<String, com.mina.legadostudio.network.QueryTTF>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, com.mina.legadostudio.network.QueryTTF>?): Boolean = size > 8
+    }
 
     fun setContent(html: Any?) {
         currentDocument = org.jsoup.Jsoup.parse(html?.toString().orEmpty())
@@ -339,14 +456,33 @@ class StudioJsApi(
             keyOrUrl.startsWith("https://", ignoreCase = true) ||
             keyOrUrl.startsWith("/")
         ) {
-            return request(keyOrUrl, "GET", null, headers)
+            return request(keyOrUrl, "GET", null, headers, null)
         }
         return memoryStore[keyOrUrl]
     }
-    @JvmOverloads
-    fun post(url: String, body: String, headers: Any? = null): StudioJsResponse = request(url, "POST", body, headers)
-    @JvmOverloads
-    fun head(url: String, headers: Any? = null): StudioJsResponse = request(url, "HEAD", null, headers)
+
+    /**
+     * 官方三参形态 java.get(url, headers, timeout)：timeout 毫秒（JS Number → int/long/double 皆可）。
+     * 独立声明而不进 @JvmOverloads：避免生成 get(String,long) 把内存键查询也带上超时参数。
+     */
+    fun get(url: String, headers: Any?, timeout: Any?): StudioJsResponse =
+        request(url, "GET", null, headers, timeoutMillis(timeout))
+
+    fun post(url: String, body: String): StudioJsResponse = request(url, "POST", body, null, null)
+
+    fun post(url: String, body: String, headers: Any?): StudioJsResponse = request(url, "POST", body, headers, null)
+
+    /** 官方 java.post(url, body, headers, timeout)：timeout 毫秒 */
+    fun post(url: String, body: String, headers: Any?, timeout: Any?): StudioJsResponse =
+        request(url, "POST", body, headers, timeoutMillis(timeout))
+
+    fun head(url: String): StudioJsResponse = request(url, "HEAD", null, null, null)
+
+    fun head(url: String, headers: Any?): StudioJsResponse = request(url, "HEAD", null, headers, null)
+
+    /** 官方 java.head(url, headers, timeout)：timeout 毫秒 */
+    fun head(url: String, headers: Any?, timeout: Any?): StudioJsResponse =
+        request(url, "HEAD", null, headers, timeoutMillis(timeout))
 
     @JvmOverloads
     fun getString(rule: String, content: Any? = null): String {
@@ -517,14 +653,99 @@ class StudioJsApi(
         return decoded.mappings.entries.associate { (cp, gid) -> "U+%04X".format(cp) to gid }
     }
 
-    private fun request(url: String, method: String, body: String?, headers: Any?): StudioJsResponse {
-        val map = when (headers) {
-            is Map<*, *> -> headers.entries.associate { it.key.toString() to it.value.toString() }
-            is String -> runCatching { com.google.gson.JsonParser.parseString(headers).asJsonObject.entrySet().associate { it.key to it.value.asString } }.getOrDefault(emptyMap())
-            else -> emptyMap()
+    /**
+     * 官方 JsExtensions.queryTTF：解析字体为 QueryTTF（码点↔轮廓指纹双向映射），供 replaceFont 比对。
+     * 入参可为 ByteArray（fetchFont 的结果）、base64 字符串、http(s) URL（走 fetchFont 同套抓取与校验）。
+     * 支持 TTF/OTF/WOFF/WOFF2：woff/woff2 先解包成 sfnt；woff2 若 glyf/loca 带 transformed glyf
+     * （transformVersion≠3）会报错——沙箱未实现其逆变换，请改用未变换的 woff2/woff/ttf。
+     * 结果按字体字节 sha256 做 LruCache（同一份字体重复 queryTTF 不重解析）。
+     */
+    fun queryTTF(data: Any?): com.mina.legadostudio.network.QueryTTF? {
+        val bytes = when (data) {
+            is ByteArray -> data
+            is String -> {
+                if (data.startsWith("http://") || data.startsWith("https://")) fetchFont(data)
+                else runCatching { Base64.getDecoder().decode(data) }
+                    .getOrElse { throw IllegalArgumentException("queryTTF：字符串参数必须是 base64 字体数据或 http(s) URL") }
+            }
+            else -> throw IllegalArgumentException("queryTTF 参数必须是 ByteArray、base64 字符串或 http(s) URL")
         }
-        val result = fetcher.fetch(HttpFetcher.FetchRequest(url, method, map, body, origin = withKind("js_http"), useCookieJar = useCookieJar))
+        require(bytes.size <= com.mina.legadostudio.network.Woff2Decoder.MAX_INPUT_BYTES) {
+            "queryTTF：输入超过 ${com.mina.legadostudio.network.Woff2Decoder.MAX_INPUT_BYTES / 1024 / 1024}MB"
+        }
+        val key = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        synchronized(ttfCache) { ttfCache[key] }?.let { return it }
+        return com.mina.legadostudio.network.QueryTTF(bytes).also { q ->
+            synchronized(ttfCache) { ttfCache.put(key, q) }
+        }
+    }
+
+    /**
+     * 官方 JsExtensions.replaceFont：通用字形轮廓比对替换——
+     * errorTTF 是网页声明的「错误」字体（页面文本按它编码），correctTTF 是轮廓相同的正确字体；
+     * 逐码点取 errorTTF 轮廓指纹，到 correctTTF 里反查回正确汉字。
+     * filter=true 时删除 errorTTF 中无轮廓的字符；空白字符恒保留。两字体任一 null 返回原文。
+     */
+    @JvmOverloads
+    fun replaceFont(
+        text: String,
+        errorQueryTTF: com.mina.legadostudio.network.QueryTTF?,
+        correctQueryTTF: com.mina.legadostudio.network.QueryTTF?,
+        filter: Boolean = false,
+    ): String {
+        if (errorQueryTTF == null || correctQueryTTF == null) return text
+        // 按码点遍历（不能用 CharArray：有些字符占多个 UTF-16 单元），与官方 toStringArray 同语义
+        val contentArray = text.codePoints().toArray().map { cp -> String(intArrayOf(cp), 0, 1) }.toTypedArray()
+        val intArray = IntArray(1)
+        contentArray.forEachIndexed { index, s ->
+            val oldCode = s.codePointAt(0)
+            // 忽略正常的空白字符
+            if (errorQueryTTF.isBlankUnicode(oldCode)) {
+                return@forEachIndexed
+            }
+            // 删除轮廓数据不存在的字符
+            var glyf = errorQueryTTF.getGlyfByUnicode(oldCode)  // 轮廓数据不存在
+            if (errorQueryTTF.getGlyfIdByUnicode(oldCode) == 0) glyf = null // 轮廓数据指向保留索引0
+            if (filter && (glyf == null)) {
+                contentArray[index] = ""
+                return@forEachIndexed
+            }
+            // 使用轮廓数据反查Unicode
+            val code = correctQueryTTF.getUnicodeByGlyf(glyf)
+            if (code != 0) {
+                intArray[0] = code
+                contentArray[index] = String(intArray, 0, 1)
+            }
+        }
+        return contentArray.joinToString("")
+    }
+
+    private fun request(url: String, method: String, body: String?, headers: Any?, timeoutMs: Long?): StudioJsResponse {
+        val result = fetcher.fetch(HttpFetcher.FetchRequest(url, method, headerMap(headers, method.lowercase()), body,
+            timeoutSec = timeoutMs?.let { (it / 1000L).coerceAtLeast(1L).toInt() },
+            origin = withKind("js_http"), useCookieJar = useCookieJar))
         return StudioJsResponse(result.code, result.finalUrl, result.body, result.headers, result.elapsedMs, result.rawBytes)
+    }
+
+    /** headers 归一：JS 对象会桥成 Map（NativeObject 包成 Map 的适配）；字符串按 JSON 对象解析；null 接受但记一条真机警告。 */
+    private fun headerMap(headers: Any?, api: String): Map<String, String> = when (headers) {
+        null -> {
+            if (!nullHeadersWarned) {
+                nullHeadersWarned = true
+                logger("java.$api 收到 null headers：沙箱已按空 headers 放行；真机 java.get/post 传 null headers 可能 NPE，建议传 HashMap")
+            }
+            emptyMap()
+        }
+        is Map<*, *> -> headers.entries.associate { it.key.toString() to it.value.toString() }
+        is String -> runCatching { com.google.gson.JsonParser.parseString(headers).asJsonObject.entrySet().associate { it.key to it.value.asString } }.getOrDefault(emptyMap())
+        else -> emptyMap()
+    }
+
+    /** 官方 timeout 参数：毫秒；JS Number（int/long/double）、数字字符串都接受，非法/非正值回退 null。 */
+    private fun timeoutMillis(timeout: Any?): Long? = when (timeout) {
+        is Number -> timeout.toLong().takeIf { it > 0 }
+        is String -> timeout.toLongOrNull()?.takeIf { it > 0 }
+        else -> null
     }
     /** 把当前调用的来源链路与 JS 子请求类型合并，逐事务传递 */
     private fun withKind(kind: String): HttpOrigin? {
@@ -646,6 +867,17 @@ data class StudioJsResponse(
 
     /** 兼容二进制字节获取（用于转 GBK 等非 UTF-8 编码或图片处理） */
     fun bytes(): ByteArray = rawBytes ?: content.toByteArray(Charsets.UTF_8)
+
+    /** 兼容 Jsoup Connection.Response 风格：Set-Cookie 头按名拆成 cookie 映射（多值取首个） */
+    fun cookies(): Map<String, String> = buildMap {
+        responseHeaders.forEach { (name, value) ->
+            if (name.equals("set-cookie", ignoreCase = true)) {
+                value.split(';').firstOrNull()?.split('=', limit = 2)
+                    ?.takeIf { it.size == 2 && it[0].isNotBlank() }
+                    ?.let { putIfAbsent(it[0].trim(), it[1].trim()) }
+            }
+        }
+    }
 
     /** 兼容重定向链路前置响应 */
     fun priorResponse(): StudioJsResponse? = prior

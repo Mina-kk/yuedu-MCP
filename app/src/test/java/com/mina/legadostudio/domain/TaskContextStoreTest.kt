@@ -72,6 +72,46 @@ class TaskContextStoreTest {
         now = 101; assertTrue(runCatching { store.describe(id) }.isFailure)
         val next = store.create(); assertTrue(store.clear(next)); assertFalse(store.clear(next))
     }
+    @Test fun expiredContextLeavesTombstoneWithReason() = runBlocking {
+        // 墓碑：idle 过期后报错要给出「何时失效+为何失效」，而不是笼统的 CONTEXT_EXPIRED_OR_UNKNOWN
+        var now = 0L; val store = TaskContextStore(clock = { now }, idleMs = 100)
+        val id = store.create("过期任务")
+        store.describe(id) // touch @0
+        now = 200 // 闲置 200ms > idleMs=100，下次访问即过期
+        val ex = runCatching { store.describe(id) }.exceptionOrNull()!!
+        assertTrue(ex.message!!.contains("CONTEXT_EXPIRED_OR_UNKNOWN"))
+        assertTrue("应报失效时间：${ex.message}", ex.message!!.contains("分钟前失效"))
+        assertTrue("应报失效原因：${ex.message}", ex.message!!.contains("闲置上限"))
+        assertTrue(ex.message!!.contains("最后活动"))
+        assertTrue(store.hasTombstone(id))
+    }
+    @Test fun unknownContextKeepsOriginalError() = runBlocking {
+        // 从未见过的 id：没有墓碑，保持原「请 create_context」文案，不编造失效时间
+        val store = TaskContextStore()
+        val ex = runCatching { store.describe("never-existed") }.exceptionOrNull()!!
+        assertTrue(ex.message!!.contains("CONTEXT_EXPIRED_OR_UNKNOWN"))
+        assertTrue(ex.message!!.contains("请 create_context"))
+        assertFalse(ex.message!!.contains("分钟前失效"))
+        assertFalse(store.hasTombstone("never-existed"))
+    }
+    @Test fun clearedContextLeavesTombstone() = runBlocking {
+        val store = TaskContextStore()
+        val id = store.create("待删")
+        assertTrue(store.clear(id))
+        assertTrue(store.hasTombstone(id))
+        val ex = runCatching { store.describe(id) }.exceptionOrNull()!!
+        assertTrue(ex.message!!.contains("分钟前失效"))
+        assertTrue(ex.message!!.contains("已删除"))
+    }
+    @Test fun evictedContextLeavesTombstone() = runBlocking {
+        var now = 0L; val store = TaskContextStore(clock = { now }, maxContexts = 2, minEvictIdleMs = 10, idleMs = 10_000)
+        val a = store.create("a")
+        now = 1; val b = store.create("b")
+        now = 20; store.create("c") // 容量满 → 回收最久闲置的 a
+        assertTrue(store.hasTombstone(a))
+        val ex = runCatching { store.describe(a) }.exceptionOrNull()!!
+        assertTrue(ex.message!!.contains("超上限被回收"))
+    }
     @Test fun notesAndHeadersStayBounded() = runBlocking {
         val store = TaskContextStore(); val id = store.create("task")
         assertEquals("next: inspect title", store.describe(id, "next: inspect title")["notes"])

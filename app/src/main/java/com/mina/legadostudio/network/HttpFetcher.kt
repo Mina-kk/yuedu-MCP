@@ -71,6 +71,8 @@ class HttpFetcher(
          * JS java.fetchFont 使用；默认 false 完全不影响既有二进制跳过行为。
          */
         val allowFontBinary: Boolean = false,
+        /** 验证码专用：只读取经格式校验的图片原始字节，最多 2MB；普通 fetch 不变。 */
+        val allowImageBinary: Boolean = false,
     )
     @Keep
     data class FetchResult(
@@ -174,6 +176,32 @@ class HttpFetcher(
                 val redirectChain = generateSequence(response.priorResponse) { it.priorResponse }.toList().asReversed().map { it.request.url.toString() } + finalUrl
                 val elapsed = System.currentTimeMillis() - started
                 val requestHeaders = headers.toMultimap().mapValues { it.value.joinToString("; ") }
+                if (input.allowImageBinary) {
+                    require(method == "GET") { "CAPTCHA_METHOD：验证码图片只支持 GET" }
+                    require(response.code in 200..299) {
+                        "CAPTCHA_HTTP_${response.code}：验证码图片拉取失败；若遇 403/Cloudflare，请先在手机验证中心打开原站页面过盾，再重试图片请求（Cookie 不保证跨 WebView/HTTP 通道可用）"
+                    }
+                    val cap = (input.maxBodyBytes ?: MAX_IMAGE_BYTES).coerceIn(1, MAX_IMAGE_BYTES)
+                    val source = response.body.source()
+                    require(response.body.contentLength() <= cap) { "CAPTCHA_TOO_LARGE：验证码图片超过 2MB" }
+                    source.request(cap + 1)
+                    require(source.buffer.size <= cap) { "CAPTCHA_TOO_LARGE：验证码图片超过 2MB" }
+                    val imageBytes = source.readByteArray(source.buffer.size)
+                    require(imageBytes.isNotEmpty()) { "CAPTCHA_EMPTY：验证码图片响应为空" }
+                    val length = response.body.contentLength()
+                    require(length < 0 || imageBytes.size.toLong() == length) { "CAPTCHA_TRUNCATED：验证码图片未完整下载" }
+                    val mime = detectImageMime(imageBytes)
+                        ?: throw IllegalArgumentException("CAPTCHA_NOT_IMAGE：验证码响应不是受支持的图片（可能是 HTML/挑战页）")
+                    val contentType = response.body.contentType()?.toString()?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+                    require(contentType.isEmpty() || contentType == "application/octet-stream" || contentType == "binary/octet-stream" || contentType == mime ||
+                        (mime == "image/jpeg" && contentType == "image/jpg")) {
+                        "CAPTCHA_NOT_IMAGE：响应 Content-Type 与图片格式不符（可能是 HTML/挑战页）"
+                    }
+                    val note = "验证码图片已验证（$mime，${imageBytes.size} 字节）；正文不记录图片字节"
+                    recordDraft(HttpLogRecorder.Draft(method, url, finalUrl, response.code, elapsed, requestHeaders, responseHeaders, input.body.orEmpty(), note, redirectChain = redirectChain, sourceAnchor = input.origin?.sourceAnchor, contextId = input.origin?.contextId, originKind = input.origin?.originKind))
+                    val verifiedHeaders = responseHeaders.filterKeys { !it.equals("Content-Type", ignoreCase = true) } + ("Content-Type" to mime)
+                    return FetchResult(response.code, finalUrl, verifiedHeaders, "", elapsed, redirectChain, note, imageBytes.size.toLong(), rawBytes = imageBytes)
+                }
                 // 按当前书源类型处理二进制响应:不下载正文,避免图片/音视频等不相干内容进入解析与日志
                 if (method != "HEAD" && isBinaryContent(response.body.contentType()?.toString(), finalUrl)
                     && !(input.allowFontBinary && isFontContent(response.body.contentType()?.toString(), finalUrl))) {
@@ -308,6 +336,26 @@ class HttpFetcher(
 
     companion object {
         const val DEFAULT_UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/150 Mobile Safari/537.36"
+        const val MAX_IMAGE_BYTES = 2_000_000L
+
+        private fun detectImageMime(bytes: ByteArray): String? {
+            fun signature(vararg values: Int): Boolean = bytes.size >= values.size &&
+                values.indices.all { bytes[it].toInt() and 0xff == values[it] }
+            fun ascii(offset: Int, value: String): Boolean = bytes.size >= offset + value.length &&
+                value.indices.all { bytes[offset + it].toInt() == value[it].code }
+            return when {
+                bytes.size >= 45 && signature(137, 80, 78, 71, 13, 10, 26, 10) &&
+                    ascii(12, "IHDR") && ascii(bytes.size - 8, "IEND") -> "image/png"
+                bytes.size >= 4 && signature(0xff, 0xd8, 0xff) &&
+                    bytes[bytes.size - 2].toInt() and 0xff == 0xff && bytes.last().toInt() and 0xff == 0xd9 -> "image/jpeg"
+                bytes.size >= 14 && (ascii(0, "GIF87a") || ascii(0, "GIF89a")) &&
+                    bytes.last().toInt() and 0xff == 0x3b -> "image/gif"
+                bytes.size >= 20 && ascii(0, "RIFF") && ascii(8, "WEBP") &&
+                    (ascii(12, "VP8 ") || ascii(12, "VP8L") || ascii(12, "VP8X")) &&
+                    ((0..3).fold(0L) { n, i -> n or ((bytes[4 + i].toLong() and 0xff) shl (8 * i)) } + 8 == bytes.size.toLong()) -> "image/webp"
+                else -> null
+            }
+        }
 
         /** 命中 JS 挑战页时写入 FetchResult.bodyNote 的诊断文案。 */
         const val JS_CHALLENGE_NOTE = "JS_CHALLENGE_PAGE：响应是 JS 人机挑战页（HTTP 200），不是业务数据"

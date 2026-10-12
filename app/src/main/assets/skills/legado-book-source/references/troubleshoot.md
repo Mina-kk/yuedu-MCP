@@ -141,7 +141,7 @@ window.run("java.toast('执行成功');'成功'")
 
 > 本节是**成品源**在官方阅读 App 内过盾的方案。MCP 调试期遇到盾请走 [`verification.md`](verification.md)（验证中心 + 每域模式），两者互补不冲突：调试期过完盾验证规则后，若目标站真实使用中会频繁出盾，仍应把本节的 `loginCheckJs` 写进书源。
 >
-> **覆盖边界**：`loginCheckJs` 由官方阅读 App 在请求后执行；**Studio 沙箱的 `debug_source`/`check_source`/`eval_js` 不执行它**（运行时没有该钩子），调试期验证 `loginCheckJs` 逻辑只能把其中的检测/改写片段拷进 `eval_js` 手动跑，沙箱里 `java.startBrowserAwait` 会直接抛验证异常（等效于「需要验证」信号），不会像真机一样弹浏览器。
+> **覆盖边界**：`loginCheckJs` 由官方阅读 App 在请求后执行；**Studio 沙箱的 `debug_source`/`check_source`/`eval_js` 不执行它**（运行时没有该钩子），调试期验证 `loginCheckJs` 逻辑只能把其中的检测/改写片段拷进 `eval_js` 手动跑。沙箱里 `java.startBrowserAwait` 已接通手机验证中心：创建 webview 会话→用户在 App 内 WebView 过盾→返回整页源码（见 [`verification.md`](verification.md)），取消/超时返回空 body；但 `loginCheckJs` 这个钩子本身沙箱不执行。
 
 `loginCheckJs` 位于书源**基础**选项卡。Legado 在每次请求网站后都会执行此 JS 代码，`result` 为响应对象（包含 `url`、`code`、`body` 等属性）。JS 需返回修改后的响应对象。
 
@@ -226,7 +226,7 @@ Java 网络请求方法（**Studio 沙箱实测签名**，详见 `references/js-
 
 > ⚠️ **仅官方 App 可用**：`java.queryTTF` / `java.replaceFont` 在 **Studio 沙箱未实现**（`StudioJsApi` 无此方法），调试期调用必报「方法不存在」。字体替换逻辑无法在沙箱内验证——规则可先写好，但效果只能到官方 App 实测；`eval_js`/`debug_source` 里调试其余规则时请先把字体段注释掉或短路。
 >
-> 沙箱内替代能力（Studio 专有，官方 App 没有，跨环境书源不要写进成品规则）：`java.fetchFont(url)` 只放行字体响应并返回原始 `ByteArray`；`java.decodeWoff2(bytes|base64)` 解 WOFF2（内部 Brotli）/WOFF/TTF/OTTO 的 cmap，返回 `{"U+4E2D": gid}`。注意：`decodeWoff2` 给的是码点→**glyphId**，glyphId 不等于汉字；gid→真实汉字必须做字形轮廓比对（见 `java.queryTTF` 语义），沙箱未提供比对原语，只能当探测/取证工具用。MCP 侧对应工具是 `fetch_font`/`get_font_map`（见工具描述）。
+> 沙箱内替代能力：`java.fetchFont(url)` 只放行字体响应并返回原始 `ByteArray`；`java.decodeWoff2(bytes|base64)` 解 WOFF2（内部 Brotli）/WOFF/TTF/OTTO 的 cmap，返回 `{"U+4E2D": gid}`。注意：`decodeWoff2` 给的是码点→**glyphId**，glyphId 不等于汉字；gid→真实汉字必须做字形轮廓比对——沙箱已实现官方同名 `java.queryTTF(data)` + `java.replaceFont(text, errFont, correctFont[, filter])`：queryTTF 解析 TTF/OTF/WOFF/WOFF2 建立码点↔轮廓指纹映射（woff2 的 glyf transformed 除外，见 js-api.md），replaceFont 逐码点用轮廓指纹跨字体反查还原汉字，任意 cmap 打乱字体通用。MCP 侧对应工具是 `fetch_font`/`get_font_map`（见工具描述）。
 
 正文替换规则中使用，根据 f1 字体的字形数据到 f2 中查找字形对应的编码。
 

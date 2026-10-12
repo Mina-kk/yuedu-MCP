@@ -33,6 +33,16 @@ interface LegadoRuntime {
         @SerializedName("entry") val entry: String,
         @SerializedName("lines") val lines: List<String>,
         @SerializedName("data") val data: Any?,
+        /** 执行期间书源 java.log/log 系列输出（最多最近 200 条，每条截断 500 字符；无输出为 null） */
+        @SerializedName("jsLogs") val jsLogs: List<String>? = null,
+        /** 执行结束时 cache.putMemory 键值快照（值截断 300 字符，最多 100 键；无写入为 null） */
+        @SerializedName("cacheSnapshot") val cacheSnapshot: Map<String, String>? = null,
+        /** 最近 50 次 cache put/delete 调用：`时间戳ms kind key`，按发生顺序；无写入为 null */
+        @SerializedName("recentCachePuts") val recentCachePuts: List<String>? = null,
+        /** 正文阶段：合并清洗后正文字数；非正文阶段为 null */
+        @SerializedName("contentLength") val contentLength: Int? = null,
+        /** 正文阶段：正文前 50 字预览；非正文阶段为 null */
+        @SerializedName("contentPreview") val contentPreview: String? = null,
     )
 
     suspend fun inspect(request: InspectRequest): InspectReport

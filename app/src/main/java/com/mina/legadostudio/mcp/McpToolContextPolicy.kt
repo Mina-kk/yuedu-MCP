@@ -41,6 +41,6 @@ object McpToolContextPolicy {
     val CONTEXT_TOOLS: Set<String> = setOf(
         "fetch_page", "read_page", "read_result", "inspect_rule", "analyze_html", "eval_js",
         "debug_source", "check_source", "create_context", "get_context", "update_context", "clear_context",
-        "fetch_font", "get_font_map",
+        "fetch_font", "get_font_map", "webview_render", "webview_eval",
     )
 }
