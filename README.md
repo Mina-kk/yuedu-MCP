@@ -1,6 +1,6 @@
 # 阅读书源 MCP
 
-本机 **Legado 运行时 + MCP Server**（原「书源工坊」）。App 内不调用任何模型、不保存任何模型密钥。书源的制作、修复和调试全部由外部 MCP 客户端完成。
+内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
 - 当前源码构建版本：`1.1.008`（versionCode 187；以 `app/build.gradle.kts` 为准，不能据此认定 Release 已发布）
@@ -12,7 +12,7 @@
 
 iOS 简约白风格：液态玻璃顶栏/底栏（高斯模糊）、大圆角卡片、底部悬浮标签栏。底栏为 **MCP / 书源 / 技能 / 验证中心 / 日志**。
 
-验证中心运行时提供圆形 **M** 字悬浮球：可自由拖动到任意位置，松手时若靠近屏幕左右边缘会自动吸附并半隐一半（点按展开）；人工验证 alert 气泡弹出时自动贴边完整显示，不打断当前 App 操作。
+验证中心运行时提供圆形 **M** 字悬浮球：可自由拖动到任意位置，靠近屏幕左右边缘松手时自动吸附半隐（点按展开）；人工验证气泡弹出时自动贴边完整显示，不打断当前操作。
 
 ## 连接 MCP
 
@@ -30,10 +30,7 @@ MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查
 
 ### 书源类型开关
 
-MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文件 / 视频**（对应 Legado `bookSourceType` -1、0–4）。
-
-- `save_source` 保存书源时自动写入所选类型；选「自动」时不写入，保留 JSON 原样；
-- `fetch_page` 按类型过滤二进制内容：文本类型跳过图片/音视频/压缩包等二进制响应（返回 `bodyNote`/`binaryBytes` 说明），非文本类型保留对应媒体内容；「自动」不干预抓取，适合图文漫画混合等类型不确定的站点。
+MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文件 / 视频**（对应 `bookSourceType` -1、0–4）。`save_source` 保存时自动写入所选类型（「自动」保留 JSON 原样）；`fetch_page` 按类型过滤二进制内容：文本类型跳过图片/音视频等二进制响应，非文本类型保留对应媒体内容，「自动」不干预抓取，适合图文混合等类型不确定的站点。
 
 ## MCP 工具一览
 
@@ -57,19 +54,17 @@ match_sources 语料命中（同域/同模板族现成书源）
   → save_source 保存，get_source 按保存结果的项目 ID 回读确认
 ```
 
-`save_source` 仅在同一完整 `bookSourceUrl` 且 JSON 内容相同时幂等更新；同 URL 规则不同会新增版本并报告冲突，**不再按同域或去掉 URL 尾部 `/` 自动合并、删除**。`newVersion=true` 也不会为相同内容创建空副本。保存返回的 `VALIDATED` 只表示静态结构校验通过，不表示联网可用。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码、Web JS 逆向（方法论 / 入门 SOP / 进阶对抗 / 书源迁移四篇专题）等知识库；另附《书源 JS 入门教程》知识包（零基础语法到书源 `<js>` 实战），技能参考文档同步收录。
+`save_source` 仅在同一完整 `bookSourceUrl` 且 JSON 内容相同时幂等更新；同 URL 规则不同会新增版本并报告冲突，**不再按同域或去掉 URL 尾部 `/` 自动合并、删除**。保存返回的 `VALIDATED` 只表示静态结构校验通过，不表示联网可用。技能包 `legado-book-source` 内置完整工作流与参考文档：`get_skill` 读主文件，`get_skill_reference` 分页读参考（语料 / 验证 / 基础 / 排障 / JS API 等），`search_knowledge` → `read_knowledge` 查验证码、编码、Web JS 逆向等知识库；另附《书源 JS 入门教程》知识包。
 
 ### eval_js 与书源 JS 环境
 
-`eval_js` 与书源 `<js>` / `{{}}` 段运行在 vendored 官方 Rhino + analyzeRule 引擎上，除 `java`（ajax/connect/加解密）外还注入官方同名对象：`cookie`（`getCookie`/`getKey`/`setCookie`/`replaceCookie`/`removeCookie`）、`cache`（`put`/`get`/`delete`/`putMemory`/`getFromMemory`，进程内有效）、`source`（`put`/`get`/`getVariable`/`setVariable`，`debug_source` 时与书源变量互通）。规则链路全程保留元素对象：CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性；多段落 `@text` 按官方语义 join 全部段落。
-
-`set_cookie` 默认 `merge=true` 按 Cookie 名合并（不会冲掉该域其他 Cookie，如登录态），`merge=false` 为整串替换。
+`eval_js` 与书源 `<js>` / `{{}}` 段运行在与官方一致的 Rhino + analyzeRule 引擎上，除 `java`（ajax/connect/加解密）外还注入官方同名对象：`cookie`、`cache`、`source`（`debug_source` 时与书源变量互通）。规则求值与官方语义一致：CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性，多段落 `@text` 合并全部段落。`set_cookie` 默认 `merge=true` 按 Cookie 名合并（不会冲掉该域其他 Cookie，如登录态），`merge=false` 为整串替换。
 
 ### 验收闭环
 
-`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用真实搜索结果中的详情 URL 继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照，不能宣称实时。未传 `searchKey` 而源有 `searchUrl` 时自动用「我」探测并在 `warnings` 标注；零结果、验证墙和脚本错误应分开处理，任何一次通过也不保证今后站点永远可用。
+`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用真实搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时自动用「我」探测并在 `warnings` 标注。零结果、验证墙和脚本错误应分开处理，任何一次通过也不保证站点永远可用。
 
-`analyze_sources` 只读分析本地书源（可传 `ids`）或外部 JSON 数组 `sources`：同 URL 但规则不同是冲突，不按域名、响应速度合并；`list_sources` 默认逐条列出各版本；同 URL 多版本用项目 ID `get_source`，URL 歧义时不会擅自取第一条。`export_checked_sources(ids=[…])` 仅导出显式选中的本地项目，排除开关 `exclude.excludeLogin`、`excludeCaptcha`、`excludeFailed`、`excludeUnverified` 默认全部关闭；`collapseIdentical=true` 只折叠身份确定、JSON 完全一致且无冲突的副本。校验过滤只采信本 App 的 `check_source` 最近 30 分钟按书源原文绑定的证据；客户端传入的 `checkResults` 仅作未核验自述展示，不影响判定。输出为阅读兼容 JSON 数组且不删除原项目；MCP 单次结果超过 11,500 字符会报错，请缩小 `ids` 或分批导出，不截断 JSON。书源页「分析/过滤」提供静态预览、逐条检测和不受该 MCP 回包上限约束的本地复制/分享/导入入口；外部数组静态分析**不会执行陌生书源的 JS 或批量探测网络**，未实测记录应保持未验证。
+`analyze_sources` 只读分析本地书源（可传 `ids`）或外部 JSON 数组 `sources`：同 URL 但规则不同是冲突；`list_sources` 逐条列出各版本，同 URL 多版本用项目 ID `get_source` 取回。`export_checked_sources(ids=[…])` 仅导出显式选中的本地项目，排除开关 `exclude.excludeLogin`、`excludeCaptcha`、`excludeFailed`、`excludeUnverified` 默认全部关闭；`collapseIdentical=true` 只折叠 JSON 完全一致且无冲突的副本。过滤只采信本 App `check_source` 最近 30 分钟的证据；MCP 单次结果超过 11,500 字符会报错，请缩小 `ids` 或分批导出。书源页「分析/过滤」提供同样的静态预览、逐条检测和不受该回包上限约束的本地导出/分享/导入；外部数组静态分析**不会执行陌生书源的 JS 或批量探测网络**。
 
 ### 语料命中（省 token 第一步）
 
@@ -86,50 +81,38 @@ match_sources 语料命中（同域/同模板族现成书源）
 
 | status | 含义与行动 |
 |---|---|
-| `verification_required` | 需要人工验证：`browser_verify(url, waitSec=90)` 阻塞等待用户在验证中心完成，完成后自动取证并返回 `evidence`；随后重试原工具 |
-| `webview_mode_enabled` | 该域已自动切换 WebView 抓取（`fetch_page` 已原地重试一次，`autoRetried=true` 时本次即成功结果） |
+| `verification_required` | 需要人工验证：`browser_verify(url, waitSec=90)` 阻塞等待用户在验证中心完成，随后重试原工具 |
+| `webview_mode_enabled` | 该域已自动切换 WebView 抓取（`autoRetried=true` 时本次即为成功结果） |
 
-- 每域验证模式：`get_domain_modes` / `set_domain_mode(domain, auto|always|webview)`。**`always` 适合「一搜一验、URL 次次不同」的站点**——这类站点缓存 Cookie 无效，每次都走人工验证；验证完成但 `evidence.marker` 仍非空说明每次访问都要验，同样设 `always`。
-- 同一域的等待中验证会话自动复用，不会重复创建。
-- WebView 通道的 Cookie 与 OkHttp 通道 TLS 指纹不一致（如 `cf_clearance`）：系统对被 JS 盾拦截的站点自动改用 WebView 通道抓取，而不是把无效 Cookie 灌进规则。
-- 成品源在官方阅读 App 内过盾靠书源 `loginCheckJs` + `java.startBrowserAwait`，与调试期验证中心互补。
+- 每域验证模式：`get_domain_modes` / `set_domain_mode(domain, auto|always|webview)`。**`always` 适合「一搜一验」的站点**——缓存 Cookie 无效，每次都走人工验证。同一域等待中的验证自动复用，不重复创建。
+- 被 JS 盾拦截的站点自动改用 WebView 通道抓取；成品源在官方阅读 App 内过盾靠书源 `loginCheckJs` + `java.startBrowserAwait`。
 
 ### 并行多书源
 
-同时制作多个书源时：
-
-- 每个任务各自 `create_context` 并全程显式传 `contextId`，任务间缓存、引用、笔记完全隔离；
-- 未传 `contextId` 时使用**每条 MCP 连接各自的默认上下文**，多客户端同时连接不会串数据；
-- 调试缓存按调用传入（无全局锁），多个书源可同时 `debug_source` 而不互相等待；
-- 书源页「导入至阅读」支持最多 **4 个书源同时排队待导入**，新导入不会顶掉尚未被阅读拉取的端点。
+- 每个任务各自 `create_context` 并全程显式传 `contextId`，任务间缓存、引用、笔记完全隔离；未传 `contextId` 时使用每条连接各自的默认任务，多客户端同时连接不串数据；
+- 多个书源可同时 `debug_source` 而不互相等待；
+- 书源页「导入至阅读」支持最多 **4 个书源同时排队**，新导入不会顶掉尚未被拉取的端点。
 
 ## 书源与技能
 
-书源页按站点域名分组，组内按保存时间倒序展开；「分析/过滤」先展示重复候选、冲突和默认关闭的登录/验证码/失败/未验证排除开关，导出只影响本次预览，不删除项目，也不更改阅读客户端已有源。逐条「检测」会联网运行该源的规则/JS，需用户主动确认。每个书源版本仍可查看 JSON 详情、复制、分享与导入至阅读。技能页可查看内置 Skill 并控制启用/停用（停用后对 MCP 不可见）；自定义 Skill 支持新增、导入、导出和删除。`save_skill` / `delete_skill` 不能改写内置 Skill。
+书源页按站点域名分组、组内按保存时间倒序；「分析/过滤」展示重复候选与冲突，导出只影响本次预览，不删除项目也不更改阅读客户端已有源；逐条「检测」会联网运行该源的规则/JS，需用户主动确认。每个书源版本可查看 JSON 详情、复制、分享与导入至阅读。技能页可查看内置 Skill 并控制启用/停用；自定义 Skill 支持新增、导入、导出和删除，`save_skill` / `delete_skill` 不能改写内置 Skill。
 
 ## 日志与诊断
 
-底栏 **日志** 分五段：操作日志 / HTTP / 抓包 / 崩溃 / 诊断快照。可多选删除。
+底栏 **日志** 分五段：操作日志 / HTTP / 抓包 / 崩溃 / 诊断快照，可多选删除。
 
-- 操作日志与 HTTP 日志均采用吸顶日期切换栏（一天一页），支持左右按天翻看与弹窗跳选日期；
-- HTTP 记录含时间、状态码与耗时；自动过滤本地回环与私网探测流量，点击进入全屏详情页（请求/响应头、正文、重定向链），详情页内滚动与列表互不影响，系统返回键只关闭详情、回到列表；打开详情时隐藏底部标签栏；
-- HTTP 列表停留在顶部时自动跟随最新记录，翻历史时不被打断；
-- **「抓包」页签是三个独立页的入口**：「逐次抓包」表单发一次请求并看逐跳结果；「浏览器抓包」是可见可交互的 WebView；「抓包会话历史」按 `cap:contextId` 分组持久化（逐次/可见浏览器/无头 webview 三类，重启可回看），分页加载 + 按抓包 ID 全库精确查找；该页并可开关 HTTP 事务记录；抓包事务不进入 HTTP 标签、不参与锚点分桶与按天导出；
-- 操作日志与 HTTP 日志支持**按天导出为文本**（经系统分享发给电脑/AI 排查），导出含请求/响应头与正文；
+- 操作日志与 HTTP 日志按天翻看、支持**按天导出为文本**（可发给电脑/AI 排查，含请求/响应头与正文）；HTTP 详情页含请求/响应头、正文与重定向链；
+- 「抓包」页签是三个入口：逐次抓包（发一次请求看逐跳结果）、浏览器抓包（可见可交互的 WebView）、抓包历史（按 `cap:contextId` 分组持久化，重启可回看）；
 - 诊断快照只含版本、MCP 状态和前置条件，不含 HTTP 或崩溃正文。
 
 排查请用 MCP：`get_logs` / `get_log` / `get_http_logs` / `get_http_log` / `get_crash_logs` / `get_crash_log` / `get_diagnostic_snapshots` / `get_diagnostic_snapshot`。
 
-抓包取证链路（`cap:` 会话，与上述普通 HTTP 日志隔离）：`capture_once` 发单次请求并逐跳记录重定向（中间跳为 `originKind=capture_hop`）；`webview_capture` 一次性无头 WebView 抓包（OkHttp 供给/观察证据，非 WebView 原生网络栈抓包；跑完即销毁、不可交互）；用户在「浏览器抓包」页的可见交互会话同样以 `cap:contextId` 入库。AI 侧读取：`list_captures` 找会话（`kind` 如实区分逐次/可见浏览器/无头/未知）→ `get_capture(contextId)` 分页回看，活会话 `poll_capture(contextId, afterLogId)` 增量拉新 → `get_http_log(id)` 看单条详情 → 字体/图片等落盘二进制用 `get_capture_resource(logId)` 分片读取。日志与摘要含完整 URL/query，可能带令牌等敏感参数，分享前请自行检查。
+抓包取证：`capture_once` 发单次请求并逐跳记录重定向；`webview_capture` 做一次性无头 WebView 抓包（跑完即销毁）；「浏览器抓包」页的交互会话同样以 `cap:contextId` 入库。AI 侧读取：`list_captures` 找会话 → `get_capture(contextId)` 分页回看（活动会话用 `poll_capture(contextId, afterLogId)` 增量拉新）→ `get_http_log(id)` 看单条详情 → 字体/图片等二进制资源用 `get_capture_resource(logId)` 读取。日志与摘要含完整 URL/query，可能带令牌等敏感参数，分享前请自行检查。
 
 构建说明见 `BUILDING.md`。
 
 ## 任务上下文
 
-使用 `create_context` 创建任务，后续调用传入 `contextId`。`fetch_page` 保存网页并返回 `pageId`；相同 method+URL+body（**含 POST 搜索**）在 5 分钟内复用快照，只返回引用。正文通过 `read_page` 分段或搜索，也可直接交给 `inspect_rule`、`analyze_html`、`eval_js`（传 `pageId` 即可，免传 HTML）。工具结果超过 12000 字符自动转 `resultId` + 预览，用 `read_result` 分段取回，不重复执行原工具；`list_contexts` 可列出当前任务与占用，不返回正文。
+`create_context` 创建任务后全程传 `contextId`：`fetch_page` 保存网页返回 `pageId`（相同请求 5 分钟内复用快照），`read_page` 分段读取，或把 `pageId` 直接交给 `inspect_rule` / `analyze_html` / `eval_js`；工具结果超长时自动转 `resultId` + 预览，用 `read_result` 分段取回。`update_context` 保存阶段笔记，`get_context` 恢复进度，`clear_context` 收尾。
 
-`update_context` 保存阶段笔记，重连后使用 `get_context` 恢复目录与进度，完成后 `clear_context`。上限 **16 个任务**、每任务 32 项 / 200 万字符 / 单项 100 万字符；快照 5 分钟内新鲜、闲置 30 分钟过期。上下文持久化到应用私有目录（memory + snapshot）：进程重启后自动恢复，但恢复条目标记 `stale`，先 `refresh=true` 刷新再依赖其内容。MCP 令牌、User-Agent 或书源类型变化会使旧引用失效；它不自动读取、总结或裁剪客户端的聊天历史。
-
-`fetch_page` 支持 `responseMode=reference`（不回传正文，仅存快照）与 `maxChars`（预览大小）进一步省流量；`debug_source` / `check_source` 默认复用本任务快照，**最终验收传 `refresh=true` 全程实时**；调试输出有意截断（正文 4000 字符、目录 20 章、搜索 10 条等），均带全量计数字段。
-
-MCP 会话按 `Mcp-Session-Id` 统计：`clientCount` 只计最近 60 秒内发生过**真实工具调用**的活跃会话（客户端保活/心跳流量不计入），任务停止后自动掉出计数。会话活跃度只由真实工具调用刷新：闲置超过 `reapIdleSeconds`（默认 1800 秒）即由 `McpSessions` 主动关闭释放（客户端再请求会收到 404 并重新握手），不再长期占用。`app_status` 同时返回 `sessionTotal`（累计建立）、`sessionClosed`、`sessionReaped`（已回收）、`reapIdleSeconds`。
+上限 **16 个任务**、每任务 32 项 / 200 万字符；快照 5 分钟内复用、任务闲置 30 分钟过期。应用重启后任务自动恢复，但恢复的条目标记 `stale`，先 `refresh=true` 刷新再依赖其内容。`fetch_page` 支持 `responseMode=reference`（只存快照不回传正文）与 `maxChars` 省流量；最终验收传 `refresh=true` 全程实时。调试输出有意截断（正文 4000 字符、目录 20 章、搜索 10 条等），均带全量计数。`app_status` 可查看活跃连接与任务占用状态。
