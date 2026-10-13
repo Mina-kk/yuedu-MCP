@@ -9,7 +9,7 @@
 - CI：新增 GitHub Actions，每次推送和 PR 都会运行单元测试并构建 debug APK（`.github/workflows/ci.yml`），不使用任何签名密钥。
 - 文档：README「MCP 工具一览」补齐全部 67 个工具，新增「字体反爬」「抓包」分组。
 - 测试：新增 `ReadmeToolTableContractTest`，双向校验 README 工具表与代码中注册的工具一致，并核对工具总数和版本号。
-- 测试：`ZjreadLiveTest` 在本地没有 `work/zjread` 素材时自动跳过，不再让 CI 失败。
+- 测试：真实联网用例（`ZjreadLiveTest`，`@Category(LiveNetworkTest::class)`）从默认单测中整类排除，CI 不再依赖“缺素材自动跳过”兜底：默认 `:app:testDebugUnitTest` 只跑本地/MockWebServer 回环用例；联网验证须显式执行 `./gradlew :app:liveTestDebug`（自动注入 `-Dlegadostudio.liveTests=true`，独立报告且每次重跑），显式开启后缺少 `work/zjread` 素材（`zjread_js_lib.js`、`rhino_probe.js`）直接失败而不是静默跳过。
 - 内部重构：`StudioMcpServer.kt`（1813 行）按领域拆分为 9 个工具注册文件（`McpProjectTools.kt`、`McpCaptureTools.kt` 等），工具名、描述、参数和注册顺序都不变。
 - 测试：工具入参读取（字符串/整数/布尔的缺省与类型不符报错）抽为 `McpArgs`，新增 `McpArgsTest`、`PagedTextTest` 锁定入参与分页边界（offset/limit/query 合法范围、翻页无缝拼接），行为不变。
 - Skill：内置 `reverse-engineering` 的 REA 参考同步到上游 morluto/rea 最新版（skill 元数据版本 36 → 41），新增 `connection-and-recovery` 参考；补充第三方声明与 `REA_LICENSE_MIT`。DandanLLab/legadoSkill 上游自 2026-03 起无新变更，无需同步。

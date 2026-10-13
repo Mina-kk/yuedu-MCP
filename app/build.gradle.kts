@@ -1,4 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.HashSet
+import java.util.concurrent.Callable
 
 plugins {
     id("com.android.application")
@@ -120,4 +122,44 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:5.3.2")
     testImplementation("io.ktor:ktor-server-test-host:3.5.2")
+}
+
+// 真实联网测试隔离：默认所有 Test 任务排除 LiveNetworkTest category，
+// 仅独立的 liveTestDebug 任务按该 category 执行（见 BUILDING.md）。
+val liveNetworkTestCategory = "com.mina.legadostudio.testsupport.LiveNetworkTest"
+
+tasks.withType<Test>().configureEach {
+    if (name != "liveTestDebug") {
+        useJUnit { excludeCategories(liveNetworkTestCategory) }
+    }
+}
+
+val liveTestDebug = tasks.register<Test>("liveTestDebug") {
+    description = "Runs real-network LiveNetworkTest cases (explicit opt-in; never part of the default test run)."
+    group = "verification"
+    useJUnit {
+        includeCategories(liveNetworkTestCategory)
+        // 用 Java HashSet 清空排除集：Kotlin emptySet() 的 EmptySet 会在
+        // 序列化进 test worker 配置时因 worker classloader 缺 kotlin-stdlib 而崩溃
+        setExcludeCategories(HashSet())
+    }
+    systemProperty("legadostudio.liveTests", "true")
+    maxParallelForks = 1
+    outputs.upToDateWhen { false }
+    outputs.doNotCacheIf("live network tests are never cached") { true }
+    // 报告/binary 与默认 testDebugUnitTest 完全隔离
+    reports.html.outputLocation.set(layout.buildDirectory.dir("reports/tests/liveTestDebug"))
+    reports.junitXml.outputLocation.set(layout.buildDirectory.dir("test-results/liveTestDebug"))
+    binaryResultsDirectory.set(layout.buildDirectory.dir("test-results/liveTestDebug/binary"))
+}
+
+afterEvaluate {
+    val debugUnitTest = tasks.getByName("testDebugUnitTest") as Test
+    liveTestDebug.configure {
+        testClassesDirs = debugUnitTest.testClassesDirs
+        classpath = debugUnitTest.classpath
+        workingDir(debugUnitTest.workingDir)
+        // 复用 debugUnitTest 的前置依赖，但不依赖 testDebugUnitTest 任务本身
+        dependsOn(Callable { debugUnitTest.taskDependencies.getDependencies(debugUnitTest) })
+    }
 }

@@ -4,35 +4,49 @@ import com.google.gson.Gson
 import com.mina.legadostudio.network.HttpFetcher
 import com.mina.legadostudio.runtime.EmbeddedLegadoRuntime
 import com.mina.legadostudio.runtime.RhinoEvaluator
+import com.mina.legadostudio.testsupport.LiveNetworkTest
 import io.legado.app.model.analyzeRule.LegadoRuleEngine
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Before
 import org.junit.Test
+import org.junit.experimental.categories.Category
 import java.io.File
 
-/** 临时验证 zjread_js_lib.js 在 Rhino 沙箱里跑通（真实联网）。验证完删除。 */
+/**
+ * 真实联网验证 zjread_js_lib.js 在 Rhino 沙箱里跑通（访问 www.zjread.cc）。
+ * 默认单测任务按 [LiveNetworkTest] category 整类排除；仅 `:app:liveTestDebug`
+ * （自动注入 `-Dlegadostudio.liveTests=true`）或显式设置该 property 的 Test 任务执行。
+ */
+@Category(LiveNetworkTest::class)
 class ZjreadLiveTest {
 
     private val workDir = File(System.getProperty("user.dir")).let {
         if (File(it, "work/zjread").isDirectory) File(it, "work/zjread") else File(it.parentFile, "work/zjread")
     }
     private val libFile = File(workDir, "zjread_js_lib.js")
+    private val probeFile = File(workDir, "rhino_probe.js")
 
     private fun evaluator(): RhinoEvaluator = RhinoEvaluator(HttpFetcher(), Gson())
     private fun runtime() = EmbeddedLegadoRuntime(
         HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson())
     )
 
-    @Before fun requireLocalWorkDir() {
-        Assume.assumeTrue("缺少本地 work/zjread，跳过联网验证", libFile.isFile)
+    /** 请求前门闩：未显式 opt-in 则跳过；已 opt-in 而素材缺失必须失败，不许静默跳过。 */
+    @Before fun requireLiveOptInAndMaterials() {
+        Assume.assumeTrue(
+            "未设置 -Dlegadostudio.liveTests=true，跳过真实联网用例",
+            System.getProperty("legadostudio.liveTests") == "true"
+        )
+        assertTrue("已开启 live 测试但缺少素材：$libFile", libFile.isFile)
+        assertTrue("已开启 live 测试但缺少素材：$probeFile", probeFile.isFile)
     }
 
     private fun lib() = libFile.readText()
 
     @Test fun probeSandboxApis() {
-        val js = File(workDir, "rhino_probe.js").readText()
+        val js = probeFile.readText()
         val r = evaluator().evaluate(js, "https://www.zjread.cc")
         println(r.value)
         assertTrue(r.value != null && !r.value!!.contains("!!"))
