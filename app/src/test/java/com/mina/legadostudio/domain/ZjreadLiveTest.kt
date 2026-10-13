@@ -7,6 +7,8 @@ import com.mina.legadostudio.runtime.RhinoEvaluator
 import io.legado.app.model.analyzeRule.LegadoRuleEngine
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
+import org.junit.Assume
+import org.junit.Before
 import org.junit.Test
 import java.io.File
 
@@ -22,6 +24,10 @@ class ZjreadLiveTest {
     private fun runtime() = EmbeddedLegadoRuntime(
         HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson())
     )
+
+    @Before fun requireLocalWorkDir() {
+        Assume.assumeTrue("缺少本地 work/zjread，跳过联网验证", libFile.isFile)
+    }
 
     private fun lib() = libFile.readText()
 

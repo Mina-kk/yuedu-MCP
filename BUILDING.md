@@ -15,6 +15,8 @@ export ANDROID_HOME=/path/to/android-sdk
 
 产物：`app/build/outputs/apk/debug/app-debug.apk`
 
+CI 见 `.github/workflows/ci.yml`：每次推送到 main 或提交 PR 时运行上面同一条命令，测试报告和 debug APK 作为构建产物保留 7 天。CI 不接触 Release 签名。
+
 ## Release 签名构建
 
 签名凭据只通过环境变量传入，不要写入仓库：
