@@ -34,14 +34,23 @@ MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文�
 
 ## MCP 工具一览
 
+共 67 个工具（本表与代码注册列表由单测 `ReadmeToolTableContractTest` 双向校验，新增/删除工具必须同步本表）。
+
 | 分组 | 工具 |
 |---|---|
-| 语料 / 知识 / 技能 | `match_sources` `get_corpus_source` `get_corpus_shard` `search_knowledge` `read_knowledge` `list_skills` `get_skill` `get_skill_reference` |
+| 语料 / 知识 / 技能 | `match_sources` `get_corpus_source` `get_corpus_shard` `search_knowledge` `read_knowledge` `list_skills` `get_skill` `get_skill_reference` `save_skill` `delete_skill` |
 | 任务上下文 | `create_context` `get_context` `list_contexts` `update_context` `clear_context` `read_page` `read_result` |
 | 抓取与解析 | `fetch_page` `analyze_html` `inspect_rule` `eval_js` `webview_render` `webview_eval` |
-| 书源 | `validate_source` `list_sources` `get_source` `save_source` `export_source` `debug_source` `check_source` `analyze_sources` `export_checked_sources` `archive_source_versions` `import_reader` `list_projects` `get_project` `delete_projects` |
-| 验证与 Cookie | `browser_verify` `get_verification_status` `get_domain_modes` `set_domain_mode` `get_cookies` `set_cookie` `clear_cookies` |
-| 状态与日志 | `get_app_info` `app_status` `set_http_log_recording` `get_http_logs` `get_http_log` `get_logs` `get_log` `get_crash_logs` `get_crash_log` `get_diagnostic_snapshots` `get_diagnostic_snapshot` `capture_once` `webview_capture` `list_captures` `get_capture` `poll_capture` `get_capture_resource` |
+| 字体反爬 | `fetch_font` `get_font_map` |
+| 书源 | `validate_source` `list_sources` `get_source` `save_source` `export_source` `debug_source` `check_source` `analyze_sources` `export_checked_sources` `archive_source_versions` `import_reader` `list_projects` `get_project` `save_project` `delete_projects` |
+| 验证与 Cookie | `browser_verify` `get_verification_status` `get_domain_modes` `set_domain_mode` `get_cookies` `set_cookie` `clear_cookies` `apply_webview_cookies` |
+| 抓包 | `capture_once` `webview_capture` `list_captures` `get_capture` `poll_capture` `get_capture_resource` |
+| 状态与日志 | `get_app_info` `app_status` `set_http_log_recording` `get_http_log_recording` `get_http_logs` `get_http_log` `get_logs` `get_log` `get_crash_logs` `get_crash_log` `export_diagnostic` `get_diagnostic_snapshots` `get_diagnostic_snapshot` |
+
+- `save_skill` / `delete_skill`：管理自定义 Skill，内置 Skill 不可覆盖或删除。
+- `fetch_font` / `get_font_map`：抓取 woff/woff2/ttf/otf 字体并分页读取 cmap（码点→glyphId），用于字体加密站点；glyphId 不等于汉字，还原需字形比对。
+- `apply_webview_cookies`：人工过完 CF/JS 挑战后，把 WebView 采到的 Cookie（及可选 User-Agent）按名合并进目标书源 header 并保存。
+- `export_diagnostic`：创建诊断快照；`get_http_log_recording`：只读查询 HTTP 事务记录开关。
 
 ## 制作流程
 
