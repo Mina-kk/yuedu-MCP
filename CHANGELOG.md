@@ -9,6 +9,7 @@
 - 测试：新增 `ReadmeToolTableContractTest`，双向校验 README 工具表与代码中注册的工具一致，并核对工具总数和版本号。
 - 测试：`ZjreadLiveTest` 在本地没有 `work/zjread` 素材时自动跳过，不再让 CI 失败。
 - 内部重构：`StudioMcpServer.kt`（1813 行）按领域拆分为 9 个工具注册文件（`McpProjectTools.kt`、`McpCaptureTools.kt` 等），工具名、描述、参数和注册顺序都不变。
+- 测试：工具入参读取（字符串/整数/布尔的缺省与类型不符报错）抽为 `McpArgs`，新增 `McpArgsTest`、`PagedTextTest` 锁定入参与分页边界（offset/limit/query 合法范围、翻页无缝拼接），行为不变。
 
 ## [1.1.008] - 2026-10-12
 

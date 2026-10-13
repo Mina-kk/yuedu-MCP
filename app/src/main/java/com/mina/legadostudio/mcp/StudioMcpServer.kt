@@ -20,13 +20,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
@@ -499,37 +494,10 @@ class StudioMcpServer(context: Context) {
 
     internal fun ok(text: String) = CallToolResult(listOf(TextContent(text)))
     internal fun err(text: String) = CallToolResult(listOf(TextContent(text)), isError = true)
-    internal fun JsonObject?.str(key: String): String? {
-        val value = this?.get(key) ?: return null
-        require(value is kotlinx.serialization.json.JsonPrimitive && value.isString) {
-            "$key 需要 JSON 字符串（type: string），收到 ${jsonType(value)}；对象/数组请先序列化为 JSON 字符串"
-        }
-        return value.jsonPrimitive.contentOrNull
-    }
-    internal fun jsonType(value: kotlinx.serialization.json.JsonElement): String = when (value) {
-        is JsonObject -> "object"
-        is JsonArray -> "array"
-        is kotlinx.serialization.json.JsonNull -> "null"
-        else -> when {
-            value.jsonPrimitive.booleanOrNull != null -> "boolean"
-            value.jsonPrimitive.contentOrNull?.toDoubleOrNull() != null -> "number"
-            else -> "string"
-        }
-    }
-    internal fun JsonObject?.int(key: String): Int? {
-        val value = this?.get(key) ?: return null
-        require(value is kotlinx.serialization.json.JsonPrimitive) {
-            "$key 需要 JSON 数字（type: integer），收到 ${jsonType(value)}"
-        }
-        return value.jsonPrimitive.intOrNull
-    }
-    internal fun JsonObject?.bool(key: String): Boolean? {
-        val value = this?.get(key) ?: return null
-        require(value is kotlinx.serialization.json.JsonPrimitive) {
-            "$key 需要 JSON 布尔（type: boolean），收到 ${jsonType(value)}"
-        }
-        return value.jsonPrimitive.booleanOrNull
-    }
+    internal fun JsonObject?.str(key: String): String? = McpArgs.str(this, key)
+    internal fun jsonType(value: kotlinx.serialization.json.JsonElement): String = McpArgs.jsonType(value)
+    internal fun JsonObject?.int(key: String): Int? = McpArgs.int(this, key)
+    internal fun JsonObject?.bool(key: String): Boolean? = McpArgs.bool(this, key)
 
     /** 从书源 JSON 提取锚点（bookSourceUrl 的注册域），失败时返回 null 不阻断流程。 */
     internal fun sourceAnchorOf(sourceJson: String): String? = runCatching {
