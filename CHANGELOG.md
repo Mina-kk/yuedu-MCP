@@ -10,6 +10,7 @@
 - 测试：`ZjreadLiveTest` 在本地没有 `work/zjread` 素材时自动跳过，不再让 CI 失败。
 - 内部重构：`StudioMcpServer.kt`（1813 行）按领域拆分为 9 个工具注册文件（`McpProjectTools.kt`、`McpCaptureTools.kt` 等），工具名、描述、参数和注册顺序都不变。
 - 测试：工具入参读取（字符串/整数/布尔的缺省与类型不符报错）抽为 `McpArgs`，新增 `McpArgsTest`、`PagedTextTest` 锁定入参与分页边界（offset/limit/query 合法范围、翻页无缝拼接），行为不变。
+- Skill：内置 `reverse-engineering` 的 REA 参考同步到上游 morluto/rea 最新版（skill 元数据版本 36 → 41），新增 `connection-and-recovery` 参考；补充第三方声明与 `REA_LICENSE_MIT`。DandanLLab/legadoSkill 上游自 2026-03 起无新变更，无需同步。
 
 ## [1.1.008] - 2026-10-12
 

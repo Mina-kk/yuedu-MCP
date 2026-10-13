@@ -44,7 +44,7 @@ description: 对目标做逆向取证时使用——含 JS/Web 加密接口、AP
 ## 参考
 
 - `references/reverse-engineer-anything__SKILL.md`：REA 完整方法论（目标路由、证据模型、工具选型、调查计划）。
-- `references/reverse-engineer-anything__references__*.md`：REA 分领域指南（JS/Electron、Android、native/artifact、运行时观察、证据工作流）。
+- `references/reverse-engineer-anything__references__*.md`：REA 分领域指南（JS/Electron、Android、native/artifact、运行时观察、证据工作流、连接与恢复）。
 - `references/rea-tool-design__SKILL.md`：REA 工具契约设计（改 MCP 工具时参考）。
 - 书源实战案例：见 `knowledge/` 的 `js-reverse-s0-methodology.md`、`js-reverse-s2-basic.md`、`js-reverse-s2-advanced.md`、`js-reverse-s2-booksource.md`、`JS挑战与动态搜索避坑实战-阿里书屋.md`，以及技能 `legado-book-source` 的 `references/evidence-methodology.md`（书源调试语境的证据分级落地）。
 

@@ -17,3 +17,10 @@
 ## Legado source skill in this workspace
 
 - Used for: MCP-first RED/GREEN/REFACTOR workflow and references embedded in the app.
+
+## morluto/rea
+
+- Repository: https://github.com/morluto/rea
+- License: MIT
+- Used for: `reverse-engineer-anything` and `rea-tool-design` agent skills, embedded verbatim under `app/src/main/assets/skills/reverse-engineering/references/` (synced from upstream `4aa51bf`, skill metadata version 41).
+- The upstream MIT license is included as `REA_LICENSE_MIT`.
