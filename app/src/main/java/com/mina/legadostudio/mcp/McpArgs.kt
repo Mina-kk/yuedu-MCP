@@ -22,10 +22,16 @@ internal object McpArgs {
 
     fun int(args: JsonObject?, key: String): Int? {
         val value = args?.get(key) ?: return null
+        if (value is JsonNull) return null
         require(value is JsonPrimitive) {
             "$key 需要 JSON 数字（type: integer），收到 ${jsonType(value)}"
         }
-        return value.jsonPrimitive.intOrNull
+        val primitive = value.jsonPrimitive
+        primitive.intOrNull?.let { return it }
+        if (primitive.isString || primitive.booleanOrNull != null) return null
+        throw IllegalArgumentException(
+            "$key 需要 JSON 整数（type: integer，范围 ${Int.MIN_VALUE}..${Int.MAX_VALUE}），收到 \"${primitive.content}\" 无法表示为 Int"
+        )
     }
 
     fun bool(args: JsonObject?, key: String): Boolean? {

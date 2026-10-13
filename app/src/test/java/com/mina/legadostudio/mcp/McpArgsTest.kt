@@ -50,10 +50,12 @@ class McpArgsTest {
         assertTrue(failure { McpArgs.str(args, "a") }.contains("收到 array"))
     }
 
-    @Test fun intRejectsContainersAndToleratesUnparsablePrimitives() {
+    @Test fun intRejectsNonIntegerAndOutOfRangeNumbers() {
         val args = buildJsonObject {
             put("n", 42); put("neg", -1); put("zero", 0); put("numStr", "50")
-            put("frac", 3.5); put("word", "abc"); put("huge", 3_000_000_000L); put("b", true)
+            put("frac", 3.5); put("word", "abc"); put("huge", 3_000_000_000L)
+            put("hugeNeg", -3_000_000_000L); put("intMax", 2_147_483_647); put("intMin", -2_147_483_648L)
+            put("b", true)
             put("nul", JsonNull)
             putJsonObject("o") { }
             put("a", buildJsonArray { })
@@ -62,10 +64,25 @@ class McpArgsTest {
         assertEquals(-1, McpArgs.int(args, "neg"))
         assertEquals(0, McpArgs.int(args, "zero"))
         assertEquals("字符串数字按内容解析", 50, McpArgs.int(args, "numStr"))
-        assertNull("小数不是整数，回落到工具默认值", McpArgs.int(args, "frac"))
-        assertNull(McpArgs.int(args, "word"))
-        assertNull("超出 Int 范围回落默认值", McpArgs.int(args, "huge"))
-        assertNull(McpArgs.int(args, "b"))
+        assertEquals("Int 最大值可解析", 2_147_483_647, McpArgs.int(args, "intMax"))
+        assertEquals("Int 最小值可解析", -2_147_483_648, McpArgs.int(args, "intMin"))
+
+        val fracMsg = failure { McpArgs.int(args, "frac") }
+        assertTrue(fracMsg.startsWith("frac 需要 JSON 整数（type: integer"))
+        assertTrue(fracMsg.contains("收到 \"3.5\""))
+
+        val hugeMsg = failure { McpArgs.int(args, "huge") }
+        assertTrue(hugeMsg.startsWith("huge 需要 JSON 整数（type: integer"))
+        assertTrue(hugeMsg.contains("收到 \"3000000000\""))
+        assertTrue(hugeMsg.contains("范围 -2147483648..2147483647"))
+
+        val hugeNegMsg = failure { McpArgs.int(args, "hugeNeg") }
+        assertTrue(hugeNegMsg.startsWith("hugeNeg 需要 JSON 整数（type: integer"))
+        assertTrue(hugeNegMsg.contains("收到 \"-3000000000\""))
+
+        assertNull("非数字字符串保持原有缺省行为", McpArgs.int(args, "word"))
+        assertNull("布尔值保持原有缺省行为", McpArgs.int(args, "b"))
+
         assertNull("JSON null 视同缺省", McpArgs.int(args, "nul"))
         assertEquals("o 需要 JSON 数字（type: integer），收到 object", failure { McpArgs.int(args, "o") })
         assertTrue(failure { McpArgs.int(args, "a") }.contains("收到 array"))
