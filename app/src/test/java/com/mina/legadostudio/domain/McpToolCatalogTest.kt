@@ -5,16 +5,16 @@ import org.junit.Test
 import java.io.File
 
 class McpToolCatalogTest {
-    private fun studioMcpServerSource(): String {
-        val candidates = listOf(
-            File("src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-            File("app/src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-        )
-        return candidates.first { it.isFile }.readText()
+    private fun mcpServerSources(): String {
+        val dir = listOf(
+            File("src/main/java/com/mina/legadostudio/mcp"),
+            File("app/src/main/java/com/mina/legadostudio/mcp"),
+        ).first { it.isDirectory }
+        return dir.listFiles { f -> f.isFile && f.extension == "kt" }!!.sortedBy { it.name }.joinToString("\n") { it.readText() }
     }
 
     private fun toolNames(): Set<String> =
-        Regex("""(?:addTool|tool)\("([^"]+)"""").findAll(studioMcpServerSource()).map { it.groupValues[1] }.toSet()
+        Regex("""(?:addTool|tool)\("([^"]+)"""").findAll(mcpServerSources()).map { it.groupValues[1] }.toSet()
 
     @Test
     fun rejectsAiAndJobTools() {
@@ -93,7 +93,7 @@ class McpToolCatalogTest {
 
     @Test
     fun getAppInfoDeclaresNoAi() {
-        val source = studioMcpServerSource()
+        val source = mcpServerSources()
         assertTrue(source.contains("\"ai\" to false"))
         assertTrue(source.contains("\"role\" to \"mcp-runtime\""))
         assertTrue(source.contains("\"ui\" to listOf(\"mcp\", \"sources\", \"skills\", \"verification\", \"logs\")"))

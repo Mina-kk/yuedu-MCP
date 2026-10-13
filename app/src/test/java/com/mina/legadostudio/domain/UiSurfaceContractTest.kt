@@ -6,6 +6,14 @@ import org.junit.Test
 import java.io.File
 
 class UiSurfaceContractTest {
+    private fun mcpServerSources(): String {
+        val dir = listOf(
+            File("src/main/java/com/mina/legadostudio/mcp"),
+            File("app/src/main/java/com/mina/legadostudio/mcp"),
+        ).first { it.isDirectory }
+        return dir.listFiles { f -> f.isFile && f.extension == "kt" }!!.sortedBy { it.name }.joinToString("\n") { it.readText() }
+    }
+
     private fun appKt(): String {
         val candidates = listOf(
             File("src/main/java/com/mina/legadostudio/ui/StudioApp.kt"),
@@ -486,11 +494,7 @@ class UiSurfaceContractTest {
     /** MCP get_http_logs 防回归锁：includeCapture 默认 false，默认走 NoCapture 扫描，true 走无过滤版 */
     @Test
     fun mcpGetHttpLogsDefaultsToNoCapture() {
-        val candidates = listOf(
-            File("src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-            File("app/src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-        )
-        val source = candidates.first { it.isFile }.readText()
+        val source = mcpServerSources()
         assertTrue(source.contains("\"includeCapture\""))
         assertTrue(source.contains("req.arguments.bool(\"includeCapture\") == true"))
         assertTrue(source.contains("httpLogSummariesByDayPageNoCapture"))
@@ -536,10 +540,7 @@ class UiSurfaceContractTest {
         assertTrue("摘要须含 lastStatus", entities.contains("val lastStatus: Int?"))
         assertTrue("摘要须含来源证据字段", entities.contains("val hasOnce: Int") && entities.contains("val webviewKinds") && entities.contains("val summaryBody"))
         assertFalse("finalStatus 字段不得保留", entities.contains("val finalStatus"))
-        val mcp = listOf(
-            File("src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-            File("app/src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-        ).first { it.isFile }.readText()
+        val mcp = mcpServerSources()
         assertTrue("须注册 poll_capture", mcp.contains("\"poll_capture\""))
         assertTrue("须注册 get_capture_resource", mcp.contains("\"get_capture_resource\""))
         assertTrue("list_captures 须输出 latestLogId", mcp.contains("\"latestLogId\""))
@@ -678,11 +679,7 @@ class UiSurfaceContractTest {
 
     @Test
     fun mcpServerExposesStructuredLogTools() {
-        val candidates = listOf(
-            File("src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-            File("app/src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-        )
-        val source = candidates.first { it.isFile }.readText()
+        val source = mcpServerSources()
         assertTrue(source.contains("\"get_logs\""))
         assertTrue(source.contains("\"get_log\""))
         assertTrue(source.contains("\"get_crash_logs\""))
@@ -738,10 +735,7 @@ class UiSurfaceContractTest {
     /** 书源踩坑防回归锁：官方 API 补齐、分字段保存、signJs 禁缓存、searchUrl 返回契约提示，四道护栏必须都在 */
     @Test
     fun pitfallGuardsStayInPlace() {
-        val mcp = listOf(
-            File("src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-            File("app/src/main/java/com/mina/legadostudio/mcp/StudioMcpServer.kt"),
-        ).first { it.isFile }.readText()
+        val mcp = mcpServerSources()
         assertTrue(mcp.contains("\"fields\""))
         assertTrue(mcp.contains("action=signJs"))
         assertTrue(mcp.contains("返回的值无效"))
