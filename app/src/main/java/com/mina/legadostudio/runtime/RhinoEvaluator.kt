@@ -238,6 +238,7 @@ class RhinoEvaluator(
             // en
             Regex("Cannot find function \\S+"),
             Regex("Method \"\\S+\" not found"),
+            Regex("Can't find method \\S+"),
             Regex("Cannot call method \"\\S+\" of"),
             Regex("Cannot call property \\S+ in object"),
             Regex("\\S+ is not a function"),
@@ -255,8 +256,8 @@ class RhinoEvaluator(
             Regex("Java 方法 .* 的选择不明确"),
             Regex("未找到 “\\S+” 的构造函数"),
         )
-        /** Rhino「找不到方法」消息里完整方法引用，如 com.mina...StudioJsApi.get(...) / "io.x.Y.z(...)" */
-        private val MISSING_API_METHOD = Regex("[\"“]([\\w.$]+\\([^\"”]*\\))[\"”]")
+        /** Rhino「找不到方法」消息里完整方法引用，如 “com.mina...StudioJsApi.get(...)”（zh_CN 带引号）/ Can't find method io.x.Y.z(...).（en 不带引号） */
+        private val MISSING_API_METHOD = Regex("(?:[\"“]|Can't find method )([\\w.$]+\\([^\"”)]*\\))")
         /**
          * StudioJsApi 上确实存在的方法名：「找不到方法」且方法名在本集合 = 签名不支持的调用
          * （真机有该重载而沙箱没有），错误里附加「属验收环境限制」的明确提示。
