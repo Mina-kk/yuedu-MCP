@@ -28,6 +28,10 @@ MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查
 3. 鉴权统一使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
 4. 调用 `get_app_info`，应返回 `"ai": false`、`"role": "mcp-runtime"` 与语料库信息
 
+#### 精简工具目录（省 token）
+
+服务器链接末尾追加 `?compact=1`（如 `http://127.0.0.1:58823/mcp?compact=1`）后建立的会话，`tools/list` 只回每个工具的首句描述、入参 `description` 同样截断（单句超过 100 字符硬截并加 `…`），工具数量、名称顺序、`inputSchema` 的 `type`/`required`/`enum`/数值约束逐字不变。被截掉的完整定义随时经只读资源模板 `studio://tools/{name}` 按名读回（返回 `{"name","description","inputSchema","annotations"}`）。不带该参数的默认行为逐字不变。
+
 ### 书源类型开关
 
 MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文件 / 视频**（对应 `bookSourceType` -1、0–4）。`save_source` 保存时自动写入所选类型（「自动」保留 JSON 原样）；`fetch_page` 按类型过滤二进制内容：文本类型跳过图片/音视频等二进制响应，非文本类型保留对应媒体内容，「自动」不干预抓取，适合图文混合等类型不确定的站点。

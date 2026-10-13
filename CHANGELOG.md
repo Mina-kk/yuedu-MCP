@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- MCP：连接 URL 追加 `?compact=1` 可让该会话的 `tools/list` 精简工具描述与入参 `description`（首句截断、单句超 100 字符硬截加 `…`），工具数量、名称顺序与 schema 约束逐字不变；完整工具定义经新增只读资源模板 `studio://tools/{name}` 按名读回（`name`/`description`/`inputSchema`/`annotations`）。不带参数时行为逐字不变。
 - CI：新增 GitHub Actions，每次推送和 PR 都会运行单元测试并构建 debug APK（`.github/workflows/ci.yml`），不使用任何签名密钥。
 - 文档：README「MCP 工具一览」补齐全部 67 个工具，新增「字体反爬」「抓包」分组。
 - 测试：新增 `ReadmeToolTableContractTest`，双向校验 README 工具表与代码中注册的工具一致，并核对工具总数和版本号。

@@ -24,6 +24,7 @@ import com.mina.legadostudio.mcp.McpAccess
 import com.mina.legadostudio.mcp.McpConfigStore
 import com.mina.legadostudio.mcp.McpSessions
 import com.mina.legadostudio.mcp.McpStats
+import com.mina.legadostudio.mcp.McpToolCompactor
 import com.mina.legadostudio.mcp.StudioLog
 import com.mina.legadostudio.mcp.StudioMcpServer
 import com.mina.legadostudio.mcp.configureStudioMcp
@@ -158,7 +159,12 @@ class McpService : Service() {
         val origins = McpAccess.allowedOrigins(hosts)
         try {
             engine = embeddedServer(CIO, host = "0.0.0.0", port = config.port) {
-                configureStudioMcp(store::load, hosts, origins) { StudioMcpServer(this@McpService).create() }
+                configureStudioMcp(store::load, hosts, origins) {
+                    // 新会话 initialize 的 URL 决定本连接是否精简 tools/list；?compact=1 时工具/入参
+                    // 描述截断，完整定义仍可经 studio://tools/{name} 读回。默认逐字不变。
+                    val compact = call.request.queryParameters[McpToolCompactor.QUERY_PARAM] == McpToolCompactor.QUERY_VALUE
+                    StudioMcpServer(this@McpService, compact = compact).create()
+                }
             }.also { it.start(wait = false) }
             endpoints = McpAccess.endpoints(config.port)
             running = true

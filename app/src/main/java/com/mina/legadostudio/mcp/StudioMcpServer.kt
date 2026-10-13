@@ -25,9 +25,15 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
-class StudioMcpServer(context: Context) {
+class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
     internal val app = context.applicationContext as StudioApplication
     internal val contexts get() = app.taskContexts
+
+    /**
+     * 本连接内每个工具的完整定义（注册时的原版），供 `studio://tools/{name}` 读回；
+     * 非 compact 连接也保留，同一份数据同时服务两种模式的 resource 读取。键按 tools/list 注册顺序。
+     */
+    private val fullToolSpecs = java.util.concurrent.ConcurrentHashMap<String, io.modelcontextprotocol.kotlin.sdk.types.Tool>()
 
     // 每个本类实例对应一个 MCP 连接：默认上下文挂在实例上，多个客户端/多个并行书源任务各自有默认槽，
     // 不再共用进程级单例把彼此的 pageId/resultId 挤出缓存（FIFO 驱逐导致「引用失效/数据互串」）。
@@ -164,6 +170,7 @@ class StudioMcpServer(context: Context) {
     ).also { server ->
         server.onConnect { McpStats.connected(); StudioLog.add("mcp connect", category = "mcp") }
         server.onClose { McpStats.disconnected(); McpSessions.onServerClosed(server); StudioLog.add("mcp disconnect", category = "mcp") }
+        registerToolCatalogResource(server)
         registerResources(server)
         registerTools(server)
         registerContextTools(server)
@@ -245,6 +252,26 @@ class StudioMcpServer(context: Context) {
         putJsonObject("limit") { put("type", "integer"); put("minimum", 1); put("maximum", 12000) }
         put("query", stringProp("可选字面搜索，命中处开始返回"))
     }, required = listOf(key1, key2))
+
+    /**
+     * `studio://tools/{name}`：只读资源模板，按工具名返回该连接所见工具的完整定义
+     * （`{"name","description","inputSchema","annotations"}`）。compact 模式下 tools/list
+     * 只带截断描述，客户端用它按需补全；默认模式同样可读，行为一致、不回填会话状态。
+     */
+    private fun registerToolCatalogResource(server: Server) {
+        server.addResourceTemplate(
+            McpToolCompactor.RESOURCE_URI_TEMPLATE,
+            McpToolCompactor.RESOURCE_NAME,
+            McpToolCompactor.RESOURCE_DESCRIPTION,
+            McpToolCompactor.RESOURCE_MIME,
+        ) { req, params ->
+            val name = params["name"]
+                ?: req.uri.removePrefix(McpToolCompactor.RESOURCE_URI_PREFIX).takeIf { it.isNotBlank() && !it.contains('/') }
+            val tool = name?.let { fullToolSpecs[it] }
+                ?: throw IllegalArgumentException("未知工具：${name ?: req.uri}；tools/list 里有完整名单")
+            ReadResourceResult(listOf(TextResourceContents(McpToolCompactor.resourcePayload(tool), req.uri, McpToolCompactor.RESOURCE_MIME)))
+        }
+    }
 
     private fun registerResources(server: Server) {
         app.skills.list().filter { it.enabled }.forEach { skill ->
@@ -444,20 +471,38 @@ class StudioMcpServer(context: Context) {
         if (name in CONTEXT_TOOLS) extra["contextId"] = stringProp("可选任务上下文ID；重连、多任务时请显式传入")
         if (name == "inspect_rule") extra["refresh"] = buildJsonObject { put("type", "boolean"); put("description", "使用url时强制联网") }
         val contextualSchema = inputSchema.copy(properties = JsonObject(inputSchema.properties.orEmpty() + extra))
-        addTool(name, description, contextualSchema, toolAnnotations = toolAnnotations) { req ->
-            McpSessions.touchToolCall(server)
-            try { logged(name, req.arguments) {
-                // 只对任务上下文工具校验 contextId 存在性；cap: 抓包会话 id 与非任务工具的
-                // contextId（数据筛选参数）不送 TaskContextStore.describe——否则抓包会话被
-                // 误当任务上下文，get_capture/poll_capture/get_http_logs(cap:) 全被
-                // CONTEXT_EXPIRED_OR_UNKNOWN 拦死。判定集中在 McpToolContextPolicy（可测）。
-                req.arguments.str("contextId")
-                    ?.takeIf { McpToolContextPolicy.shouldValidateTaskContext(name, it) }
-                    ?.let { contexts.describe(it) }
-                boundedResult(name, req.arguments, handler(req))
-            } } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (error: Exception) { err(error.message.orEmpty()) }
+        // 本连接的完整定义目录：compact 模式下 tools/list 注册截断副本，原定义仍由此 map 经
+        // studio://tools/{name} 读回；handler 不变，调用路径与默认模式一致。
+        fullToolSpecs[name] = io.modelcontextprotocol.kotlin.sdk.types.Tool(
+            name = name, description = description, inputSchema = contextualSchema, annotations = toolAnnotations,
+        )
+        val wireTool = if (compact) {
+            McpToolCompactor.compactTool(
+                io.modelcontextprotocol.kotlin.sdk.types.Tool(
+                    name = name, description = description, inputSchema = contextualSchema, annotations = toolAnnotations,
+                )
+            )
+        } else null
+        if (wireTool != null) {
+            addTool(wireTool) { req -> dispatchToolCall(server, name, req, handler) }
+        } else {
+            addTool(name, description, contextualSchema, toolAnnotations = toolAnnotations) { req -> dispatchToolCall(server, name, req, handler) }
         }
+    }
+
+    private suspend fun dispatchToolCall(server: Server, name: String, req: CallToolRequest, handler: suspend (CallToolRequest) -> CallToolResult): CallToolResult {
+        McpSessions.touchToolCall(server)
+        return try { logged(name, req.arguments) {
+            // 只对任务上下文工具校验 contextId 存在性；cap: 抓包会话 id 与非任务工具的
+            // contextId（数据筛选参数）不送 TaskContextStore.describe——否则抓包会话被
+            // 误当任务上下文，get_capture/poll_capture/get_http_logs(cap:) 全被
+            // CONTEXT_EXPIRED_OR_UNKNOWN 拦死。判定集中在 McpToolContextPolicy（可测）。
+            req.arguments.str("contextId")
+                ?.takeIf { McpToolContextPolicy.shouldValidateTaskContext(name, it) }
+                ?.let { contexts.describe(it) }
+            boundedResult(name, req.arguments, handler(req))
+        } } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (error: Exception) { err(error.message.orEmpty()) }
     }
 
     private suspend fun logged(name: String, args: JsonObject?, block: suspend () -> CallToolResult): CallToolResult {
