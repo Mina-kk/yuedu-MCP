@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 测试：新增 `McpProtocolHttpIntegrationTest` 的 14 个真实本地 CIO HTTP 回归用例，覆盖 SDK 0.15.0 的 legacy 协商、会话、鉴权与 Host / Origin 门禁、错误 envelope、工具及资源契约；记录 Current 2026-07-28 的 modern 路径缺口。仅增强测试与构建说明，不升级依赖、不改变生产协议行为，不代表 Android / 外部客户端验收。
 - MCP 入参：`McpArgs.int` 对 JSON 小数（如 `3.5`）或超出 `Int` 范围的数字（如 `3000000000`）不再静默回落默认值，改为明确抛出 `IllegalArgumentException` 并提示参数名、integer 类型要求、收到的值及 Int 范围；缺省、`null`、字符串数字（如 `"50"`）及 `boolean`/`word` 行为不变。
 - MCP：连接 URL 追加 `?compact=1` 可让该会话的 `tools/list` 精简工具描述与入参 `description`（首句截断、单句超 100 字符硬截加 `…`），工具数量、名称顺序与 schema 约束逐字不变；完整工具定义经新增只读资源模板 `studio://tools/{name}` 按名读回（`name`/`description`/`inputSchema`/`annotations`）。不带参数时行为逐字不变。
 - CI：新增 GitHub Actions，每次推送和 PR 都会运行单元测试并构建 debug APK（`.github/workflows/ci.yml`），不使用任何签名密钥。
