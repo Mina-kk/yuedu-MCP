@@ -15,6 +15,17 @@ export ANDROID_HOME=/path/to/android-sdk
 
 产物：`app/build/outputs/apk/debug/app-debug.apk`
 
+### 构建标识（buildRevision）
+
+`get_app_info` 返回的 `buildRevision` / `buildType` 来自构建期 `BuildConfig.BUILD_REVISION` / `BUILD_TYPE`。取值优先级：`-PbuildRevision=<commit>` > 环境变量 `GITHUB_SHA` > `development`（本地开发缺省）。值只允许 `development` 或 7-40 位小写 hex，其它值在配置阶段直接报错（防止注入非法 Java 字面量）。构建脚本不自己执行 git。
+
+```bash
+./gradlew :app:assembleDebug -PbuildRevision="$(git rev-parse HEAD)"   # 本地构建带上当前 commit
+# CI（GitHub Actions）无需传参：GITHUB_SHA 环境变量自动生效
+```
+
+**最终发布构建必须显式传准确 commit**：`-PbuildRevision=<最终提交 SHA>`；缺省 `development` 的包不能作为发布产物。
+
 CI 见 `.github/workflows/ci.yml`：每次推送到 main 或提交 PR 时运行上面同一条命令，测试报告和 debug APK 作为构建产物保留 7 天。CI 不接触 Release 签名。
 
 ## 单测范围：默认不访问真实网站

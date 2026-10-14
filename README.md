@@ -3,7 +3,7 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前源码构建版本：`1.1.008`（versionCode 187；以 `app/build.gradle.kts` 为准，不能据此认定 Release 已发布）
+- 当前源码构建版本：`1.2.0`（versionCode 188；以 `app/build.gradle.kts` 为准，不能据此认定 Release 已发布）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
@@ -26,7 +26,7 @@ MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查
    - 客户端没有任何鉴权输入 → 在「设置」页关闭访问令牌校验，或换用支持鉴权的客户端
    - **「配置文件客户端（高级）」折叠卡**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制
 3. 鉴权统一使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
-4. 调用 `get_app_info`，应返回 `"ai": false`、`"role": "mcp-runtime"` 与语料库信息
+4. 调用 `get_app_info`，应返回 `"ai": false`、`"role": "mcp-runtime"` 与语料库信息；另含构建标识 `buildRevision`（发布包为构建 commit 短 id，本地开发构建为 `development`）与 `buildType`（`debug`/`release`），用于核对测试包与发布包是否同一份源码
 
 #### 精简工具目录（省 token）
 

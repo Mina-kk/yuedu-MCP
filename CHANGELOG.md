@@ -4,8 +4,11 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-14
+
+- 构建：`get_app_info` 新增平铺字段 `buildRevision` / `buildType`（旧 JSON 键不变）。`buildRevision` 来自构建期 `BUILD_REVISION`：`-PbuildRevision=<commit>` 优先、CI 环境变量 `GITHUB_SHA` 次之、本地开发缺省 `development`；发布包会以准确 commit 构建，便于核对测试包与发布包是否同源。当前限制：未传参的本地构建只显示 `development`，不能据此追溯具体源码提交。
 - MCP：修复客户端 `DELETE` 终止会话后 `Server` 实例登记残留的问题。SDK 0.15.0 只关闭 transport/session，不调 `server.close()`；尚未登记到空闲回收表的实例可能长期留存。现鉴权通过的 `/mcp` DELETE 在 SDK 执行前按 wire sid 捕获已登记 owner，SDK 回 200、该 sid 已终止且 owner 不再持有其他 wire 会话时摘除登记并尝试关闭；仍有其他会话时仅摘除已终止 sid 的条目。并发 DELETE、orphan 与 reaper 协调最多一次关闭尝试，不改变 HTTP 响应；关闭失败不保证 SDK 资源已释放。无 sid（400）/未知 sid（404）/鉴权失败/非法协议头不误关，正常 DELETE 不写 `closedIds`、不算空闲回收。新增 `McpDeleteLifecycleIntegrationTest` 9 个真实 CIO 用例及归属、并发回收单测。
-- MCP：修复无 `Mcp-Session-Id` 的失败 POST 请求残留 `Server` 实例的问题。SDK 0.15.0 对无会话 POST 一律先经 `serverFactory` 建 `Server` 再做 Accept/Content-Type/正文校验，校验失败的实例拿不到 wire 会话 id，旧代码只能靠 reaper 30 分钟兜底。现请求结束时清理「本请求新建、确认无 wire 会话、响应未签发会话头」的实例；已交接会话不误关、不二次关闭，DELETE 生命周期不变。新增 `McpRequestOrphanIntegrationTest` 6 个真实 CIO HTTP 用例（孤儿并发清理、与活会话共存、关闭失败仍摘除登记、鉴权/未知会话不建实例）。
+- MCP：修复无 `Mcp-Session-Id` 的失败 POST 请求残留 `Server` 实例的问题。SDK 0.15.0 对无会话 POST 一律先经 `serverFactory` 建 `Server` 再做 Accept/Content-Type/正文校验，校验失败的实例拿不到 wire 会话 id，旧代码只能靠 reaper 30 分钟兜底。现请求结束时清理「本请求新建、确认无 wire 会话、响应未签发会话头」的实例；已交接会话不误关、不二次关闭，正常 DELETE 行为不受影响（本条与同版本的 DELETE 生命周期修复配套）。新增 `McpRequestOrphanIntegrationTest` 6 个真实 CIO HTTP 用例（孤儿并发清理、与活会话共存、关闭失败仍摘除登记、鉴权/未知会话不建实例）。
 - 测试：新增 `McpProtocolHttpIntegrationTest` 的 14 个真实本地 CIO HTTP 回归用例，覆盖 SDK 0.15.0 的 legacy 协商、会话、鉴权与 Host / Origin 门禁、错误 envelope、工具及资源契约；记录 Current 2026-07-28 的 modern 路径缺口。仅增强测试与构建说明，不升级依赖、不改变生产协议行为，不代表 Android / 外部客户端验收。
 - MCP 入参：`McpArgs.int` 对 JSON 小数（如 `3.5`）或超出 `Int` 范围的数字（如 `3000000000`）不再静默回落默认值，改为明确抛出 `IllegalArgumentException` 并提示参数名、integer 类型要求、收到的值及 Int 范围；缺省、`null`、字符串数字（如 `"50"`）及 `boolean`/`word` 行为不变。
 - MCP：连接 URL 追加 `?compact=1` 可让该会话的 `tools/list` 精简工具描述与入参 `description`（首句截断、单句超 100 字符硬截加 `…`），工具数量、名称顺序与 schema 约束逐字不变；完整工具定义经新增只读资源模板 `studio://tools/{name}` 按名读回（`name`/`description`/`inputSchema`/`annotations`）。不带参数时行为逐字不变。

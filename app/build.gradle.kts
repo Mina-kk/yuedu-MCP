@@ -18,9 +18,21 @@ android {
         applicationId = "com.mina.legadostudio"
         minSdk = 26
         targetSdk = 36
-        versionCode = 187
-        versionName = "1.1.008"
+        versionCode = 188
+        versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // 构建标识：显式 -PbuildRevision 优先，CI 环境变量 GITHUB_SHA 次之，
+        // 普通本地开发缺省 "development"。不在配置阶段执行 git。
+        val buildRevision = (
+            providers.gradleProperty("buildRevision").orNull
+                ?: providers.environmentVariable("GITHUB_SHA").orNull
+                ?: "development"
+            ).also {
+                require(it == "development" || it.matches(Regex("[0-9a-f]{7,40}"))) {
+                    "buildRevision must be 'development' or a 7-40 char lowercase hex commit id, got: $it"
+                }
+            }
+        buildConfigField("String", "BUILD_REVISION", "\"$buildRevision\"")
     }
 
     buildFeatures {
