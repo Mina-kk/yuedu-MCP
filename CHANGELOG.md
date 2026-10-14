@@ -6,19 +6,12 @@
 
 ## [1.2.0] - 2026-10-14
 
-- 构建：`get_app_info` 新增平铺字段 `buildRevision` / `buildType`（旧 JSON 键不变）。`buildRevision` 来自构建期 `BUILD_REVISION`：`-PbuildRevision=<commit>` 优先、CI 环境变量 `GITHUB_SHA` 次之、本地开发缺省 `development`；发布包会以准确 commit 构建，便于核对测试包与发布包是否同源。当前限制：未传参的本地构建只显示 `development`，不能据此追溯具体源码提交。
-- MCP：修复客户端 `DELETE` 终止会话后 `Server` 实例登记残留的问题。SDK 0.15.0 只关闭 transport/session，不调 `server.close()`；尚未登记到空闲回收表的实例可能长期留存。现鉴权通过的 `/mcp` DELETE 在 SDK 执行前按 wire sid 捕获已登记 owner，SDK 回 200、该 sid 已终止且 owner 不再持有其他 wire 会话时摘除登记并尝试关闭；仍有其他会话时仅摘除已终止 sid 的条目。并发 DELETE、orphan 与 reaper 协调最多一次关闭尝试，不改变 HTTP 响应；关闭失败不保证 SDK 资源已释放。无 sid（400）/未知 sid（404）/鉴权失败/非法协议头不误关，正常 DELETE 不写 `closedIds`、不算空闲回收。新增 `McpDeleteLifecycleIntegrationTest` 9 个真实 CIO 用例及归属、并发回收单测。
-- MCP：修复无 `Mcp-Session-Id` 的失败 POST 请求残留 `Server` 实例的问题。SDK 0.15.0 对无会话 POST 一律先经 `serverFactory` 建 `Server` 再做 Accept/Content-Type/正文校验，校验失败的实例拿不到 wire 会话 id，旧代码只能靠 reaper 30 分钟兜底。现请求结束时清理「本请求新建、确认无 wire 会话、响应未签发会话头」的实例；已交接会话不误关、不二次关闭，正常 DELETE 行为不受影响（本条与同版本的 DELETE 生命周期修复配套）。新增 `McpRequestOrphanIntegrationTest` 6 个真实 CIO HTTP 用例（孤儿并发清理、与活会话共存、关闭失败仍摘除登记、鉴权/未知会话不建实例）。
-- 测试：新增 `McpProtocolHttpIntegrationTest` 的 14 个真实本地 CIO HTTP 回归用例，覆盖 SDK 0.15.0 的 legacy 协商、会话、鉴权与 Host / Origin 门禁、错误 envelope、工具及资源契约；记录 Current 2026-07-28 的 modern 路径缺口。仅增强测试与构建说明，不升级依赖、不改变生产协议行为，不代表 Android / 外部客户端验收。
-- MCP 入参：`McpArgs.int` 对 JSON 小数（如 `3.5`）或超出 `Int` 范围的数字（如 `3000000000`）不再静默回落默认值，改为明确抛出 `IllegalArgumentException` 并提示参数名、integer 类型要求、收到的值及 Int 范围；缺省、`null`、字符串数字（如 `"50"`）及 `boolean`/`word` 行为不变。
-- MCP：连接 URL 追加 `?compact=1` 可让该会话的 `tools/list` 精简工具描述与入参 `description`（首句截断、单句超 100 字符硬截加 `…`），工具数量、名称顺序与 schema 约束逐字不变；完整工具定义经新增只读资源模板 `studio://tools/{name}` 按名读回（`name`/`description`/`inputSchema`/`annotations`）。不带参数时行为逐字不变。
-- CI：新增 GitHub Actions，每次推送和 PR 都会运行单元测试并构建 debug APK（`.github/workflows/ci.yml`），不使用任何签名密钥。
-- 文档：README「MCP 工具一览」补齐全部 67 个工具，新增「字体反爬」「抓包」分组。
-- 测试：新增 `ReadmeToolTableContractTest`，双向校验 README 工具表与代码中注册的工具一致，并核对工具总数和版本号。
-- 测试：真实联网用例（`ZjreadLiveTest`，`@Category(LiveNetworkTest::class)`）从默认单测中整类排除，CI 不再依赖“缺素材自动跳过”兜底：默认 `:app:testDebugUnitTest` 只跑本地/MockWebServer 回环用例；联网验证须显式执行 `./gradlew :app:liveTestDebug`（自动注入 `-Dlegadostudio.liveTests=true`，独立报告且每次重跑），显式开启后缺少 `work/zjread` 素材（`zjread_js_lib.js`、`rhino_probe.js`）直接失败而不是静默跳过。
-- 内部重构：`StudioMcpServer.kt`（1813 行）按领域拆分为 9 个工具注册文件（`McpProjectTools.kt`、`McpCaptureTools.kt` 等），工具名、描述、参数和注册顺序都不变。
-- 测试：工具入参读取（字符串/整数/布尔的缺省与类型不符报错）抽为 `McpArgs`，新增 `McpArgsTest`、`PagedTextTest` 锁定入参与分页边界（offset/limit/query 合法范围、翻页无缝拼接），行为不变。
-- Skill：内置 `reverse-engineering` 的 REA 参考同步到上游 morluto/rea 最新版（skill 元数据版本 36 → 41），新增 `connection-and-recovery` 参考；补充第三方声明与 `REA_LICENSE_MIT`。DandanLLab/legadoSkill 上游自 2026-03 起无新变更，无需同步。
+- 改善 MCP 连接稳定性：修复主动终止会话（`DELETE`）及无会话请求校验失败后的服务端实例登记残留，并协调并发关闭与空闲回收。
+- 新增 `?compact=1` 连接参数：`tools/list` 返回精简版工具目录以节省上下文；完整工具定义可经只读资源 `studio://tools/{name}` 按名读回。
+- 整数型工具参数校验更严格：传入小数或超出范围的数字时会明确报错，不再静默使用默认值。
+- `get_app_info` 新增 `buildRevision` / `buildType` 字段，便于问题反馈和版本诊断。
+- REA 逆向分析参考文档更新至 v41，并补充第三方许可声明。
+- 完善协议、会话生命周期及工具目录的自动化回归；默认单元测试与真实站点测试分离，构建方法见 `BUILDING.md`。
 
 ## [1.1.008] - 2026-10-12
 

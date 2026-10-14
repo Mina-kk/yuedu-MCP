@@ -3,7 +3,7 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前源码构建版本：`1.2.0`（versionCode 188；以 `app/build.gradle.kts` 为准，不能据此认定 Release 已发布）
+- 当前版本：`1.2.0`（versionCode 188，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
@@ -23,10 +23,10 @@ MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查
    - **服务器链接（所有客户端）**：`http://127.0.0.1:58823/mcp`；客户端不在同一台设备时切「局域网」，使用 `http://<局域网IP>:58823/mcp`
    - 客户端有 **Token / Bearer Token 输入框** → 只粘贴令牌本身，不要加 `Bearer` 前缀
    - 客户端只有 **自定义请求头（名称 + 值）两个框** → 名称填 `Authorization`，值填 `Bearer <令牌>`（名称填成 `Bearer` 是常见错误，会 401）
-   - 客户端没有任何鉴权输入 → 在「设置」页关闭访问令牌校验，或换用支持鉴权的客户端
+   - 客户端没有任何鉴权输入 → 建议换用支持鉴权的客户端；不要为局域网或远程接入关闭令牌校验
    - **「配置文件客户端（高级）」折叠卡**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制
 3. 鉴权统一使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
-4. 调用 `get_app_info`，应返回 `"ai": false`、`"role": "mcp-runtime"` 与语料库信息；另含构建标识 `buildRevision`（发布包为构建 commit 短 id，本地开发构建为 `development`）与 `buildType`（`debug`/`release`），用于核对测试包与发布包是否同一份源码
+4. 调用 `get_app_info` 可查看版本、运行能力及构建标识 `buildRevision`（源码提交标识）与 `buildType`（`debug`/`release`）。反馈问题时请提供版本和构建标识，不要提交访问令牌或未脱敏日志。
 
 #### 精简工具目录（省 token）
 
@@ -38,7 +38,7 @@ MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文�
 
 ## MCP 工具一览
 
-共 67 个工具（本表与代码注册列表由单测 `ReadmeToolTableContractTest` 双向校验，新增/删除工具必须同步本表）。
+共 67 个工具。
 
 | 分组 | 工具 |
 |---|---|
@@ -73,7 +73,7 @@ match_sources 语料命中（同域/同模板族现成书源）
 
 `eval_js` 与书源 `<js>` / `{{}}` 段运行在与官方一致的 Rhino + analyzeRule 引擎上，除 `java`（ajax/connect/加解密）外还注入官方同名对象：`cookie`、`cache`、`source`（`debug_source` 时与书源变量互通）。规则求值与官方语义一致：CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性，多段落 `@text` 合并全部段落。`set_cookie` 默认 `merge=true` 按 Cookie 名合并（不会冲掉该域其他 Cookie，如登录态），`merge=false` 为整串替换。
 
-### 验收闭环
+### 校验闭环
 
 `validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用真实搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时自动用「我」探测并在 `warnings` 标注。零结果、验证墙和脚本错误应分开处理，任何一次通过也不保证站点永远可用。
 
@@ -128,4 +128,4 @@ match_sources 语料命中（同域/同模板族现成书源）
 
 `create_context` 创建任务后全程传 `contextId`：`fetch_page` 保存网页返回 `pageId`（相同请求 5 分钟内复用快照），`read_page` 分段读取，或把 `pageId` 直接交给 `inspect_rule` / `analyze_html` / `eval_js`；工具结果超长时自动转 `resultId` + 预览，用 `read_result` 分段取回。`update_context` 保存阶段笔记，`get_context` 恢复进度，`clear_context` 收尾。
 
-上限 **16 个任务**、每任务 32 项 / 200 万字符；快照 5 分钟内复用、任务闲置 30 分钟过期。应用重启后任务自动恢复，但恢复的条目标记 `stale`，先 `refresh=true` 刷新再依赖其内容。`fetch_page` 支持 `responseMode=reference`（只存快照不回传正文）与 `maxChars` 省流量；最终验收传 `refresh=true` 全程实时。调试输出有意截断（正文 4000 字符、目录 20 章、搜索 10 条等），均带全量计数。`app_status` 可查看活跃连接与任务占用状态。
+上限 **16 个任务**、每任务 32 项 / 200 万字符；快照 5 分钟内复用、任务闲置 30 分钟过期。应用重启后任务自动恢复，但恢复的条目标记 `stale`，先 `refresh=true` 刷新再依赖其内容。`fetch_page` 支持 `responseMode=reference`（只存快照不回传正文）与 `maxChars` 省流量；最终确认传 `refresh=true` 全程实时。调试输出有意截断（正文 4000 字符、目录 20 章、搜索 10 条等），均带全量计数。`app_status` 可查看活跃连接与任务占用状态。
