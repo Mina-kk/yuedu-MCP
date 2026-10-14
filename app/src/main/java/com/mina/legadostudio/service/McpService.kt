@@ -151,6 +151,8 @@ class McpService : Service() {
         stopReaper()
         McpSessions.clear()
         McpStats.resetConnections()
+        // 重启开始新一轮工具使用统计：旧轮次在途调用完成后不落进新统计（代际隔离）
+        com.mina.legadostudio.mcp.McpToolUsageRegistry.current = com.mina.legadostudio.mcp.McpToolUsage()
         val store = McpConfigStore(this)
         val config = store.load()
         val addresses = McpAccess.localAddresses()

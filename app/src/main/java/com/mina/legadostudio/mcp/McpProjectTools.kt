@@ -45,6 +45,8 @@ internal fun StudioMcpServer.registerProjectTools(server: Server) {
             "mcp" to mcp,
             "readiness" to readiness,
             "waitingVerifications" to waiting,
+            // 服务运行期间的工具使用概览（重启清零；app_status 自身不计入，见 McpToolUsage 说明）
+            "toolUsage" to McpToolUsageRegistry.current.snapshot(),
             "ai" to false,
             "role" to "mcp-runtime",
         )))

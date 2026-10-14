@@ -492,6 +492,12 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
 
     private suspend fun dispatchToolCall(server: Server, name: String, req: CallToolRequest, handler: suspend (CallToolRequest) -> CallToolResult): CallToolResult {
         McpSessions.touchToolCall(server)
+        // app_status 在 track 开头被排除（自我观测反馈），即便观测时钟故障也成立。
+        return McpToolUsageRegistry.current.track(name) { dispatchToolCallInner(name, req, handler) }
+    }
+
+    /** 原 dispatch 链路：contextId 校验、logged 日志、err 转换与取消透传语义都不变。 */
+    private suspend fun dispatchToolCallInner(name: String, req: CallToolRequest, handler: suspend (CallToolRequest) -> CallToolResult): CallToolResult {
         return try { logged(name, req.arguments) {
             // 只对任务上下文工具校验 contextId 存在性；cap: 抓包会话 id 与非任务工具的
             // contextId（数据筛选参数）不送 TaskContextStore.describe——否则抓包会话被

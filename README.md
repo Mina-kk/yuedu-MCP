@@ -129,3 +129,5 @@ match_sources 语料命中（同域/同模板族现成书源）
 `create_context` 创建任务后全程传 `contextId`：`fetch_page` 保存网页返回 `pageId`（相同请求 5 分钟内复用快照），`read_page` 分段读取，或把 `pageId` 直接交给 `inspect_rule` / `analyze_html` / `eval_js`；工具结果超长时自动转 `resultId` + 预览，用 `read_result` 分段取回。`update_context` 保存阶段笔记，`get_context` 恢复进度，`clear_context` 收尾。
 
 上限 **16 个任务**、每任务 32 项 / 200 万字符；快照 5 分钟内复用、任务闲置 30 分钟过期。应用重启后任务自动恢复，但恢复的条目标记 `stale`，先 `refresh=true` 刷新再依赖其内容。`fetch_page` 支持 `responseMode=reference`（只存快照不回传正文）与 `maxChars` 省流量；最终确认传 `refresh=true` 全程实时。调试输出有意截断（正文 4000 字符、目录 20 章、搜索 10 条等），均带全量计数。`app_status` 可查看活跃连接与任务占用状态。
+
+`app_status` 返回的 `toolUsage` 是当前服务运行期间的工具调用概览：全汇总（calls/errors/cancelled/平均与最大耗时/文本量）与按累计文本字节排序的前 10 个工具（`totalTools`/`listed`/`truncated` 标明是否截断）。文本量按 `TextContent` 的 UTF-16 字符数与 UTF-8 字节数计，**不是 token 数、也不是完整 HTTP 回包大小**；失败按 `isError` 或未捕获异常计，取消单列不计失败。统计只含工具名与数值，不含参数、正文、URL、header、会话 ID 或错误消息；`app_status` 自身不计入；服务重启后清零重新统计。
