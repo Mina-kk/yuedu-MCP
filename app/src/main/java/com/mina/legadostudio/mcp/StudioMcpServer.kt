@@ -138,20 +138,13 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
         putJsonObject("limit") { put("type", "integer"); put("minimum", 1); put("maximum", 12000) }
     }, required = listOf(key))
     private suspend fun boundedResult(name: String, args: JsonObject?, result: CallToolResult): CallToolResult {
-        if (result.isError == true || name !in BOUNDED_TOOLS) return result
-        val text = (result.content.singleOrNull() as? TextContent)?.text ?: return result
-        if (text.length <= 12000) return result
-        val inlineFallback: () -> CallToolResult = {
-            val note = "结果超过12000字符且无法保存引用；已内联返回前12000字符。请缩小范围，或先用 list_contexts 查看并清理闲置上下文后重试。"
-            ok(text.take(12000) + "\n…[" + note + "]")
-        }
+        if (!McpResponsePayloads.needsResultReference(name, result, BOUNDED_TOOLS)) return result
+        val text = (result.content.single() as TextContent).text
+        val inlineFallback: () -> CallToolResult = { ok(McpResponsePayloads.inlineFallbackText(text)) }
         val id = runCatching { contextId(args) }.getOrElse { return@boundedResult inlineFallback() }
         return runCatching {
             val e = contexts.saveResult(id, text, contextFingerprint())
-            ok(app.gson.toJson(contexts.metadata(e) + mapOf("contextId" to id, "resultId" to e.id,
-                "preview" to text.take(3000), "previewIsRawString" to true, "resultChars" to text.length,
-                "nextOffset" to 3000, "hasMore" to true,
-                "hint" to "结果已完整保存，调用 read_result，不要重复执行原工具。preview 是原始文本的硬截断片段，不是有效JSON，不要对它做 JSON 解析。")))
+            ok(app.gson.toJson(McpResponsePayloads.resultReferencePayload(contexts.metadata(e), id, e.id, text)))
         }.getOrElse { inlineFallback() }
     }
 
@@ -356,7 +349,7 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
         val (id, hit, liveResult) = contextFetch(args)
         val e = hit.entry
         val result = e.page!!
-        val preview = if (mode == "reference" || (mode == "auto" && hit.reused)) "" else e.text.take(limit)
+        val preview = McpResponsePayloads.pagePreview(e.text, mode, hit.reused, limit)
         // 未命中缓存时回看本任务条目：同一 URL 已有更早快照（stale/被 refresh 顶掉 key 的旧副本）则提示复用，避免重复抓取
         val repeatRef = if (hit.reused) null else contexts.describe(id)["entries"]
             ?.let { it as? List<*> }?.orEmpty()
@@ -364,18 +357,13 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
             ?.firstOrNull { it["kind"] == "page" && it["id"] != e.id &&
                 (it["url"] as? String)?.equals(result.finalUrl, ignoreCase = true) == true }
             ?.get("id") as? String
-        return ok(app.gson.toJson(contexts.metadata(e) + mapOf(
-            "contextId" to id, "pageId" to e.id, "cacheHit" to hit.reused, "networkRequest" to !hit.reused,
-            "code" to result.code, "finalUrl" to result.finalUrl, "elapsedMs" to result.elapsedMs,
-            "body" to preview, "bodyNote" to result.bodyNote, "binaryBytes" to result.binaryBytes,
-            "truncated" to (preview.isNotEmpty() && preview.length < e.text.length),
-            "bodyOmitted" to (preview.isEmpty() && e.text.isNotEmpty()), "nextOffset" to preview.length,
-            "autoRetried" to autoRetried,
-            "autoSwitchedToWebView" to (switchedDomain != null),
-            "autoSwitchHint" to (switchedDomain?.let { "域 $it 从 auto 自动切换到 webview；恢复自动模式可调用 set_domain_mode(domain=\"$it\", mode=\"auto\")" } ?: ""),
-            "repeatFetch" to (repeatRef?.let { "该 URL 本任务已抓过旧快照，可用 read_page(pageId=$it) 复用，无需重抓" } ?: ""),
-            "hint" to "正文完整保存在pageId；用read_page或直接inspect_rule/analyze_html/eval_js引用，不要重复抓取。快照不是实时验证。",
-        ) + blockHintExtra(result.code, liveResult?.headers ?: result.headers, result.body, "")))
+        return ok(app.gson.toJson(McpResponsePayloads.fetchPagePayload(
+            contexts.metadata(e), id, e.id, hit.reused,
+            result.code, result.finalUrl, result.elapsedMs,
+            result.bodyNote, result.binaryBytes, preview, e.text.length,
+            autoRetried, switchedDomain, repeatRef,
+            blockHintExtra(result.code, liveResult?.headers ?: result.headers, result.body, ""),
+        )))
     }
     /**
      * fetch/debug/check_source 错误路径的阻断类型提示（在 verificationMarker/jsChallengeMarker 未覆盖的
