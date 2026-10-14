@@ -39,6 +39,7 @@ CI 见 `.github/workflows/ci.yml`：每次推送到 main 或提交 PR 时运行�
   --tests '*McpSessionReaperIntegrationTest' \
   --tests '*McpCompactToolsContractTest' \
   --tests '*McpRequestOrphanIntegrationTest' \
+  --tests '*McpDeleteLifecycleIntegrationTest' \
   --offline --no-build-cache --rerun-tasks
 ./gradlew :app:testDebugUnitTest :app:assembleDebug --offline --no-build-cache --rerun-tasks
 ./gradlew :app:liveTestDebug --offline
@@ -56,7 +57,9 @@ CI 见 `.github/workflows/ci.yml`：每次推送到 main 或提交 PR 时运行�
 
 `McpRequestOrphanIntegrationTest` 的 6 个用例使用独立的真实 CIO harness，验证失败请求的 `Server` 实例不再残留于应用跟踪表：SDK 0.15.0 对无 `Mcp-Session-Id` 的 POST 先经 `serverFactory` 建 `Server` 再校验，校验失败的实例无 wire 会话 id。回归锁定「本请求新建、无 wire 会话、响应未签发 `Mcp-Session-Id`」的实例在请求结束时被摘除登记并 best-effort 关闭；已交接会话（有 wire id 或响应带会话头）不误关、不二次关闭，并发孤儿各自独立清理、逐个核对状态码与错误码，close 抛异常仍摘除登记，取消请求下 close 仍尝试。关闭失败时的实际 SDK 资源释放不能仅由跟踪表为空来保证。
 
-DELETE 是会话终止的另一条生命周期：SDK 只关 transport/session（`server.sessions` 清空）、不调 `server.close()`，所以工厂的 `onClose` 注销不触发、tracker 中 `ServerEntry` 不会立刻摘除。这点**不能**承诺由 reaper 兜底——reaper 只遍历 `sessions`（即曾 `touchToolCall`/`adopt` 过的条目），对一个从未被工具调用 touch 过的已交接实例，DELETE 后 `server.sessions` 为空、tracker 无对应 `sessions` 条目，reaper 扫不到它，是否回收属于未覆盖的边界，不在本测试断言范围内。
+DELETE 是会话终止的另一条生命周期：SDK 0.15.0 命中会话时只移除 transport 分发表、关闭 transport/内部 session、回 200，**不调 `server.close()`**。修复后，鉴权通过的 `/mcp` DELETE 在进 SDK 前按 wire sid 捕获已登记 owner；请求结束时仅在 SDK 回 200、该 sid 已终止且 owner 不再持有其他 wire 会话的条件下摘除登记并尝试关闭。若仍有其他 wire 会话，只摘除已终止 sid 的关联条目，不关闭 owner。并发 DELETE、orphan 与 reaper 协调最多一次关闭尝试，不改 HTTP 响应；关闭失败时不保证实际 SDK 资源已经释放。无 sid（400）、未知 sid（404）、鉴权失败或非法协议头均不触发 owner 释放。正常 DELETE 不写 `closedIds`、不计 reaped，区别于空闲回收。
+
+`McpDeleteLifecycleIntegrationTest` 的 9 个真实 CIO 用例覆盖 initialize 响应即 DELETE、touch 过会话、并发重复 DELETE、多会话隔离、鉴权/未知 sid/非法头、无 sid DELETE、关闭失败仍摘除登记及 DELETE/reaper 竞态。并发断言允许 SDK 实测的 200/404 混合，不强制恰好一个 200。单测另覆盖同一 owner 的多 wire 会话及关闭归属；wire 状态读取异常时保守保留实例。
 
 [Current 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle) 已改为逐请求 `_meta` 版本 / 能力字段与 `server/discover`，没有 initialize 握手。当前 SDK 不支持该 modern 路径：`2026-07-28` 传输版本头被拒绝，legacy 会话内 `server/discover` 为未知方法，无会话请求仍要求 initialize；已建立 legacy 会话仅携带 modern `_meta` 的 tools/list 可以成功，但这只是被 legacy 处理，不能当作 modern 支持。正文版本回退握手同样不代表支持 Current。
 

@@ -63,8 +63,10 @@ import org.junit.Test
  *
  * 本套件不清空全局 tracker、不动其它用例/进程登记的外来 Server：只断言本用例 fixture 实例
  * 的登记与 close 次数，并在 finally 仅关闭本用例创建的实例、恢复覆盖过的全局缝。
- * 注意：DELETE 是另一条生命周期——SDK 只关 transport/session、不调 server.close()，对从未
- * 被工具调用 touch 的已交接实例，reaper 扫不到其 tracker 条目，是否回收属未覆盖边界。
+ * 注意：DELETE 是独立的正常终止路径——SDK 只关 transport/session、不调 server.close()；
+ * 本套件断言的是「DELETE 不归 orphan 清理管」。命中会话的 DELETE 现由 McpApplication 的
+ * DELETE 释放路径摘除并关闭 owner（见 McpDeleteLifecycleIntegrationTest），orphan finally
+ * 经 ServerEntry 门闩协调后不再重复关闭。
  */
 class McpRequestOrphanIntegrationTest {
 
@@ -318,15 +320,16 @@ class McpRequestOrphanIntegrationTest {
         assertEquals(404, post(rpc(4, "tools/list"), session = "unknown-fixture-session").status)
         assertTrue(McpSessions.isTrackedForTest(live))
         assertEquals("带会话请求不新建实例", 1, servers.size)
-        // initialize 响应签发会话头后立即 DELETE（首个且唯一的后续请求）：wire 会话已交接，
-        // finally 不得二次 close。SDK 的 DELETE 只关 transport/session，不调 server.close()，
-        // 故 onClose 注销不触发——这是 SDK 既有生命周期，不属于本 orphan 清理范围。
+        // initialize 响应签发会话头后 DELETE（会话已交接，非首个请求——前面已发过 transport
+        // 错误请求；真正「initialize 即 DELETE」见 McpDeleteLifecycleIntegrationTest）。SDK 只关
+        // transport/session 并回 200；本套件的 orphan finally 不得误关已交接实例——owner 的摘除
+        // 与关闭由 DELETE 释放路径（非 orphan 清理）完成恰好一次，故 closeCalls 计数为 1 而非 0。
         val delete = delete(session)
         assertEquals(200, delete.status)
         awaitCondition(describe = "DELETE 后 wire 会话终止 (wire=${McpSessions.strictWireIdsOf(live)})") {
             McpSessions.strictWireIdsOf(live)?.isEmpty() == true
         }
-        assertEquals("orphan 清理不得关闭已交接实例", 0, closeCalls.count { it === live })
+        assertEquals("DELETE 走正常终止路径，owner 恰好关闭一次（非 orphan 误关）", 1, closeCalls.count { it === live })
         assertEquals(0, trackedOrphans(servers - live))
     }
 
