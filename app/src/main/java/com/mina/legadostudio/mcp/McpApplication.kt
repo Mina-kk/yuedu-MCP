@@ -14,9 +14,19 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.RoutingContext
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
+import io.ktor.util.AttributeKey
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
 import java.security.MessageDigest
+import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+
+/**
+ * 本请求内经 serverFactory 新建的 Server 实例（SDK 对无会话请求先建实例再校验）。
+ * 用 CopyOnWriteArrayList 承受「拦截器与路由 handler 跨 dispatcher」的读写；一次请求最多一个。
+ */
+private val requestServersKey = AttributeKey<CopyOnWriteArrayList<Server>>("studio.mcp.requestServers")
 
 fun Application.configureStudioMcp(
     configProvider: () -> McpConfigStore.Config,
@@ -51,12 +61,30 @@ fun Application.configureStudioMcp(
             context.respondText("MCP session expired", status = HttpStatusCode.NotFound)
             finish()
         }
+        try {
+            proceed()
+        } finally {
+            // 请求收尾：仅清理「本请求 factory 新建、确认无 wire 会话、响应未签发会话头」的实例
+            // ——校验失败请求被 SDK 先建 Server 再拒绝，旧行为靠 reaper 兜底而临时留存。已交接会话
+            // （wire id 或响应会话头存在）保留，避免客户端拿到会话后立即 DELETE 被二次关闭。
+            // takeOrNull 只消费一次防止重复清理；NonCancellable 让请求取消后 close 仍尝试。
+            context.attributes.takeOrNull(requestServersKey)?.forEach { server ->
+                val wired = McpSessions.strictWireIdsOf(server)
+                val handedOff = (wired == null || wired.isNotEmpty()) ||
+                    context.response.headers["Mcp-Session-Id"] != null
+                if (!handedOff) withContext(NonCancellable) { McpSessions.releaseOrphan(server) }
+            }
+        }
     }
     mcpStreamableHttp(
         path = McpAccess.PATH,
         allowedHosts = allowedHosts,
         allowedOrigins = allowedOrigins,
-        block = serverFactory,
+        block = {
+            val created = serverFactory()
+            call.attributes.computeIfAbsent(requestServersKey) { CopyOnWriteArrayList() }.add(created)
+            created
+        },
     )
 }
 

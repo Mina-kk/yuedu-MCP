@@ -6,7 +6,12 @@ import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -176,5 +181,46 @@ class McpSessionsTest {
         McpSessions.onServerClosed(server)
         assertEquals(1, McpSessions.trackedSessions())
         assertEquals(1, McpSessions.tracked())
+    }
+
+    @Test fun releaseOrphanRemovesEntryAndCloses() = runBlocking {
+        useClock()
+        val server = server()
+        McpSessions.register(server)
+        McpSessions.releaseOrphan(server)
+        // orphan 不算「回收的会话」，不进 closedIds/reaped 统计
+        assertEquals(false, McpSessions.isReaped("sid-a"))
+        assertEquals(0, McpSessions.reapedTotal())
+        assertEquals(0, McpSessions.tracked())
+        assertEquals(listOf(server), closeCalls)
+    }
+
+    /**
+     * 请求被取消（client abort / 协程取消）后 finally 里的清理仍应完成：releaseOrphan 由
+     * McpApplication 包在 NonCancellable 中调用，close 必须在已取消的父作业下仍执行。
+     * close 只走 withTimeoutOrNull 的协作预算，不承诺硬限时。
+     */
+    @Test fun releaseOrphanUnderCancelledContextStillCloses() = runBlocking {
+        useClock()
+        val server = server()
+        McpSessions.register(server)
+        // closeServer 在进入后挂起，等到父作业已取消才放行——保证 finally 的 NonCancellable
+        // 清理是在「请求已被取消」的协程上下文里真正执行，而非取消前抢跑完成。
+        val entered = kotlinx.coroutines.Job()
+        val release = kotlinx.coroutines.Job()
+        McpSessions.closeServer = { srv ->
+            closeCalls.add(srv)
+            entered.complete()
+            release.join() // 等待测试放行，NonCancellable 保持关闭过程存活
+        }
+        val job = launch {
+            withContext(NonCancellable) { McpSessions.releaseOrphan(server) }
+        }
+        entered.join()          // 确认清理已进入 close
+        job.cancel()            // 取消父作业（模拟请求被 abort）
+        release.complete()      // 放行 closeServer
+        job.join()
+        assertEquals(0, McpSessions.tracked())
+        assertEquals("已取消上下文中 close 仍应执行", listOf(server), closeCalls)
     }
 }

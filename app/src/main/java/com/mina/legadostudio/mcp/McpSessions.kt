@@ -49,6 +49,17 @@ object McpSessions {
         else runCatching { server.sessions.keys.toList() }.getOrDefault(emptyList())
     }
 
+    /**
+     * 严格的 wire 会话读取：只认 transport 已生成的 Mcp-Session-Id，不回落内部 session key。
+     * 供请求结束时的 orphan 判定使用：无 wire id 的 ServerSession（校验失败请求留下的内部
+     * 会话）不算已交接。读取异常保守返回 null，调用方按「可能已交接」处理、不清理。
+     */
+    internal fun strictWireIdsOf(server: Server): Collection<String>? = runCatching {
+        server.sessions.values.mapNotNull { session ->
+            (session.transport as? StreamableHttpServerTransport)?.sessionId
+        }
+    }.getOrNull()
+
     private class ServerEntry(val server: Server, val created: Long)
 
     private class SessionEntry(
@@ -117,6 +128,23 @@ object McpSessions {
      * 首个请求误判成过期（否则客户端会反复重新握手并被再次拒绝，表现为无法连接）。
      */
     fun isReaped(sessionId: String): Boolean = closedIds.containsKey(sessionId)
+
+    /**
+     * 摘除一个确认无 wire 会话的请求残留实例并 best-effort 关闭。
+     *
+     * 仅用于「本次请求新创建、校验失败、未交接给客户端」的 Server：直接从 servers/sessions
+     * 移除该实例的登记（不经过 reap 的 closedIds / reaped / McpStats 统计语义，orphan 不算
+     * 「回收的会话」），随后经 [closeServer] 关闭。close 失败不影响登记摘除和 HTTP 响应；
+     * [closeTimeoutMs] 仍走 withTimeoutOrNull 的协作式限时，不宣称硬性保证 SDK 释放。
+     */
+    suspend fun releaseOrphan(server: Server) {
+        servers.remove(server)
+        sessions.values.removeAll { it.server === server }
+        runCatching { withTimeoutOrNull(closeTimeoutMs) { closeServer(server) } }
+    }
+
+    /** 测试缝：该 Server 当前是否仍在 tracker 登记中（仅集成测试断言本用例实例用）。 */
+    internal fun isTrackedForTest(server: Server): Boolean = servers.containsKey(server)
 
     /** 记录一次真实工具调用；只有工具调用才刷新活跃时间，保活/SSE 等传输层请求不计入。 */
     fun touchToolCall(server: Server) {
