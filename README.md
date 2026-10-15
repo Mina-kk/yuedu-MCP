@@ -32,7 +32,7 @@ MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查
 
 服务器链接末尾追加 `?compact=1`（如 `http://127.0.0.1:58823/mcp?compact=1`）后建立的会话，`tools/list` 只回每个工具的首句描述、入参 `description` 同样截断（单句超过 100 字符硬截并加 `…`），工具数量、名称顺序、`inputSchema` 的 `type`/`required`/`enum`/数值约束逐字不变。被截掉的完整定义随时经只读资源模板 `studio://tools/{name}` 按名读回（返回 `{"name","description","inputSchema","annotations"}`）。不带该参数的默认行为逐字不变。
 
-同一 compact 会话中 `fetch_page` 的首次自动预览默认从 6000 字符降为 2000（仅 `responseMode=auto` 且未传 `maxChars` 时生效）。普通连接的 auto、`preview` 模式缺省仍为 6000；`reference` 模式与 auto 命中缓存本就不回正文（仅返回 `pageId` 引用），不涉及预览长度；显式 `maxChars`（0..12000）始终优先。正文仍完整保存在 `pageId`，可照常经 `read_page` 或 `inspect_rule`/`analyze_html`/`eval_js` 引用恢复。
+`fetch_page` 首次自动预览的默认长度：普通连接 `responseMode=auto` 为 6000 字符；`preview` 模式无论连接类型缺省 6000；同一 compact 会话的 `auto` 未传 `maxChars` 时降为 2000。显式 `maxChars`（0..12000）始终优先；`reference` 模式与 auto 命中缓存本就不回正文（仅返回 `pageId` 引用），不涉及预览长度。正文仍完整保存在 `pageId`，可照常经 `read_page` 或 `inspect_rule`/`analyze_html`/`eval_js` 引用恢复。
 
 ### 书源类型开关
 

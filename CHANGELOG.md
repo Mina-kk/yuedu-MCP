@@ -5,7 +5,7 @@
 ## [Unreleased]
 
 - `app_status` 新增 `toolUsage` 字段：当前服务运行期间各工具的调用次数、失败/取消数、耗时与返回文本量（UTF-16 字符与 UTF-8 字节）概览，另列按文本量排序的前 10 个工具。统计只含工具名与数值，不含调用内容；`app_status` 自身不计入；服务重启后清零。
-- `?compact=1` 会话的 `fetch_page` 首次自动预览默认降为 2000 字符（仅 `responseMode=auto` 且未传 `maxChars` 时生效）；普通连接的 auto、`preview` 缺省仍为 6000，`reference` 与 auto 命中缓存本就不回正文，显式 `maxChars`（0..12000）始终优先。正文仍完整保存在 `pageId`，可经 `read_page` 等引用恢复。
+- `fetch_page` 首次自动预览默认：普通连接 auto 为 6000 字符，`preview` 模式无论连接类型缺省 6000；`?compact=1` 会话的 auto 未传 `maxChars` 时降为 2000。显式 `maxChars`（0..12000）始终优先；`reference` 与 auto 命中缓存本就不回正文。正文仍完整保存在 `pageId`，可经 `read_page` 等引用恢复。
 - 工程改进：复用页面预览与大结果引用的响应格式化代码，补充缓存引用和分页读取回归检查；现有接口与默认行为保持不变。
 
 ## [1.2.0] - 2026-10-14

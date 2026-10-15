@@ -63,7 +63,7 @@
 
 ## 五、summary-first 与比较纪律
 
-- 大结果一律先读摘要：`fetch_page` 预览 6000 字、调试输出截断（正文 4000/样本 800/目录 20 条）、超 12000 字自动转 `resultId`+预览。用 `read_page`/`read_result` 按 offset/limit 分页，**不要重跑同一工具**——`cacheHit=true`、body 空是正常复用。
+- 大结果一律先读摘要：`fetch_page` 预览标准 `auto` 首次缺省 6000 字（`?compact=1` 的 `auto` 未传 `maxChars` 时缺省 2000 字；`preview` 模式任意连接缺省 6000 字；`maxChars` 显式传入时优先，区间 0..12000；`responseMode="reference"` 不回正文，全文仍在 `pageId`）、调试输出截断（正文 4000/样本 800/目录 20 条）、超 12000 字自动转 `resultId`+预览。用 `read_page`/`read_result` 按 offset/limit 分页，**不要重跑同一工具**——`cacheHit=true`、body 空是正常复用，`reference` 与 `auto` 缓存命中同样不回正文，正文只在 `pageId`。
 - 声明"新增/缺失/不同"必须双侧覆盖：比较两个版本的书源、两页快照、两次抓包时，没读完的一侧报 unknown。"搜索页 A 有 banner、B 没有"只在 A、B 都完整读完时可下。
 - 有界搜索保持有界：`analyze_html` 计数为 0 只说明"该快照上该选择器 0 命中"，不推出"页面没有这个元素"（动态渲染/懒加载/验证页都可能假空）——先用观察确认快照本身是目标页面。
 

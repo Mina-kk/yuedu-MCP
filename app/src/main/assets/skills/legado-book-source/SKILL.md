@@ -21,7 +21,7 @@ description: 创建、修改、保存、调试或校验阅读（Legado）书源�
 ## 任务上下文与省 token 纪律
 
 - 开始任务先 `create_context(label)`，记住 `contextId` 并**全程显式传入**；继续任务先 `get_context(contextId)` 读 notes 与引用目录。**并行做多个书源时每个任务各用一个 contextId，绝不共用**；共用会导致缓存互相挤占、引用失效。
-- `fetch_page(url)` 首次返回最多 6000 字符预览与 `pageId`（`maxChars` 调预览大小，`responseMode="reference"` 可完全不回正文，最省）。`truncated=true` 只是预览截断，完整正文在 App 侧快照里。
+- `fetch_page(url)` 返回预览与 `pageId`：普通连接 `auto` 首次缺省 6000 字符；`?compact=1` 连接的 `auto` 未传 `maxChars` 时缺省 2000；`preview` 模式无论连接类型均缺省 6000。显式 `maxChars`（0..12000）优先；`reference` 模式或 `auto` 命中缓存时不回正文。`truncated=true` 只表示预览截断，完整正文仍在快照里；优先直接用 `pageId` 测规则，需要片段时再用 `read_page` 按 `query` 或 offset/limit 读取，不要先拉取全文。
 - 相同 method+URL+body（**含 POST 搜索**）5 分钟内复用快照，返回 `cacheHit=true`、body 为空属正常，**不要重抓**。读内容用 `read_page(pageId, query/offset/limit)`，测规则用 `inspect_rule(pageId, rule)` / `analyze_html(pageId, selector)` / `eval_js(pageId, js)`，全部直接作用于完整快照。
 - `debug_source` / `check_source` 默认复用本任务快照；**最终验收必须 `refresh=true` 全程实时**。`check_source` 可加 `exploreUrl`/`exploreKey` 附带跑一次「发现」段（不进四段 verdict 口径）；正文是 JS 渲染页时用 `webview_render(url+pageId)` 把已存快照在 WebView 里还原成真实 DOM 再测规则，不要拿静态抓取的当正文证据。
 - 调试输出故意截断：正文 4000 字符、replaceRegex 前样本 800、目录 20 章、搜索 10 条、简介 120（均有 total 字段标注全量大小）。需要全文时 `fetch_page` 抓该 URL 再 `read_page` 分段，不要要求调试工具吐全文。
