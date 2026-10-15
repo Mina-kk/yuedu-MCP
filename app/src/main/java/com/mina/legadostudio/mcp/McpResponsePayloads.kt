@@ -8,8 +8,10 @@ import io.modelcontextprotocol.kotlin.sdk.types.TextContent
  * 大结果引用判定」抽到本 object，两个调用点只负责传参转调。
  *
  * 本文件不持有任何状态、不做上下文存取/网络/参数校验——contextId 解析、缓存命中、
- * TaskContextStore 存取、异常与 fallback 触发全部留在 StudioMcpServer 原处；阈值
- * （6000 首次预览、12000 大结果界限、3000 引用预览）与原 Map 键序/null 值/中文提示逐字符保持。
+ * TaskContextStore 存取、异常与 fallback 触发全部留在 StudioMcpServer 原处。阈值：
+ * fetch_page 首次预览缺省按 [pagePreviewLimit] 选择（标准路径与原 6000 逐字符保持；
+ * opt-in 的 compact 连接仅 auto 缺省降为 2000，显式 maxChars 与各非 auto 模式不变），
+ * 12000 大结果界限与 3000 引用预览不变，Map 键序/null 值/中文提示逐字符保持。
  */
 internal object McpResponsePayloads {
     /** 单次响应正文中段上限：maxChars 校验、内联截断与引用判定共用同一数字（不改值）。 */
@@ -20,6 +22,18 @@ internal object McpResponsePayloads {
 
     /** fetch_page 的默认预览长度（maxChars 缺省值）。 */
     const val DEFAULT_PREVIEW_CHARS = 6000
+
+    /** compact 连接 auto 模式下的 fetch_page 默认预览长度（仅缺省路径；显式 maxChars 不受影响）。 */
+    const val COMPACT_AUTO_PREVIEW_CHARS = 2000
+
+    /**
+     * fetch_page 的 maxChars 缺省选择（原 fetchPageOk 内联 `args.int("maxChars") ?: 6000` 的规则化）：
+     * 显式 maxChars 永远优先；只有 compact 连接 + responseMode=auto 且缺省时取 2000，
+     * 其余模式（preview/reference）与普通连接缺省一律 6000。不在本函数做 0..12000 校验——
+     * 范围校验仍由调用处原有 require 负责，显式越界值原样返回照旧报错。
+     */
+    fun pagePreviewLimit(compact: Boolean, mode: String, explicitMaxChars: Int?): Int =
+        explicitMaxChars ?: if (compact && mode == "auto") COMPACT_AUTO_PREVIEW_CHARS else DEFAULT_PREVIEW_CHARS
 
     /** responseMode=auto/preview/reference 下的正文预览选择（原 fetchPageOk 内联一行）。 */
     fun pagePreview(text: String, mode: String, cacheHit: Boolean, maxChars: Int): String =

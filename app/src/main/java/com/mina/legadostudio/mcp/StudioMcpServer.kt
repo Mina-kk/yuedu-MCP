@@ -344,7 +344,7 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
     internal suspend fun fetchPageOk(args: JsonObject?, autoRetried: Boolean = false, switchedDomain: String? = null): CallToolResult {
         val mode = args.str("responseMode") ?: "auto"
         require(mode in setOf("auto", "preview", "reference")) { "responseMode 必须为 auto/preview/reference" }
-        val limit = args.int("maxChars") ?: 6000
+        val limit = McpResponsePayloads.pagePreviewLimit(compact, mode, args.int("maxChars"))
         require(limit in 0..12000) { "maxChars 必须为 0..12000" }
         val (id, hit, liveResult) = contextFetch(args)
         val e = hit.entry

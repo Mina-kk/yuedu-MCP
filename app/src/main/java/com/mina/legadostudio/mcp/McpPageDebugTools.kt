@@ -8,7 +8,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.put
 
 internal fun StudioMcpServer.registerPageDebugTools(server: Server) {
-    server.tool("fetch_page", "抓取并保存网页上下文。首次默认返回6000字符预览+pageId；同任务相同URL(含POST)五分钟内复用，仅返回引用。用read_page分段/搜索、analyze_html/inspect_rule(pageId)测试，勿重复传HTML。refresh=true强制联网。", fetchSchema(), toolAnnotations = openWrite) { req ->
+    server.tool("fetch_page", "抓取并保存网页上下文。responseMode=auto首次抓取默认返回6000字符预览+pageId（?compact=1连接的auto缺省降为2000）；显式maxChars(0..12000)始终优先，preview模式缺省6000。reference模式或auto命中缓存时不回正文、仅引用。同任务相同URL(含POST)五分钟内复用。用read_page分段/搜索、analyze_html/inspect_rule(pageId)测试，勿重复传HTML。refresh=true强制联网。", fetchSchema(), toolAnnotations = openWrite) { req ->
         runCatching { fetchPageOk(req.arguments) }.getOrElse { verificationAware(it, req.arguments) }
     }
     server.tool("analyze_html", "分析HTML或测试纯 jsoup CSS 选择器（selector 不支持 Legado 的 @css:/@@/XPath/JS 组合规则；完整规则请用 inspect_rule）。优先传pageId分析完整快照，无需联网；html与pageId二选一。", schema(mapOf("html" to "HTML（与pageId二选一）", "pageId" to "已存网页ID", "baseUrl" to "基础URL", "selector" to "仅纯 jsoup CSS 选择器；完整 Legado 规则用 inspect_rule"), emptyList()), toolAnnotations = readOnly) { req ->

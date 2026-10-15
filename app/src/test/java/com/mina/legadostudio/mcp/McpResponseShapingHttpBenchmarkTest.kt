@@ -131,7 +131,12 @@ class McpResponseShapingHttpBenchmarkTest {
         return CallToolResult(listOf(TextContent(appGson.toJson(payload))))
     }
 
-    private fun fixture(b: Bench): Server = Server(
+    /**
+     * compact 即生产 StudioMcpServer(compact=...) 的连接标记：由 initialize URL 的 ?compact=1
+     * 经 serverFactory 读入（见 httpBench 中 queryParameters 取值，同 McpService），fixture 内
+     * bench_page 的缺省预览长度走生产同款 McpResponsePayloads.pagePreviewLimit。
+     */
+    private fun fixture(b: Bench, compact: Boolean = false): Server = Server(
         serverInfo = Implementation("bench-fixture", "1"),
         options = ServerOptions(capabilities = ServerCapabilities(
             tools = ServerCapabilities.Tools(listChanged = false),
@@ -144,12 +149,12 @@ class McpResponseShapingHttpBenchmarkTest {
         server.addTool(Tool(name = "bench_page", description = "fetch+shape page", inputSchema = schema)) { req ->
             tracked("bench_page") {
                 val args = req.arguments
-                val url = args?.get("url")?.jsonPrimitive?.content ?: "https://bench.local/small"
-                val mode = args?.get("mode")?.jsonPrimitive?.content ?: "auto"
+                val url = McpArgs.str(args, "url") ?: "https://bench.local/small"
+                val mode = McpArgs.str(args, "mode") ?: "auto"
                 require(mode in setOf("auto", "preview", "reference")) { "responseMode 必须为 auto/preview/reference" }
-                val maxChars = args?.get("maxChars")?.jsonPrimitive?.content?.toIntOrNull() ?: 6000
+                val maxChars = McpResponsePayloads.pagePreviewLimit(compact, mode, McpArgs.int(args, "maxChars"))
                 require(maxChars in 0..12000) { "maxChars 必须为 0..12000" }
-                val ctx = args?.get("contextId")?.jsonPrimitive?.content ?: b.store.create("bench")
+                val ctx = McpArgs.str(args, "contextId") ?: b.store.create("bench")
                 val body = b.bodies.getValue(url)
                 val hit = b.store.fetch(ctx, "GET\n$url\n", FINGERPRINT, reusable = true, refresh = false) {
                     b.loaderCalls.incrementAndGet()
@@ -162,8 +167,8 @@ class McpResponseShapingHttpBenchmarkTest {
         // bench_result：按准确长度生成结果正文，走生产同款 needsResultReference 判定。
         server.addTool(Tool(name = "bench_result", description = "sized result→maybe reference", inputSchema = schema)) { req ->
             tracked("bench_result") {
-                val ctx = req.arguments?.get("contextId")?.jsonPrimitive?.content ?: b.store.create("bench")
-                val size = req.arguments?.get("size")?.jsonPrimitive?.content?.toIntOrNull() ?: 15000
+                val ctx = McpArgs.str(req.arguments, "contextId") ?: b.store.create("bench")
+                val size = McpArgs.int(req.arguments, "size") ?: 15000
                 val raw = CallToolResult(listOf(TextContent(sizedResultText(size))))
                 boundedFixture(b, ctx, "bench_result", raw)
             }
@@ -172,9 +177,9 @@ class McpResponseShapingHttpBenchmarkTest {
         // bench_read：按条目 id 分页读回正文（page/result 通用，走生产 contexts.read 路径）。
         server.addTool(Tool(name = "bench_read", description = "paged read of stored entry", inputSchema = schema)) { req ->
             tracked("bench_read") {
-                val ctx = req.arguments?.get("contextId")?.jsonPrimitive?.content ?: error("contextId 不能为空")
-                val entryId = req.arguments?.get("id")?.jsonPrimitive?.content ?: error("id 不能为空")
-                val offset = req.arguments?.get("offset")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+                val ctx = McpArgs.str(req.arguments, "contextId") ?: error("contextId 不能为空")
+                val entryId = McpArgs.str(req.arguments, "id") ?: error("id 不能为空")
+                val offset = McpArgs.int(req.arguments, "offset") ?: 0
                 val e = b.store.get(ctx, entryId, FINGERPRINT)
                 CallToolResult(listOf(TextContent(appGson.toJson(b.store.read(e, offset, 12000)))))
             }
@@ -183,7 +188,7 @@ class McpResponseShapingHttpBenchmarkTest {
         // bench_err：在受限名单内但 isError=true —— 生产判定必须豁免（不得转引用/不得裁切）。
         server.addTool(Tool(name = "bench_err", description = "isError passthrough", inputSchema = schema)) { req ->
             tracked("bench_err") {
-                val size = req.arguments?.get("size")?.jsonPrimitive?.content?.toIntOrNull() ?: 12500
+                val size = McpArgs.int(req.arguments, "size") ?: 12500
                 val errText = "失败明细:" + "x".repeat(size - 5)
                 val raw = CallToolResult(listOf(TextContent(errText)), isError = true)
                 boundedFixture(b, "unused-ctx", "bench_err", raw)
@@ -193,7 +198,7 @@ class McpResponseShapingHttpBenchmarkTest {
         // bench_raw：不在受限名单内 —— 即便超长也原样返回（identity 策略，不裁切）。
         server.addTool(Tool(name = "bench_raw", description = "non-bounded long passthrough", inputSchema = schema)) { req ->
             tracked("bench_raw") {
-                val size = req.arguments?.get("size")?.jsonPrimitive?.content?.toIntOrNull() ?: 15000
+                val size = McpArgs.int(req.arguments, "size") ?: 15000
                 val raw = CallToolResult(listOf(TextContent(sizedResultText(size))))
                 boundedFixture(b, "unused-ctx", "bench_raw", raw)
             }
@@ -205,11 +210,12 @@ class McpResponseShapingHttpBenchmarkTest {
         val port: Int,
         val servers: CopyOnWriteArrayList<Server>,
         val json: Json,
+        val basePath: String = "/mcp",
     ) {
         var session: String? = null
 
         suspend fun post(body: String): Pair<Int, String> {
-            val response = client.post("http://127.0.0.1:$port/mcp") {
+            val response = client.post("http://127.0.0.1:$port$basePath") {
                 header(HttpHeaders.Host, "127.0.0.1:$port")
                 header(HttpHeaders.Accept, "application/json, text/event-stream")
                 header(HttpHeaders.ContentType, "application/json")
@@ -221,7 +227,7 @@ class McpResponseShapingHttpBenchmarkTest {
         }
 
         suspend fun startSession() {
-            val response = client.post("http://127.0.0.1:$port/mcp") {
+            val response = client.post("http://127.0.0.1:$port$basePath") {
                 header(HttpHeaders.Host, "127.0.0.1:$port")
                 header(HttpHeaders.Accept, "application/json, text/event-stream")
                 header(HttpHeaders.ContentType, "application/json")
@@ -303,7 +309,7 @@ class McpResponseShapingHttpBenchmarkTest {
     private fun JsonObject.str(name: String) = field(name).jsonPrimitive.content
     private fun JsonObject.bool(name: String) = field(name).jsonPrimitive.content == "true"
 
-    private fun httpBench(block: suspend Harness.(Bench) -> Unit) = runBlocking {
+    private fun httpBench(basePath: String = "/mcp", block: suspend Harness.(Bench) -> Unit) = runBlocking {
         val servers = CopyOnWriteArrayList<Server>()
         val b = newBench()
         val client = HttpClient(ClientCIO) {
@@ -315,13 +321,14 @@ class McpResponseShapingHttpBenchmarkTest {
                 configProvider = { McpConfigStore.Config(1237, false, "") },
                 allowedHosts = listOf("127.0.0.1", "localhost"),
                 allowedOrigins = listOf("http://127.0.0.1:1237", "http://localhost:1237"),
-            ) { fixture(b).also { servers.add(it) } }
+                // 与 McpService 同规则：initialize URL 的 ?compact=1 决定本连接 fixture 的 compact 标记
+            ) { fixture(b, compact = call.request.queryParameters[McpToolCompactor.QUERY_PARAM] == McpToolCompactor.QUERY_VALUE).also { servers.add(it) } }
         }
         try {
             withTimeout(60_000) {
                 engine.start(wait = false)
                 val port = engine.engine.resolvedConnectors().single().port
-                Harness(client, port, servers, json).block(b)
+                Harness(client, port, servers, json, basePath).block(b)
             }
         } finally {
             client.close()
@@ -488,6 +495,170 @@ class McpResponseShapingHttpBenchmarkTest {
         assertNotEquals(JsonPrimitive(true), r2["isError"])
         assertEquals(sizedResultText(size), r2.text())
         report("nonbounded-15000-passthrough", r2.text(), b)
+    }
+
+    /**
+     * compact 会话（真实 /mcp?compact=1 initialize URL，经 factory query 读取）下长中文页
+     * 首次 auto 缺省预览 2000：返回 text 的 UTF-16 与 UTF-8 均小于标准会话的 6000；
+     * 全文仍经 store.get/read 分页逐字还原；pageId/contextId 只核对非空（UUID 不要求相同）。
+     */
+    @Test(timeout = 90_000) fun compactAutoPreviewIsSmallerAndStoreRestores() = httpBench("/mcp?compact=1") { b ->
+        startSession()
+        val ctx = b.store.create("bench-ctx")
+        val r1 = callChecked(b, 2, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"auto"}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertFalse(r1.bool("cacheHit"))
+        // compact auto 缺省：2000 预览截断，非 6000
+        assertEquals(2000, r1.str("body").length)
+        assertEquals(longCjkHtml.take(2000), r1.str("body"))
+        assertTrue(r1.bool("truncated"))
+        assertEquals(longCjkHtml.length, r1.str("totalChars").toInt())
+        assertEquals(2000, r1.str("nextOffset").toInt())
+        val pageId = r1.str("pageId")
+        assertTrue("pageId 非空", pageId.isNotBlank())
+        assertTrue("contextId 非空", r1.str("contextId").isNotBlank())
+        val compactText = r1.text()
+        report("compact-page-longcjk-first-auto", compactText, b, "totalChars=${longCjkHtml.length}")
+
+        // 缓存命中：compact 下 limit 仍取 2000，但 body 输出空且 loader 不变
+        val r2 = callChecked(b, 3, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"auto"}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertTrue(r2.bool("cacheHit"))
+        assertEquals("", r2.str("body"))
+        assertTrue(r2.bool("bodyOmitted"))
+        report("compact-page-longcjk-second-auto-cache", r2.text(), b)
+
+        // reference：body 恒空
+        val r3 = callChecked(b, 4, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"reference"}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertEquals("", r3.str("body"))
+        report("compact-page-longcjk-reference", r3.text(), b)
+
+        // 全文逐字还原：经真实 HTTP bench_read 分页读回（共享 contexts.read 路径），
+        // 有界循环 + 每页 nextOffset 持续向前，拼回后与原始正文一致
+        val entry = b.store.get(ctx, pageId, FINGERPRINT)
+        assertEquals(longCjkHtml, entry.text)
+        val restored = StringBuilder()
+        var off = 0
+        var pages = 0
+        while (true) {
+            pages++
+            val rp = callChecked(b, 10 + pages, "bench_read",
+                """{"contextId":"$ctx","id":"$pageId","offset":$off}""")
+            val pm = json.parseToJsonElement(rp.text()).jsonObject
+            restored.append(pm.getValue("body").jsonPrimitive.content)
+            val next = pm.getValue("nextOffset").jsonPrimitive.content.toInt()
+            assertTrue("nextOffset 必须持续向前", next > off || pm.getValue("hasMore").jsonPrimitive.content != "true")
+            off = next
+            if (pm.getValue("hasMore").jsonPrimitive.content != "true") break
+            assertTrue("paging loop bound", pages < 10)
+        }
+        assertEquals(longCjkHtml, restored.toString())
+        println("COMPACT-VS-DEFAULT compactUtf8=${compactText.toByteArray(Charsets.UTF_8).size} restoredPages=$pages")
+    }
+
+    /**
+     * 标准 vs compact 双会话对照：同一引擎上 /mcp 与 /mcp?compact=1 各自 initialize，
+     * 同一份输入各自首抓（不同 ctx），真实比较返回 text 体积；loader 各 1 次、调用结构一致。
+     */
+    @Test(timeout = 90_000) fun compactVsDefaultFirstAutoByteSize() = httpBench { b ->
+        // loader 只在 store.fetch 缓存 miss 时被调用；initialize/initialized 不触发 fetch。
+        // 缓存条目按 task(ctx) 隔离，故「每 ctx+URL 首次调用」恰好 loader+1，用增量断言。
+        startSession()
+        val ctxStd = b.store.create("std-ctx")
+        val beforeStd = b.loaderCalls.get()
+        val std = callChecked(b, 2, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctxStd","mode":"auto"}""")
+        assertEquals("std ctx+URL 首次 loader+1", beforeStd + 1, b.loaderCalls.get())
+        assertEquals(6000, std.str("body").length)
+        val stdText = std.text()
+        report("vs-default-page-longcjk-first-auto", stdText, b)
+        val stdPageId = std.str("pageId")
+
+        // compact 会话首抓（同 bench、不同 ctx → 该 ctx+URL 首次，loader 再 +1）
+        val compactHarness = Harness(client, port, servers, json, "/mcp?compact=1")
+        compactHarness.startSession()
+        val ctxCmp = b.store.create("cmp-ctx")
+        val beforeCmp = b.loaderCalls.get()
+        val cmp = compactHarness.callChecked(b, 10, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctxCmp","mode":"auto"}""")
+        assertEquals("cmp ctx+URL 首次 loader+1", beforeCmp + 1, b.loaderCalls.get())
+        assertEquals(2000, cmp.str("body").length)
+        val cmpText = cmp.text()
+        report("vs-compact-page-longcjk-first-auto", cmpText, b)
+        val cmpPageId = cmp.str("pageId")
+
+        // 元数据 pageId/contextId 是独立 UUID，只要求非空且结构字段一致
+        assertTrue(stdPageId.isNotBlank()); assertTrue(cmpPageId.isNotBlank())
+        assertEquals(std.str("totalChars"), cmp.str("totalChars"))
+        assertEquals(std.str("code"), cmp.str("code"))
+        // compact 响应 text 的 UTF-16 与 UTF-8 都必须实际更小
+        assertTrue("compact chars smaller", cmpText.length < stdText.length)
+        val stdUtf8 = stdText.toByteArray(Charsets.UTF_8).size
+        val cmpUtf8 = cmpText.toByteArray(Charsets.UTF_8).size
+        assertTrue("compact utf8 smaller", cmpUtf8 < stdUtf8)
+        println("COMPACT-VS-DEFAULT defaultChars=${stdText.length} compactChars=${cmpText.length} defaultUtf8=$stdUtf8 compactUtf8=$cmpUtf8 shrinkUtf8=${stdUtf8 - cmpUtf8} ratio=%.3f".format(cmpUtf8.toDouble() / stdUtf8))
+
+        // bigjson 同对照：compact 首抓 2000 仍截断且小于标准 6000
+        val stdJ = callChecked(b, 20, "bench_page", """{"url":"https://bench.local/bigjson","contextId":"$ctxStd","mode":"auto"}""")
+        val cmpJ = compactHarness.callChecked(b, 30, "bench_page", """{"url":"https://bench.local/bigjson","contextId":"$ctxCmp","mode":"auto"}""")
+        assertEquals(6000, stdJ.str("body").length)
+        assertEquals(2000, cmpJ.str("body").length)
+        val stdJUtf8 = stdJ.text().toByteArray(Charsets.UTF_8).size
+        val cmpJUtf8 = cmpJ.text().toByteArray(Charsets.UTF_8).size
+        assertTrue(cmpJUtf8 < stdJUtf8)
+        println("COMPACT-VS-DEFAULT-JSON defaultUtf8=$stdJUtf8 compactUtf8=$cmpJUtf8")
+
+        // 同 ctx+URL 二次调用走缓存，loader 不再增加（每 ctx+URL 仅首次 1 次）
+        val beforeCmp2 = b.loaderCalls.get()
+        val cmp2 = compactHarness.callChecked(b, 31, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctxCmp","mode":"auto"}""")
+        assertTrue(cmp2.bool("cacheHit"))
+        assertEquals("", cmp2.str("body"))
+        assertEquals(beforeCmp2, b.loaderCalls.get())
+    }
+
+    /**
+     * compact 下的显式 maxChars 与 preview/reference 缺省均保持旧输出：
+     * 显式 0/6000 优先覆盖 compact 的 2000 缺省；preview/reference 无 maxChars 仍 6000。
+     */
+    @Test(timeout = 90_000) fun compactExplicitAndNonAutoModesUnchanged() = httpBench("/mcp?compact=1") { b ->
+        startSession()
+        val ctx = b.store.create("bench-ctx")
+        // compact + auto + 显式 maxChars=6000：显式优先，非 2000
+        val r1 = callChecked(b, 2, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"auto","maxChars":6000}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertEquals(6000, r1.str("body").length)
+        assertEquals(longCjkHtml.take(6000), r1.str("body"))
+        report("compact-explicit-6000", r1.text(), b)
+
+        // compact + preview 缺省：仍 6000（非 auto 不走 2000）
+        val r2 = callChecked(b, 3, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"preview"}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertEquals(6000, r2.str("body").length)
+        report("compact-preview-default", r2.text(), b)
+
+        // compact + auto + maxChars=0：旧行为 —— body 空
+        val r3 = callChecked(b, 4, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"auto","maxChars":0}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertEquals("", r3.str("body"))
+        assertTrue(r3.bool("bodyOmitted"))
+        report("compact-explicit-0", r3.text(), b)
+
+        // compact + reference 缺省：body 恒空（reference 不回正文，非 2000 也非 6000 预览）
+        val r4 = callChecked(b, 5, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"reference"}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertEquals("", r4.str("body"))
+        assertTrue(r4.bool("bodyOmitted"))
+
+        // 显式 preview 在 compact 下也不回落 2000：preview 缺省 6000 上面已核，这里显式 preview+4000
+        val r5 = callChecked(b, 6, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"preview","maxChars":4000}""")
+        assertEquals(1, b.loaderCalls.get())
+        assertEquals(4000, r5.str("body").length)
+
+        // 反例：非法 maxChars（小数 3.5）经 McpArgs.int 报错 —— isError，不回落 compact 2000 缺省
+        val err = callResult(7, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"auto","maxChars":3.5}""")
+        assertEquals(JsonPrimitive(true), err["isError"])
+        // 越界 maxChars（>12000）：require 报错，同样不回落
+        val err2 = callResult(8, "bench_page", """{"url":"https://bench.local/long","contextId":"$ctx","mode":"auto","maxChars":99999}""")
+        assertEquals(JsonPrimitive(true), err2["isError"])
     }
 
     private companion object {

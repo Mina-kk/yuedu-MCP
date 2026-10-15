@@ -84,6 +84,27 @@ class McpResponsePayloadsContractTest {
         assertSamePayload(expected, actual, "mode=$mode limit=$limit reused=$reused")
     }
 
+    /** 走 pagePreviewLimit 缺省选择的 golden 对照（模拟 fetchPageOk 新调用序）。 */
+    private fun fetchCaseByMode(
+        compact: Boolean, mode: String, explicit: Int?, text: String, reused: Boolean,
+        extra: Map<String, String> = emptyMap(),
+    ) {
+        val e = entry(text)
+        val metadata = mapOf<String, Any>("id" to e.id, "kind" to "page", "totalChars" to e.text.length,
+            "sha256" to "s".repeat(64), "ageMs" to 0, "stale" to false, "url" to "https://example.test/p")
+        val limit = McpResponsePayloads.pagePreviewLimit(compact, mode, explicit)
+        val expected = goldenFetchPayload(metadata, "ctx-1", e, reused, mode, limit,
+            autoRetried = false, switchedDomain = null, repeatRef = null, extra = extra)
+        val result = e.page!!
+        val actual = McpResponsePayloads.fetchPagePayload(
+            metadata, "ctx-1", e.id, reused, result.code, result.finalUrl, result.elapsedMs,
+            result.bodyNote, result.binaryBytes,
+            McpResponsePayloads.pagePreview(e.text, mode, reused, limit), e.text.length,
+            false, null, null, extra,
+        )
+        assertSamePayload(expected, actual, "compact=$compact mode=$mode explicit=$explicit reused=$reused")
+    }
+
     @Test fun fetchPayloadMatchesGoldenForAllModesAndCacheStates() {
         val text = "x".repeat(9000)
         for (mode in listOf("auto", "preview", "reference")) {
@@ -93,6 +114,43 @@ class McpResponsePayloadsContractTest {
                 }
             }
         }
+    }
+
+    @Test fun pagePreviewLimitDefaultMatrix() {
+        val p = McpResponsePayloads
+        // 普通连接：三种模式缺省一律 6000
+        for (mode in listOf("auto", "preview", "reference")) {
+            assertEquals("normal mode=$mode", 6000, p.pagePreviewLimit(false, mode, null))
+        }
+        // compact：仅 auto 缺省 2000；preview/reference 缺省仍 6000
+        assertEquals(2000, p.pagePreviewLimit(true, "auto", null))
+        assertEquals(6000, p.pagePreviewLimit(true, "preview", null))
+        assertEquals(6000, p.pagePreviewLimit(true, "reference", null))
+        // 显式 maxChars 跨 mode 与 compact 一律优先（0/边界/超默认原样返回，范围校验留在 fetchPageOk 的 require）
+        for (explicit in listOf(0, 2000, 6000, 12000)) {
+            for (mode in listOf("auto", "preview", "reference")) {
+                for (compact in listOf(false, true)) {
+                    assertEquals("explicit=$explicit mode=$mode compact=$compact",
+                        explicit, p.pagePreviewLimit(compact, mode, explicit))
+                }
+            }
+        }
+    }
+
+    @Test fun compactAutoDefaultPayloadMatchesGolden() {
+        val text = "x".repeat(9000)
+        // compact auto 首次：缺省 2000 预览、truncated=true；全文仍按 pageId 保存
+        fetchCaseByMode(compact = true, mode = "auto", explicit = null, text = text, reused = false)
+        // compact auto 缓存命中：limit 取值仍为 2000，但 body 输出为空（pagePreview 原有规则不变）
+        fetchCaseByMode(compact = true, mode = "auto", explicit = null, text = text, reused = true)
+        // compact preview/reference 首次：缺省 6000 与普通连接一致
+        fetchCaseByMode(compact = true, mode = "preview", explicit = null, text = text, reused = false)
+        fetchCaseByMode(compact = true, mode = "reference", explicit = null, text = text, reused = false)
+        // 普通连接 auto：缺省仍是 6000（防漂移）
+        fetchCaseByMode(compact = false, mode = "auto", explicit = null, text = text, reused = false)
+        // 显式 maxChars 在 compact auto 下覆盖 2000 缺省
+        fetchCaseByMode(compact = true, mode = "auto", explicit = 6000, text = text, reused = false)
+        fetchCaseByMode(compact = true, mode = "auto", explicit = 0, text = text, reused = false)
     }
 
     @Test fun previewSelectionBoundary() {
