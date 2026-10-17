@@ -3,15 +3,18 @@ package com.mina.legadostudio.domain
 import com.google.gson.Gson
 import com.mina.legadostudio.network.HttpFetcher
 import com.mina.legadostudio.runtime.EmbeddedLegadoRuntime
+import com.mina.legadostudio.runtime.LegadoRuntime
 import com.mina.legadostudio.runtime.RhinoEvaluator
 import io.legado.app.model.analyzeRule.LegadoRuleEngine
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 class EmbeddedLegadoRuntimeTest {
     @Test fun debugsDetailWithOfficialRuleAndInlineRhino() = runBlocking {
@@ -164,11 +167,67 @@ class EmbeddedLegadoRuntimeTest {
                "ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#content@html"}}
             """.trimIndent()
             val runtime = EmbeddedLegadoRuntime(HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
-            runtime.debug(source, "万相之王")
-            val recorded = server.takeRequest()
+            val report = runtime.debug(source, "万相 之王+100%&")
+            val recorded = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("POST 搜索请求应在 5 秒内到达", recorded)
+            checkNotNull(recorded)
             assertEquals("POST", recorded.method)
-            assertTrue(recorded.body.readUtf8().contains("keyboard="))
+            assertEquals("/e/search/index.php", recorded.path)
+            assertEquals("keyboard=%E4%B8%87%E7%9B%B8+%E4%B9%8B%E7%8E%8B%2B100%25%26&tempid=1", recorded.body.readUtf8())
+            assertEquals("application/x-www-form-urlencoded; charset=utf-8", recorded.getHeader("Content-Type"))
+            val books = report.data as List<*>
+            assertEquals("书名", (books.first() as Map<*, *>)["name"])
+            assertEquals(server.url("b/1").toString(), (books.first() as Map<*, *>)["bookUrl"])
             assertTrue(EmbeddedLegadoRuntime.JS_TEMPLATE.containsMatchIn("prefix{{java.time()}}suffix"))
+        }
+    }
+
+    @Test fun interpolatesSearchKeyInJsReturnedPostOptionBody() = runBlocking {
+        // @js 返回 "url,{method:POST,body}"；脚本内 key 经 java.encodeURI（空格 %20），与模板 {{key}} 的 + 不同
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("<div class='book'><a href='/b/2'>JS书名</a></div>"))
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "searchUrl" to "@js:'${server.url("/")}e/search/index.php,'+JSON.stringify({method:'POST',body:'keyboard='+java.encodeURI(key)+'&tempid=1'})",
+                "ruleSearch" to mapOf("bookList" to ".book", "name" to "a@text", "bookUrl" to "a@href"),
+                "ruleToc" to mapOf("chapterList" to "a"), "ruleContent" to mapOf("content" to "#content@html"),
+            ))
+            val runtime = EmbeddedLegadoRuntime(HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
+            val report = runtime.debug(source, "万相 之王+100%&")
+            val recorded = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("POST 搜索请求应在 5 秒内到达", recorded)
+            checkNotNull(recorded)
+            assertEquals("POST", recorded.method)
+            assertEquals("keyboard=%E4%B8%87%E7%9B%B8%20%E4%B9%8B%E7%8E%8B%2B100%25%26&tempid=1", recorded.body.readUtf8())
+            assertEquals("application/x-www-form-urlencoded; charset=utf-8", recorded.getHeader("Content-Type"))
+            val books = report.data as List<*>
+            assertEquals("JS书名", (books.first() as Map<*, *>)["name"])
+            assertEquals(server.url("b/2").toString(), (books.first() as Map<*, *>)["bookUrl"])
+        }
+    }
+
+    @Test fun jsReturnedPostOptionBodySendsRawKeyUnencoded() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("<div class='book'><a href='/b/3'>原名</a></div>"))
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "searchUrl" to "@js:'${server.url("/")}e/search/index.php,'+JSON.stringify({method:'POST',body:'keyboard='+key+'&tempid=1'})",
+                "ruleSearch" to mapOf("bookList" to ".book", "name" to "a@text", "bookUrl" to "a@href"),
+                "ruleToc" to mapOf("chapterList" to "a"), "ruleContent" to mapOf("content" to "#content@html"),
+            ))
+            val runtime = EmbeddedLegadoRuntime(HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
+            val report = runtime.debug(source, "万相 之王+100%&")
+            val recorded = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("POST 搜索请求应在 5 秒内到达", recorded)
+            checkNotNull(recorded)
+            assertEquals("POST", recorded.method)
+            assertEquals("keyboard=万相 之王+100%&&tempid=1", recorded.body.readUtf8())
+            assertEquals("application/x-www-form-urlencoded; charset=utf-8", recorded.getHeader("Content-Type"))
+            val books = report.data as List<*>
+            assertEquals("原名", (books.first() as Map<*, *>)["name"])
+            assertEquals(server.url("b/3").toString(), (books.first() as Map<*, *>)["bookUrl"])
         }
     }
 
@@ -285,6 +344,184 @@ class EmbeddedLegadoRuntimeTest {
             runtime.debug(source, "关键字")
             server.takeRequest()                                       // /step1：种下 guard
             assertEquals("guard=g1", server.takeRequest().getHeader("Cookie"))  // /search 回带
+        }
+    }
+
+    private fun contentRuntime(fetcher: HttpFetcher = HttpFetcher()) =
+        EmbeddedLegadoRuntime(fetcher, BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
+
+    private fun contentDiagnostics(report: LegadoRuntime.DebugReport): Map<*, *> =
+        (report.data as Map<*, *>)["contentDiagnostics"] as Map<*, *>
+
+    private fun contentSource(server: MockWebServer, extra: Map<String, Any?> = emptyMap()): String = Gson().toJson(mapOf(
+        "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+        "ruleToc" to mapOf("chapterList" to "a"),
+        "ruleContent" to (mapOf("content" to "#content@html") + extra),
+    ))
+
+    @Test fun contentDiagnosticsReportPerPageHttpStatus() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse = when (request.path) {
+                    "/c1" -> MockResponse().setResponseCode(200).setBody("<div id='content'>第一页</div><a class='next' href='/c2'>下一页</a>")
+                    "/c2" -> MockResponse().setResponseCode(500).setBody("<div id='content'>第二页</div>")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val report = contentRuntime().debug(contentSource(server, mapOf("nextContentUrl" to ".next@href")), "--${server.url("c1")}")
+            val diag = contentDiagnostics(report)
+            assertEquals("complete", diag["endReason"])
+            val pages = diag["pages"] as List<*>
+            assertEquals(2, pages.size)
+            val p0 = pages[0] as Map<*, *>
+            assertEquals(1, (p0["page"] as Number).toInt())
+            assertEquals(200, (p0["httpStatus"] as Number).toInt())
+            assertEquals(200, (p0["reportedStatus"] as Number).toInt())
+            assertEquals("http", p0["transport"])
+            assertEquals(false, p0["cacheUsed"])
+            assertEquals(500, ((pages[1] as Map<*, *>)["httpStatus"] as Number).toInt())
+            assertEquals(500, ((pages[1] as Map<*, *>)["reportedStatus"] as Number).toInt())
+        }
+    }
+
+    @Test fun contentDiagnosticsMarksSelfLinkCycleAndStopsRefetch() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse =
+                    MockResponse().setBody("<div id='content'>本页</div><a class='next' href='/loop'>下一页</a>")
+            }
+            server.start()
+            val report = contentRuntime().debug(contentSource(server, mapOf("nextContentUrl" to ".next@href")), "--${server.url("loop")}")
+            val diag = contentDiagnostics(report)
+            assertEquals("cycle", diag["endReason"])
+            assertEquals(1, (diag["pages"] as List<*>).size)
+            assertNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+            assertNull("cycle 后不得再次抓取同一 URL", server.takeRequest(1, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun contentDiagnosticsCapsPaginationAtTenPages() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                var served = 0
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                    served += 1
+                    return MockResponse().setBody("<div id='content'>第${served}页</div><a class='next' href='/p${served + 1}'>下一页</a>")
+                }
+            }
+            server.start()
+            val report = contentRuntime().debug(contentSource(server, mapOf("nextContentUrl" to ".next@href")), "--${server.url("p1")}")
+            val diag = contentDiagnostics(report)
+            assertEquals("page_limit", diag["endReason"])
+            assertEquals(10, (diag["pages"] as List<*>).size)
+            repeat(10) { assertNotNull(server.takeRequest(5, TimeUnit.SECONDS)) }
+            assertNull("10 页上限后不得再抓取", server.takeRequest(1, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun contentDiagnosticsCompleteWhenTenthPageHasNoNext() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                var served = 0
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                    served += 1
+                    val link = if (served < 10) "<a class='next' href='/p${served + 1}'>下一页</a>" else ""
+                    return MockResponse().setBody("<div id='content'>第${served}页</div>$link")
+                }
+            }
+            server.start()
+            val report = contentRuntime().debug(contentSource(server, mapOf("nextContentUrl" to ".next@href")), "--${server.url("p1")}")
+            val diag = contentDiagnostics(report)
+            assertEquals("complete", diag["endReason"])
+            assertEquals(10, (diag["pages"] as List<*>).size)
+        }
+    }
+
+    @Test fun contentDiagnosticsMarksNextChapterTermination() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse = when (request.path) {
+                    "/book/1.html" -> MockResponse().setBody("<div id='content'>第一章</div><a href='/book/2.html'>下一章</a>")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val report = contentRuntime().debug(contentSource(server, mapOf("nextContentUrl" to "text.下一章@href")), "--${server.url("book/1.html")}")
+            val diag = contentDiagnostics(report)
+            assertEquals("next_chapter", diag["endReason"])
+            assertEquals(1, (diag["pages"] as List<*>).size)
+            assertNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+            assertNull(server.takeRequest(1, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun contentDiagnosticsCacheFetchReportsOnlyReportedCode() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val cacheFetch: suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult = { req ->
+                HttpFetcher.FetchResult(500, req.url.orEmpty(), emptyMap(), "<div id='content'>缓存页</div>", 0)
+            }
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "loginCheckJs" to "result.body();result",
+                "ruleToc" to mapOf("chapterList" to "a"),
+                "ruleContent" to mapOf("content" to "#content@html"),
+            ))
+            // cacheFetch 返回值不透明：loginCheckJs/bodyJs 均不得影响已记录的 reported 500
+            val report = contentRuntime().debug(source, "--${server.url("c1")},{\"bodyJs\":\"'改写后正文'\"}", cacheFetch)
+            val diag = contentDiagnostics(report)
+            val pages = diag["pages"] as List<*>
+            assertEquals(1, pages.size)
+            val p0 = pages[0] as Map<*, *>
+            assertNull("cacheFetch 结果拿不到真实 raw code", p0["httpStatus"])
+            assertEquals(500, (p0["reportedStatus"] as Number).toInt())
+            assertEquals("cache_fetch", p0["transport"])
+            assertNull("cacheUsed 未知，不得推断命中", p0["cacheUsed"])
+        }
+    }
+
+    @Test fun contentDiagnosticsCacheFetchMissInternallyNetworkingStillOpaque() = runBlocking {
+        // 回调内部真实联网（miss 后回源）：runtime 侧只能看到 transport=cache_fetch，不得误标命中或 http
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("<div id='content'>miss回源页</div>"))
+            server.start()
+            val inner = HttpFetcher()
+            val cacheFetch: suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult = { req -> inner.fetch(req) }
+            val report = contentRuntime().debug(contentSource(server), "--${server.url("c1")}", cacheFetch)
+            server.takeRequest(5, TimeUnit.SECONDS)
+            val p0 = (contentDiagnostics(report)["pages"] as List<*>)[0] as Map<*, *>
+            assertNull(p0["httpStatus"])
+            assertEquals(200, (p0["reportedStatus"] as Number).toInt())
+            assertEquals("cache_fetch", p0["transport"])
+            assertNull(p0["cacheUsed"])
+        }
+    }
+
+    @Test fun contentDiagnosticsCarriesNoSecretsOrFreeformText() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("<div id='content'>正文 topsecret-token</div>"))
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "header" to "{\"Cookie\":\"session=topsecret-token\",\"X-Auth\":\"topsecret-token\"}",
+                "ruleToc" to mapOf("chapterList" to "a"),
+                "ruleContent" to mapOf("content" to "#content@html"),
+            ))
+            val report = contentRuntime().debug(source, "--${server.url("c1?token=topsecret-token")}")
+            server.takeRequest(5, TimeUnit.SECONDS)
+            val diag = contentDiagnostics(report)
+            assertEquals(setOf("endReason", "pages"), diag.keys)
+            val pages = diag["pages"] as List<*>
+            val p0 = pages[0] as Map<*, *>
+            assertEquals(setOf("page", "httpStatus", "reportedStatus", "transport", "cacheUsed"), p0.keys)
+            val serialized = Gson().toJson(diag)
+            listOf("topsecret-token", "session", server.url("/").toString().removeSuffix("/"), "Cookie").forEach { secret ->
+                assertTrue("contentDiagnostics 不得包含 $secret", !serialized.contains(secret))
+            }
+            // 旧显式 debug 字段仍按契约存在
+            val data = report.data as Map<*, *>
+            assertTrue(data.containsKey("content") && data.containsKey("contentTotalChars"))
         }
     }
 }

@@ -193,7 +193,7 @@ for (var i = 0; i < bytes.length; i++) {
 return "" + new Packages.java.lang.String(bytes, "UTF-8");
 ```
 
-> `java.bytesToStr` 也可在沙箱用，但真实书源仅 2/26861 在用、官方 App 未验证；`new java.lang.String(...)` 不存在；`String(byte[])` 直转是数组 toString。
+> `java.bytesToStr` 也可在沙箱用，但重建前语料仅 2/26861 在用、官方 App 未验证；`new java.lang.String(...)` 不存在；`String(byte[])` 直转是数组 toString。
 
 ---
 

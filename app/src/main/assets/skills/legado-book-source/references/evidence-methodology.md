@@ -35,7 +35,7 @@
 
 书源场景把这条原则拆成两层：**读规则/读代码是静态，`debug_source`/`check_source`/`eval_js` 是运行**；而**沙箱运行不等于官方 App 运行**。以下边界全部按 unknown 处理，不许外推：
 
-- **`loginCheckJs`**：官方 App 在每次请求后执行；Studio 沙箱不执行（`EmbeddedLegadoRuntime` 无调用点）。沙箱过盾成功不能推出成品源过盾逻辑可用（`verification.md`、`troubleshoot.md` §4）。
+- **`loginCheckJs`**：工坊阶段抓取在收到响应后、`bodyJs` 之前执行该钩子，独立 `eval_js` 不自动执行，JS 内部二次请求也不能假定再次触发。工坊桥接行为和验证中心交互不代表目标阅读版本的实现；沙箱过盾成功不能推出成品源过盾逻辑可用（`verification.md`、`troubleshoot.md` §4）。
 - **`java.getElement(s)`、部分 `java.lang.*`、`headerMap`**：沙箱未实现/不注入，规则在沙箱跑通≠官方 App 能跑（`js-api.md`「明确不可用」清单）；反向同理，`java.bytesToStr` 是沙箱专有、官方未验证。
 - **list 型 `result` 的 JS 行为**：`content-rules.md` 注明"真实 App 实测"是清单项——`nextContentUrl`/`nextTocUrl` 的 `<js>` 在沙箱可跑，但 list→String 转换的边界只能到官方 App 验证。
 - **外部 jsLib**：沙箱不加载 `http(s)` 形式的 `jsLib`，只在 `lines` 留诊断。引用外链库的源，沙箱内的 JS 执行证据不覆盖库函数本体。
@@ -53,7 +53,7 @@
 | 验证码/JS 挑战/CF 盾后的真实页面结构 | 人工过盾（`browser_verify`）后的 `fetch_page` 快照 |
 | 登录墙/付费章节的正文规则 | 用户账号态 Cookie（`set_cookie`/`apply_webview_cookies`）或用户实测 |
 | WASM/字体反爬的 gid→汉字映射 | 字形轮廓比对（`queryTTF`/`replaceFont`），`decodeWoff2` 的码点→gid 不构成映射 |
-| 沙箱不支持的钩子与 API（loginCheckJs、getElement、外部 jsLib、transformed glyf 的 woff2） | 官方阅读 App 真机实测，或改写方案 |
+| 工坊未覆盖的 API／输入形式（如 getElement、外部 jsLib、transformed glyf 的 woff2）及与目标版本不同的钩子行为 | 对照实际支持清单，在目标阅读版本验证或改写 |
 | 某阶段站点根本没有（无搜索、无发现） | 标"不支持"，**不是**失败也不是通过 |
 | `verdict.summary=unverified`（任何阶段没跑出可判定证据） | 具体入口重跑；报告"未判定"而不是脑补 |
 | 环境故障（MCP 断连、网络超时） | 恢复环境后重跑；期间该阶段证据状态记 unknown，不当规则故障改规则 |

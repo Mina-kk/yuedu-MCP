@@ -44,7 +44,7 @@ class McpCompactToolsContractTest {
     private val fullTools = listOf(
         Tool(
             name = "match_sources",
-            description = "在内置26861书源语料中按域名/名称查现成书源与模板族。做书源前先查",
+            description = "在内置书源语料中按域名/名称查现成书源与模板族。做书源前先查",
             inputSchema = schema(
                 mapOf("query" to "域名、URL或站点名称关键词", "limit" to "1..20，默认10"),
                 listOf("query"),

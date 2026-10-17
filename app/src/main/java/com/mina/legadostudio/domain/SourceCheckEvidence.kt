@@ -3,16 +3,14 @@ package com.mina.legadostudio.domain
 import com.mina.legadostudio.runtime.LegadoRuntime
 
 /**
- * 把 LegadoRuntime.DebugReport 的 data/lines（或其 JSON 序列化形态）变成结构化可用性证据：
- * HTTP 200 ≠ 可用——搜索必须真的产出可访问条目，目录必须有 >0 章节，正文必须有真实内容。
- * 全部由已落地的 DebugReport 字段判定，不猜页面。
+ * 把 LegadoRuntime.DebugReport 的 data/lines（或其 JSON 序列化形态）变成结构化样本检查证据。
+ * HTTP 成功、规则有输出与样本通过分开判断；不证明全文完整、解密语义或目标阅读版本兼容。
  *
  * 判定口径要点：
  * - 搜索看「首个可用项」（name+bookUrl 均非空），不是列表首项——首项为空、后项有效不算失败。
  * - 详情对文本源要求 name 与 tocUrl 同时非空（缺一不足以推进目录）；非文本源任一非空即可。
- * - 正文对文本源要求 contentTotalChars>0 且样本不是登录/付费拦截页；非文本源（音频/图片/文件/视频）
- *   不拿文字字数硬判，只接受「抓取侧二进制资源记录」或「正文规则直出的纯资源 URL」两类证据，
- *   其他情况如实标 media_unverified（调用方据此封顶 partial，不给 full）。
+ * - 正文拦截已知非成功状态、不完整分页、明确提示和整页 HTML；缺失观测不补成成功。
+ * - 非文本源不拿文字字数硬判，只接受二进制资源记录或纯资源 URL；否则标 media_unverified。
  * - 序列化路径：check_source 结果经 Gson roundtrip 后阶段值是 {type,entry,lines,data} 形 Map，
  *   这里会识别并重建为 DebugReport 再判定（不是只找 error 字段——否则真实通过的报告会被误判失败）。
  *   无法识别的任意 Map（无 error/lines/data/evidence 结构）不算「已跑」的证据：ran=false，
@@ -30,7 +28,7 @@ object SourceCheckEvidence {
         val ok: Boolean,
         /** 失败/未跑原因（面向用户的可读说明）；ok 时为 null。 */
         val reason: String? = null,
-        /** 结构化分类：network / verification / captcha / config / empty / media_unverified / not_run / unrecognized / unknown；ok 时 null。 */
+        /** 结构化分类：network / verification / captcha / config / empty / media_unverified / content_unverified / not_run / unrecognized / unknown；ok 时 null。 */
         val category: String? = null,
         /** 关键观测值（搜索条数、章节数、正文字数…），供 filter / 调用方写理由。 */
         val facts: Map<String, Any?> = emptyMap(),
@@ -165,18 +163,49 @@ object SourceCheckEvidence {
                 val content = map?.get("content")?.toString().orEmpty()
                 val mergedBefore = map?.get("mergedBeforeReplace")?.toString().orEmpty()
                 val binaryNote = lines.any { it.contains("二进制资源") || it.contains("rawBytes") || it.contains("已按当前书源类型") }
-                val facts = mapOf(
+                // 抓取侧诊断（runtime 契约 data.contentDiagnostics）：endReason + 逐页真实 HTTP 状态。
+                // 旧报告无此字段 → 仅按「第N页 HTTP code」行回退，不猜分页完整性。
+                val diag = map?.get("contentDiagnostics") as? Map<*, *>
+                val endReason = diag?.get("endReason")?.toString()?.takeIf { it in CONTENT_END_REASONS }
+                val pageDiags = (diag?.get("pages") as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+                // raw=httpStatus（直连真实码；webview/cache_fetch 不可知为 null）；reported=回调上报告（cache_fetch 伪码、非实际观测）
+                val rawStatus = pageDiags.mapNotNull { (it["httpStatus"] as? Number)?.toInt() }
+                val reportedStatus = pageDiags.mapNotNull { (it["reportedStatus"] as? Number)?.toInt() }
+                // 回退仅在完全无诊断时看「第N页 HTTP code」行；diag 存在即不回退（缺失不补 200）
+                val lineStatus = if (diag != null) emptyList() else lines.mapNotNull { CONTENT_PAGE_HTTP.find(it)?.groupValues?.get(1)?.toIntOrNull() }
+                val non2xx = (rawStatus + lineStatus + reportedStatus).firstOrNull { it !in 200..299 }
+                val observedPages = if (diag != null) pageDiags.size else lineStatus.size
+                val endIncomplete = endReason == "cycle" || endReason == "page_limit"
+                val fallbackHit = fallbackMarker(content)
+                val gateHit = gateMarker(content)
+                val wholeHtml = looksLikeWholeHtml(content)
+                val facts = mutableMapOf<String, Any?>(
                     "contentTotalChars" to chars, "pages" to pages,
                     "mergedTotalChars" to (map?.get("mergedTotalChars") as? Number)?.toInt(),
                     "binaryResource" to binaryNote,
+                    "diagnosticsAvailable" to (diag != null),
+                    "pagesObserved" to observedPages,
+                    "pagesEndReason" to endReason,
+                    "httpStatusMin" to rawStatus.minOrNull(),
+                    "httpStatusMax" to rawStatus.maxOrNull(),
+                    "reportedStatusMin" to (reportedStatus + lineStatus).minOrNull(),
+                    "reportedStatusMax" to (reportedStatus + lineStatus).maxOrNull(),
                 )
+                fun failed(reason: String, category: String) = StageEvidence(stage, true, false, reason, category, facts)
                 when {
                     map == null -> StageEvidence(stage, true, false, "DebugReport.data 不是正文结构（实际 ${r.data?.javaClass?.simpleName ?: "null"}）", "unknown", facts)
-                    // 拦截页特征先于一切：chars>0 的登录/付费页不能虚报「正文可用」（文本/非文本同口径）
-                    looksLikeGatePage(content, mergedBefore) ->
-                        StageEvidence(stage, true, false, "正文样本像登录/付费/拦截页（${gateMarker(content + mergedBefore)}），不能算正文可用", "empty", facts)
+                    non2xx != null ->
+                        failed("正文抓取返回非成功状态：无法确认正文可用", "network")
+                    endIncomplete ->
+                        failed("正文分页未正常终止（endReason=$endReason）：抓取样本不完整，无法确认正文可用", "content_unverified")
+                    fallbackHit != null ->
+                        failed("正文整段匹配已知兜底/加载提示（$fallbackHit），无法确认正文可用", "content_unverified")
+                    wholeHtml ->
+                        failed("正文样本保留整页 HTML 结构（doctype/html 根），无法确认正文可用", "content_unverified")
+                    gateHit != null ->
+                        failed("正文样本是登录/付费拦截提示（$gateHit），无法确认正文可用", "empty")
                     sourceType <= 0 && chars <= 0 ->
-                        StageEvidence(stage, true, false, "正文 0 字符：content 规则未命中或页面为图片/付费页", "empty", facts)
+                        failed("正文 0 字符：content 规则未命中或页面为图片/付费页", "empty")
                     sourceType <= 0 ->
                         StageEvidence(stage, true, true, facts = facts)
                     // 非文本源（音频/图片/文件/视频）：不拿文字字数硬判，且宁缺毋滥。
@@ -204,17 +233,60 @@ object SourceCheckEvidence {
         return tokens.isNotEmpty() && tokens.all { it.startsWith("http://") || it.startsWith("https://") }
     }
 
-    /** 登录/付费/验证码拦截页特征：chars>0 的文本页不能因此虚报「正文可用」。 */
-    private fun looksLikeGatePage(content: String, merged: String): Boolean = gateMarker(content + merged) != null
+    /** 正文页 HTTP 状态回退行：「第N页 HTTP code」。 */
+    private val CONTENT_PAGE_HTTP = Regex("第\\d+页 HTTP (\\d+)")
 
-    private fun gateMarker(text: String): String? {
-        if (text.isBlank()) return null
-        val markers = listOf(
-            "请先登录", "登录后查看", "需要登录", "vip专享", "付费章节", "本章为付费",
-            "请购买", "订阅本章", "充值", "验证码", "人机验证", "access denied", "请登录",
-        )
-        val lower = text.lowercase()
-        return markers.firstOrNull { lower.contains(it.lowercase()) }
+    private val CONTENT_END_REASONS = setOf("complete", "next_chapter", "cycle", "page_limit")
+
+    private fun normalizeContent(text: String): String =
+        text.lowercase().replace(Regex("[\\s ]+"), "").trim()
+
+    /** 简单 HTML 片段剥标签取文本；非 HTML 原样。 */
+    private fun bodyText(content: String): String = runCatching {
+        if (content.contains('<')) org.jsoup.Jsoup.parseBodyFragment(content).body()?.text() ?: content else content
+    }.getOrDefault(content)
+
+    /**
+     * 固定兜底/加载/解密提示：归一化后整段等于「核心短语」或「核心+有限尾缀/标点」。
+     * 完整匹配，不含词即失败。
+     */
+    private val FALLBACK_CORES = listOf("获取失败", "解密失败", "加载失败", "加载中", "内容正在加载", "内容正在载入")
+    private val FALLBACK_TAILS = listOf(
+        "请重试", "请稍后重试", "请稍候", "请稍后", "请刷新", "请刷新重试",
+    )
+
+    internal fun fallbackMarker(content: String): String? {
+        val norm = normalizeContent(bodyText(content)).trimEnd('.', '。', '…', '~', '！', '!', '？', '?', '，', ',', '、')
+        if (norm.isEmpty()) return null
+        return FALLBACK_CORES.firstOrNull { core ->
+            if (!norm.startsWith(core)) return@firstOrNull false
+            val tail = norm.removePrefix(core).trimStart(',', '，', '、', ' ', ' ').trimEnd('.', '。', '…', '~', '！', '!', '？', '?', '，', ',', '、')
+            tail.isEmpty() || FALLBACK_TAILS.any { tail == it }
+        }
+    }
+
+    private fun looksLikeWholeHtml(content: String): Boolean {
+        var root = content.trimStart().removePrefix("\uFEFF").trimStart()
+        while (root.startsWith("<!--")) root = root.substringAfter("-->", "").trimStart()
+        return Regex("^(?:<!doctype\\s+html(?=[\\s>])|<html(?=[\\s>/]))", RegexOption.IGNORE_CASE).containsMatchIn(root)
+    }
+
+    /** 登录/付费/验证拦截提示：归一化整段==明确提示短语或「短语+有限尾缀」；不看 merged、不含词判、不看行。 */
+    private val GATE_CORES = listOf(
+        "请先登录", "登录后查看", "需要登录", "请登录", "请先注册", "请输入验证码",
+        "请完成人机验证", "accessdenied", "vip专享", "付费章节", "本章为付费", "请购买",
+        "订阅本章", "请先登录后查看本章内容", "开通vip", "开通会员", "本章需购买",
+    )
+    private val GATE_TAILS = listOf("后查看", "后可查看", "后继续阅读", "后阅读", "后可阅读", "后查看本章内容", "查看本章内容")
+
+    private fun gateMarker(content: String): String? {
+        if (content.isBlank()) return null
+        val norm = normalizeContent(bodyText(content)).trimEnd('.', '。', '…', '~', '！', '!', '？', '?', '，', ',')
+        return GATE_CORES.firstOrNull { core ->
+            if (!norm.startsWith(core)) return@firstOrNull false
+            val tail = norm.removePrefix(core).trimStart(',', '，', '、').trimEnd('.', '。', '…', '~', '！', '!', '？', '?', '，', ',')
+            tail.isEmpty() || GATE_TAILS.any { tail == it }
+        }
     }
 
     /** CheckSourceRunner 把异常塞成 {error=...} 时，按错误文本分类；VerificationRequiredException/JsChallenge 单独归类。 */

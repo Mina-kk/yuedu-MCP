@@ -2,6 +2,7 @@ package com.mina.legadostudio.mcp
 
 import java.net.InetAddress
 import java.net.NetworkInterface
+import java.net.URLDecoder
 
 object McpAccess {
     const val PATH = "/mcp"
@@ -25,6 +26,34 @@ object McpAccess {
 
     fun lanEndpoints(port: Int): List<String> =
         localAddresses().mapNotNull { it.hostAddress }.map { "http://$it:$port$PATH" }
+
+    /**
+     * 客户端接入地址的统一模式变换：精简模式把 compact query 规范为 `compact=1`，
+     * 标准模式移除所有 compact 参数；其余 query 参数与 fragment 原样保留，重复调用幂等。
+     * 仅作用于给客户端复制的地址，服务端 endpoint 与健康检查路径不受影响。
+     */
+    fun connectionUrl(url: String, compact: Boolean): String {
+        val fragmentIndex = url.indexOf('#')
+        val fragment = if (fragmentIndex >= 0) url.substring(fragmentIndex) else ""
+        val base = if (fragmentIndex >= 0) url.substring(0, fragmentIndex) else url
+        val queryIndex = base.indexOf('?')
+        val path = if (queryIndex >= 0) base.substring(0, queryIndex) else base
+        val kept = if (queryIndex >= 0) {
+            base.substring(queryIndex + 1).split('&')
+                .filter { it.isNotEmpty() && queryKey(it) != McpToolCompactor.QUERY_PARAM }
+        } else emptyList()
+        val params = if (compact) kept + "${McpToolCompactor.QUERY_PARAM}=${McpToolCompactor.QUERY_VALUE}" else kept
+        return buildString {
+            append(path)
+            if (params.isNotEmpty()) params.joinTo(this, "&", prefix = "?")
+            append(fragment)
+        }
+    }
+
+    private fun queryKey(param: String): String {
+        val raw = param.substringBefore('=')
+        return runCatching { URLDecoder.decode(raw, Charsets.UTF_8.name()) }.getOrDefault(raw)
+    }
 
     // MCP 规范（Streamable HTTP）的鉴权方式是标准 Authorization: Bearer 头。
     fun bearerTokenValue(token: String) = "Bearer $token"

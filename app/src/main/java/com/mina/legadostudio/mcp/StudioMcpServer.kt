@@ -173,7 +173,7 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
 
     /** 语料命中与知识/参考读取工具：做源前先 match_sources，可大幅减少抓网页与试错次数。 */
     private fun registerCorpusTools(server: Server) {
-        server.tool("match_sources", "在内置26861书源语料中按域名/名称查现成书源与模板族。做书源前先查", schema(mapOf("query" to "域名、URL或站点名称关键词", "limit" to "1..20，默认10"), listOf("query")), toolAnnotations = readOnly) { req ->
+        server.tool("match_sources", "在内置书源语料中按域名/名称查现成书源与模板族。做书源前先查", schema(mapOf("query" to "域名、URL或站点名称关键词", "limit" to "1..20，默认10"), listOf("query")), toolAnnotations = readOnly) { req ->
             runCatching {
                 val query = req.arguments.str("query") ?: error("query 不能为空")
                 val limit = (req.arguments.int("limit") ?: 10).coerceIn(1, 20)

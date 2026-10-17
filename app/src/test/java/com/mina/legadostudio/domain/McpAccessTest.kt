@@ -46,4 +46,70 @@ class McpAccessTest {
         val json = McpAccess.clientConfigJson("http://x/mcp", "a\"b\\c", true)
         assertTrue(json.contains("\"Authorization\": \"Bearer a\\\"b\\\\c\""))
     }
+    @Test fun connectionUrlStandardKeepsUrlUnchanged() {
+        val url = "http://127.0.0.1:58823/mcp"
+        assertEquals(url, McpAccess.connectionUrl(url, compact = false))
+        assertEquals(url, McpAccess.connectionUrl(url, compact = false))
+    }
+    @Test fun connectionUrlCompactAppendsParam() {
+        assertEquals(
+            "http://127.0.0.1:58823/mcp?compact=1",
+            McpAccess.connectionUrl("http://127.0.0.1:58823/mcp", compact = true),
+        )
+    }
+    @Test fun connectionUrlCompactKeepsExistingQueryAndFragment() {
+        assertEquals(
+            "http://192.168.1.8:58823/mcp?foo=bar&x=1&compact=1#frag",
+            McpAccess.connectionUrl("http://192.168.1.8:58823/mcp?foo=bar&x=1#frag", compact = true),
+        )
+    }
+    @Test fun connectionUrlCompactNormalizesExistingCompactParam() {
+        assertEquals(
+            "http://127.0.0.1:58823/mcp?compact=1",
+            McpAccess.connectionUrl("http://127.0.0.1:58823/mcp?compact=1", compact = true),
+        )
+        assertEquals(
+            "http://127.0.0.1:58823/mcp?compact=1",
+            McpAccess.connectionUrl("http://127.0.0.1:58823/mcp?compact=0&compact=1", compact = true),
+        )
+    }
+    @Test fun connectionUrlCompactIsIdempotent() {
+        val once = McpAccess.connectionUrl("http://127.0.0.1:58823/mcp?a=b", compact = true)
+        assertEquals(once, McpAccess.connectionUrl(once, compact = true))
+    }
+    @Test fun connectionUrlStandardStripsCompactParam() {
+        assertEquals(
+            "http://127.0.0.1:58823/mcp?foo=bar#frag",
+            McpAccess.connectionUrl("http://127.0.0.1:58823/mcp?compact=1&foo=bar#frag", compact = false),
+        )
+        assertEquals(
+            "http://127.0.0.1:58823/mcp",
+            McpAccess.connectionUrl("http://127.0.0.1:58823/mcp?compact=1", compact = false),
+        )
+    }
+    @Test fun connectionUrlRoundTripSwitchingModes() {
+        val base = "http://192.168.1.8:58823/mcp?foo=bar"
+        val compact = McpAccess.connectionUrl(base, compact = true)
+        assertEquals("http://192.168.1.8:58823/mcp?foo=bar&compact=1", compact)
+        assertEquals(base, McpAccess.connectionUrl(compact, compact = false))
+    }
+    @Test fun connectionUrlTreatsPercentEncodedCompactKeyAsCompact() {
+        assertEquals(
+            "http://127.0.0.1:58823/mcp?compact=1",
+            McpAccess.connectionUrl("http://127.0.0.1:58823/mcp?%63ompact=1", compact = true),
+        )
+        assertEquals(
+            "http://127.0.0.1:58823/mcp",
+            McpAccess.connectionUrl("http://127.0.0.1:58823/mcp?%63ompact=1", compact = false),
+        )
+    }
+    @Test fun clientConfigJsonUrlMatchesConnectionUrlModes() {
+        val endpoint = "http://127.0.0.1:58823/mcp"
+        val compactUrl = McpAccess.connectionUrl(endpoint, compact = true)
+        val compactJson = McpAccess.clientConfigJson(compactUrl, "tk", true)
+        assertTrue(compactJson.contains("\"url\": \"$compactUrl\""))
+        val standardJson = McpAccess.clientConfigJson(McpAccess.connectionUrl(endpoint, compact = false), "tk", true)
+        assertTrue(standardJson.contains("\"url\": \"$endpoint\""))
+        assertTrue(!standardJson.contains("compact"))
+    }
 }

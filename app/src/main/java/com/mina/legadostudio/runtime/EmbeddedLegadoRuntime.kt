@@ -213,6 +213,8 @@ class EmbeddedLegadoRuntime(
         val jsNotes = mutableListOf<String>()
         var current: String? = value
         val visited = hashSetOf<String>()
+        var endReason = "complete"
+        val pageDiags = mutableListOf<Map<String, Any?>>()
         // 官方 chapter 对象：--章节目录入口时 chapter.url 即目标章节地址；bookUrl 共享本次 debug 的 book
         val chapter = ChapterJsApi().apply {
             url = value
@@ -221,8 +223,10 @@ class EmbeddedLegadoRuntime(
         }
         for (page in 0 until 10) {
             val target = current ?: break
-            if (!visited.add(target)) break
-            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)
+            if (!visited.add(target)) { endReason = "cycle"; break }
+            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add) { rawCode, reportedCode, transport, cacheUsed ->
+                pageDiags += mapOf("page" to page + 1, "httpStatus" to rawCode, "reportedStatus" to reportedCode, "transport" to transport, "cacheUsed" to cacheUsed)
+            }
             val bindings = mapOf("source" to state, "book" to book, "chapter" to chapter, "url" to response.finalUrl, "title" to "", "nextChapterUrl" to "") + jsLibBindings
             val rawContent = extract(response.body, contentRule, response.finalUrl, bindings, unescape = false, origin = origin).orEmpty()
             pages += rawContent
@@ -232,9 +236,11 @@ class EmbeddedLegadoRuntime(
                 ?.takeIf { it.isNotBlank() }?.let { resolve(response.finalUrl, it) }
             current = if (nextUrl != null && ContentPagination.isNextChapter(target, nextUrl, nextRule.orEmpty())) {
                 lines += "已忽略 nextContentUrl：指向下一章而不是下一页"
+                endReason = "next_chapter"
                 null
             } else nextUrl
         }
+        if (pages.size == 10 && current != null) endReason = "page_limit"
         val merged = pages.joinToString("\n")
         val replaceRule = rules.text("replaceRegex")
         val cleaned = if (replaceRule.isNullOrBlank()) merged else extract(merged, replaceRule, value, mapOf("source" to state, "book" to book, "chapter" to chapter) + jsLibBindings, unescape = true, origin = origin) ?: ""
@@ -250,6 +256,7 @@ class EmbeddedLegadoRuntime(
         return LegadoRuntime.DebugReport("正文", value, listOfNotNull(jsLibNote) + lines + "合并正文 ${cleaned.length} 字符" + jsNotes, mapOf(
             "pages" to pages.size, "content" to cleaned.take(4000), "contentTotalChars" to cleaned.length,
             "mergedBeforeReplace" to merged.take(800), "mergedTotalChars" to merged.length,
+            "contentDiagnostics" to mapOf("endReason" to endReason, "pages" to pageDiags.toList()),
         ), contentLength = cleaned.length, contentPreview = preview)
     }
 
@@ -297,6 +304,7 @@ class EmbeddedLegadoRuntime(
         loginCheckJs: String? = null,
         /** JS 内日志（java.log/toast/桩提示）汇出处；null = 丢弃。 */
         jsLog: ((String) -> Unit)? = null,
+        observer: ((rawCode: Int?, reportedCode: Int?, transport: String, cacheUsed: Boolean?) -> Unit)? = null,
     ): HttpFetcher.FetchResult {
         val parsed = LegadoUrlOptions.parse(value)
         val absolute = resolve(base, parsed.url)
@@ -310,6 +318,7 @@ class EmbeddedLegadoRuntime(
                 httpLogs?.recordAsync(HttpLogRecorder.Draft(method = m, url = reqUrl, statusCode = 0, requestHeaders = headers,
                     sourceAnchor = requestOrigin.sourceAnchor, contextId = requestOrigin.contextId, originKind = "webview_resource"))
             }
+            observer?.invoke(null, null, "webview", false)
             httpLogs?.record(HttpLogRecorder.Draft(method = "WEBVIEW", url = absolute, finalUrl = loaded.finalUrl, statusCode = 200, durationMs = loaded.elapsedMs, requestHeaders = sourceHeaders + parsed.headers, responseBody = loaded.html, sourceAnchor = requestOrigin.sourceAnchor, contextId = requestOrigin.contextId, originKind = requestOrigin.originKind ?: "webview"))
             if (fetcher.looksLikeVerification(403, loaded.finalUrl, loaded.html)) {
                 throw com.mina.legadostudio.verification.VerificationRequiredException(
@@ -322,10 +331,12 @@ class EmbeddedLegadoRuntime(
         } else {
             val request = HttpFetcher.FetchRequest(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset, maxBodyBytes = MAX_BODY_BYTES, origin = requestOrigin, useCookieJar = useCookieJar)
             // 200 JS 挑战页必须有结构化提示：cacheFetch 或直接抓取都不许把挑战页当业务数据交给规则解析
-            val cached = cacheFetch?.invoke(request)
-            fetcher.requireNoJsChallenge(
-                cached ?: fetchAbsolute(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset, requestOrigin, useCookieJar)
-            )
+            val result = cacheFetch?.invoke(request)
+                ?: fetchAbsolute(absolute, parsed.method, sourceHeaders + parsed.headers, parsed.body, parsed.charset, requestOrigin, useCookieJar)
+            // cacheFetch 返回值不透明（可能内部 miss 后走 HTTP/WebView）：只记调用方可见的 reportedCode，不猜 raw/命中
+            if (cacheFetch != null) observer?.invoke(null, result.code, "cache_fetch", null)
+            else observer?.invoke(result.code, result.code, "http", false)
+            fetcher.requireNoJsChallenge(result)
         }
         // 对齐真机 AnalyzeUrl：每次拿到响应后先执行书源 loginCheckJs（纯 JS，result 为响应对象），
         // JS 可改写/接管响应；返回值按 StrResponse 语义接管（字符串替换 body，对象取 body()/headers()）。

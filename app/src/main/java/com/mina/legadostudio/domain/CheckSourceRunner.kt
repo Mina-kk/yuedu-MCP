@@ -246,7 +246,7 @@ object CheckSourceRunner {
             put("validationOk", validationOk)
             put("validationIssues", validation?.issues?.size ?: -1)
             put("note", when {
-                summary == "full" -> "静态校验通过且搜索/详情/目录/正文全部有可用证据（外部传入的 checkResults 属未核验来源，仅供参考）"
+                summary == "full" -> "静态校验通过且搜索/详情/目录/正文样本检查均可用（样本级证据，不保证全文/解密语义；外部传入的 checkResults 属未核验来源，仅供参考）"
                 summary == "partial" && ok == 4 && sourceType > 0 && validationOk ->
                     "非文本源（type=$sourceType）四段均有记录，但音视频/图片/文件正文无文字级可用性证据，封顶 partial"
                 summary == "partial" && ok == 4 -> "四段全通但静态校验未通过（${validation?.issues?.size ?: 0} 个 issue），不能声称全链路可用"

@@ -62,6 +62,6 @@
 | MCP 调试期（本 playbook） | 验证中心 + 每域模式 + WebView 抓取通道 |
 | 成品源在官方阅读 App 内运行 | 书源内 `loginCheckJs` + `java.startBrowserAwait`（见 [`troubleshoot.md`](troubleshoot.md) 第 4 节） |
 
-**覆盖范围必须逐链路分清**：`loginCheckJs` 是**写进成品书源、由官方阅读 App 在请求后执行**的钩子；Studio 沙箱的 `debug_source` / `check_source` / `eval_js` **不执行 `loginCheckJs`**（`EmbeddedLegadoRuntime` 无此调用点），不要指望在沙箱里靠它过盾。反过来，验证中心/每域 WebView 模式只存在于工坊调试期，官方阅读 App 没有这套机制——成品在真机出盾时只能靠 `loginCheckJs`/`startBrowserAwait`/URL `webView` 选项自理。因此「调试期过盾」与「成品过盾」是两条链路，都要验证，不能互相代替。
+**覆盖范围必须逐链路分清**：工坊 `debug_source`／`check_source` 的阶段抓取会在取得响应后、`bodyJs` 之前执行书源 `loginCheckJs`；独立 `eval_js` 不自动执行该钩子，JS 内部二次请求也不应假定会再次触发它。验证中心和每域模式是工坊自己的交互机制，不能据此推出成品在目标阅读版本中也能过盾。两边的响应桥接、Cookie 与 WebView 通道可能不同，应分别验证，不能互相代替。
 
 调试通过验证中心过完盾、规则写好后，如果目标站在真实使用中也会频繁出盾，应把 `loginCheckJs` 过盾逻辑写进书源，保证导入阅读 App 后仍能工作。验证码类站点的识别特征与处理见知识库：`search_knowledge("验证码")` → `read_knowledge("knowledge/图文验证码.md")`。

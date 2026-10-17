@@ -1,5 +1,7 @@
 # JS API 参考
 
+> **能力边界**：本文同时包含工坊实际支持清单和原版阅读 API 参考，不能将参考条目全部视为工坊实现。`java` 由工坊的 `StudioJsApi` 桥接；同名方法的参数、返回值、状态和 Android 平台能力仍可能与目标阅读版本不同。制作时以「Studio 沙箱可用 API 清单」为准，导出后需在目标版本验证。
+
 > 阅读内置 htmlunit-core-js（Rhino 分支，ES6 模式）作为 JavaScript 引擎以便于调用 Java 类和方法；`java` 变量指向已被阅读修改，想要调用 `java.*` 下的包，请使用 `Packages.java.*`
 
 > [Rhino 运行时](https://github.com/mozilla/rhino/blob/master/rhino/src/main/java/org/mozilla/javascript/ScriptRuntime.java)懒加载导入的 Java 类和方法
@@ -99,6 +101,8 @@ java.getVerificationCode(imageUrl) // 单次受限 HTTP 拉真实图片（PNG/JP
 
 图片验证码请求拒绝私网入口、DNS/重定向私网以及 HTML/CF 挑战响应，不写入图片日志。403/Cloudflare 时先用本手机验证中心在**原站页面**人工过盾再重试；图片本身不经 WebView，Cookie/通行态跨 HTTP/WebView 通道复用不保证成功。不要反复请求一次性图片 URL；详见 [`verification.md`](verification.md)。
 
+**工坊 POST 编码边界：** 普通 `searchUrl` 模板先对 `{{key}}` 作 UTF-8 表单编码，再解析 `,{...}` 请求选项，因此 body 内的 `{{key}}` 也会编码（空格为 `+`，字面加号为 `%2B`）。`@js:` 使用原始 `key` 变量；其返回选项的 body 与 `java.post` 的 body 按脚本构造值发送，不会自动再编码。需要百分号编码时显式调用 `java.encodeURI(key)`（空格为 `%20`）；JSON 或其他非表单正文应自行构造并设置对应 Content-Type。不要将这几条路径视为相同的自动编码入口，也不要把模板中已编码的值再次编码。
+
 **响应对象方法（`java.connect`/`java.get`/`java.post`/`java.ajaxAll` 元素均返回此对象）：**
 ```js
 code()          // 注意是 code()，不是 status()
@@ -125,8 +129,11 @@ java.sha1Encode(value)
 java.sha256Encode(value)
 java.hexEncodeToString(utf8) / java.hexDecodeToString(hex)
 java.strToBytes(v) / java.strToBytes(v, charset)
-java.bytesToStr(b) / java.bytesToStr(b, charset)   // 沙箱注册，但真实书源仅 2/26861 在用、官方 App 未验证；字节转字符串优先 new Packages.java.lang.String(b, "UTF-8")
-java.createSymmetricCrypto(transformation, key, iv?) // AES/DES 等，key/iv 兼容 String/ByteArray；.decrypt(bytes) / .decryptStr(base64String) / .encrypt(bytes) / .encryptBase64Str(str)；Pkcs7Padding 自动回退 PKCS5
+java.bytesToStr(b) / java.bytesToStr(b, charset)   // 沙箱注册，但重建前语料仅 2/26861 在用、官方 App 未验证；字节转字符串优先 new Packages.java.lang.String(b, "UTF-8")
+java.createSymmetricCrypto(transformation, key, iv?) // key/iv 为 UTF-8 String 或 ByteArray；见下文工坊对称加解密边界
+// 返回对象：decrypt(bytes) / decryptStr(bytes或标准Base64字符串) / encrypt(bytes)
+// encryptBase64(UTF-8字符串或bytes) / encryptHex(UTF-8字符串或bytes)
+// encryptStr(str) 返回 ByteArray；encryptBase64Str(str) 是 encryptBase64(str) 别名；Pkcs7Padding 回退 PKCS5Padding
 java.timeFormat(value) / java.timeFormat(value, format)
 java.htmlFormat(str)
 java.randomUUID()
@@ -449,21 +456,29 @@ java.base64Encode(str: String, flags: Int)
 // Str 转 Bytes
 java.strToBytes(str: String)
 java.strToBytes(str: String, charset: String)
-// Bytes 转 Str（沙箱注册但真实书源仅 2/26861 在用；跨环境书源一律用
+// Bytes 转 Str（沙箱注册但重建前语料仅 2/26861 在用；跨环境书源一律用
 // new Packages.java.lang.String(bytes, "UTF-8")）
 java.bytesToStr(bytes: ByteArray)
 java.bytesToStr(bytes: ByteArray, charset: String)
 ```
 
-**对称加解密（AES/DES，官方 legado SymmetricCrypto 语义）：**
+**工坊对称加解密：**
 ```js
-// transformation 如 "AES/CBC/PKCS5Padding"、"AES/ECB/Pkcs7Padding"（Pkcs7 自动回退 PKCS5）
-// key/iv 兼容 String 与 ByteArray；iv 仅 CBC/CFB/OFB/CTR 需要
+// transformation 示例：AES/CBC/PKCS5Padding、AES/ECB/Pkcs7Padding（Pkcs7 回退 PKCS5Padding）
+// String key/iv 按 UTF-8 取字节；ByteArray 原样使用，不自动识别 Hex 或 Base64
 java.createSymmetricCrypto(transformation: String, key: Any, iv: Any? = null)
-// 返回对象方法：
-//   decrypt(bytes): ByteArray        decryptStr(base64): String
-//   encrypt(bytes): ByteArray        encryptStr(str): ByteArray   encryptBase64Str(str): String
+cipher.decrypt(bytes)         // 原始密文字节 → ByteArray
+cipher.decryptStr(bytes)      // 原始密文字节 → UTF-8 String
+cipher.decryptStr(base64)     // 严格标准 Base64 密文 → UTF-8 String
+cipher.decryptBase64Str(base64) // decryptStr(base64) 别名
+cipher.encrypt(bytes)         // 原始明文字节 → ByteArray
+cipher.encryptStr(str)        // UTF-8 明文 → ByteArray
+cipher.encryptBase64(strOrBytes) // UTF-8 明文或原始字节 → 标准 Base64
+cipher.encryptHex(strOrBytes) // UTF-8 明文或原始字节 → 小写 Hex
+cipher.encryptBase64Str(str)  // encryptBase64(str) 别名
 ```
+
+`decryptStr(String)` 不自动识别 Hex、URL-safe Base64 或其他编码。Hex 密文应先经 `java.hexDecodeToByteArray` 转成字节，再调用 `decrypt` 或 `decryptStr`。未提供 `InputStream`、字符集参数及任意额外参数的通用兼容重载。算法和模式由运行平台的密码提供程序决定，不保证与所有原版阅读版本完全一致。
 
 **Hex：**
 ```js
@@ -516,10 +531,12 @@ readTxtFile(path: String): String
 deleteFile(path: String)
 ```
 
-### JS 加解密类
+### JS 加解密类（原版阅读参考）
 
-> 提供在 JavaScript 环境中快捷调用 crypto 算法的函数，由 [hutool-crypto](https://www.hutool.cn/docs/#/crypto/%E6%A6%82%E8%BF%B0) 实现
-> 由于兼容性问题，hutool-crypto 当前版本为 5.8.22
+> 以下保留原版阅读的 API 参考，不是工坊的完整实现清单。工坊使用 JCE 桥接，未引入 Hutool；实际支持的输入类型、输出和方法以上文「工坊对称加解密」为准。原版阅读的具体行为还取决于目标版本。
+>
+> 原版参考使用 [hutool-crypto](https://www.hutool.cn/docs/#/crypto/%E6%A6%82%E8%BF%B0) 提供 crypto 算法接口。
+> 本参考记录的 hutool-crypto 版本为 5.8.22。
 > 注意：如果输入的参数不是 Utf8String，可先调用 `java.hexDecodeToByteArray` / `java.base64DecodeToByteArray` 转成 ByteArray
 
 **对称加密：**

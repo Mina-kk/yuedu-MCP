@@ -135,6 +135,11 @@ class UiSurfaceContractTest {
         assertTrue(source.contains("clientConfigJson"))
         assertTrue(source.contains("mcpServers"))
         assertTrue(source.contains("lanEndpoints"))
+        assertTrue(source.contains("connectionUrl"))
+        assertTrue(source.contains("saveCompactMode"))
+        assertTrue(source.contains("loadCompactMode"))
+        assertTrue(source.contains("连接模式"))
+        assertTrue(source.contains("精简（省 token）"))
         assertTrue(source.contains("仅复制鉴权头"))
         assertTrue(source.contains("tokenHeaderLine"))
         assertTrue(source.contains("前置条件"))
@@ -148,7 +153,7 @@ class UiSurfaceContractTest {
         assertTrue(source.contains("请求头值"))
         assertTrue(source.contains("bearerTokenValue"))
         assertTrue(source.contains("AUTH_HEADER"))
-        assertTrue(source.contains("配置文件客户端（高级）"))
+        assertTrue(source.contains("配置文件客户端（JSON）"))
         assertFalse(source.contains("X-Studio-Token"))
         assertFalse(source.contains("已保存书源"))
         assertFalse(source.contains("导入至阅读"))
@@ -160,6 +165,33 @@ class UiSurfaceContractTest {
         assertFalse(source.contains("全局请求头"))
         assertFalse(source.contains("MCP 条目"))
         assertFalse(source.contains("启动后显示本机回环链接"))
+    }
+
+    /** 通知栏两个客户端 URL 出口（复制 Endpoint / 常驻通知文本）必须走同一个
+     *  clientEndpoint helper，且 helper 读 compactMode 偏好经 connectionUrl 转换，
+     *  不得绕过 App 内所选标准/精简模式直出原始 endpoint。 */
+    @Test
+    fun mcpServiceNotificationUrlsGoThroughClientEndpointHelper() {
+        val source = listOf(
+            File("src/main/java/com/mina/legadostudio/service/McpService.kt"),
+            File("app/src/main/java/com/mina/legadostudio/service/McpService.kt"),
+        ).first { it.isFile }.readText()
+        fun bodyOf(signature: String): String {
+            val start = source.indexOf(signature)
+            if (start < 0) return ""
+            val end = source.indexOf("\n    private fun ", start + signature.length)
+            return source.substring(start, if (end > start) end else source.length)
+        }
+        val helper = bodyOf("private fun clientEndpoint()")
+        assertTrue("clientEndpoint helper 须存在", helper.isNotEmpty())
+        assertTrue("helper 须读模式偏好", helper.contains("loadCompactMode"))
+        assertTrue("helper 须经 connectionUrl 转换", helper.contains("McpAccess.connectionUrl"))
+        val copyBody = bodyOf("private fun copyEndpoint()")
+        assertTrue("复制 Endpoint 须走 helper", copyBody.contains("clientEndpoint()"))
+        val notifyBody = bodyOf("private fun updateNotification()")
+        assertTrue("通知文本须走 helper", notifyBody.contains("clientEndpoint()"))
+        assertFalse("复制不得直出原始 endpoint", copyBody.contains("endpoints.firstOrNull"))
+        assertFalse("通知不得直出原始 endpoint", notifyBody.contains("endpoints.firstOrNull"))
     }
 
     @Test
@@ -675,6 +707,22 @@ class UiSurfaceContractTest {
             logs.contains("var tab by rememberSaveable { mutableStateOf(LogsTab.OPERATION) }"),
         )
         assertFalse("页签不得回退普通 remember", logs.contains("var tab by remember {"))
+    }
+
+    /** 连接模式契约锁：所有给客户端看的 URL 出口（本机/局域网展示、复制服务器链接、
+     *  JSON 配置、仅复制 URL）必须统一走 McpAccess.connectionUrl，不得让某个出口绕过
+     *  当前所选的标准/精简模式。 */
+    @Test
+    fun mcpScreenAllClientUrlsGoThroughConnectionUrl() {
+        val source = listOf(
+            File("src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt"),
+            File("app/src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue(source.contains("McpAccess.connectionUrl(endpoint, compactMode)"))
+        assertTrue(source.contains("McpAccess.connectionUrl(it, compactMode)"))
+        assertTrue("JSON 配置须用转换后的地址", source.contains("clientConfigJson(localClientUrl"))
+        assertTrue("仅复制 URL 须用转换后的地址", source.contains("copy(\"MCP URL\", shownUrl)"))
+        assertFalse("不得再直接把原始 endpoint 交给客户端 JSON", source.contains("clientConfigJson(endpoint"))
     }
 
     @Test

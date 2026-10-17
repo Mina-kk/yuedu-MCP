@@ -45,6 +45,14 @@ class McpConfigStore(
         }
     }
 
+    /** 客户端接入信息的连接模式偏好（精简 tools/list）。只影响生成给客户端复制的地址，
+     *  与安全配置、令牌和服务运行态无关，改动不触发 epoch/服务重启。 */
+    fun loadCompactMode(): Boolean = prefs.getBoolean("compactMode", false)
+
+    fun saveCompactMode(compact: Boolean) {
+        prefs.edit().putBoolean("compactMode", compact).apply()
+    }
+
     private fun triggerTokenChanged() {
         onTokenChanged?.invoke() ?: runCatching {
             (appContext as? com.mina.legadostudio.StudioApplication)?.contextEpoch?.bump()

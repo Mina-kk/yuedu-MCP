@@ -615,6 +615,43 @@ class McpResponseShapingHttpBenchmarkTest {
         assertEquals(beforeCmp2, b.loaderCalls.get())
     }
 
+    @Test(timeout = 90_000) fun compactAutoExplicit4000RetainsFullSnapshot() = httpBench("/mcp?compact=1") { b ->
+        startSession()
+        val ctx = b.store.create("compact-4000-ctx")
+        val before = b.loaderCalls.get()
+        val first = callChecked(b, 2, "bench_page",
+            """{"url":"https://bench.local/long","contextId":"$ctx","mode":"auto","maxChars":4000}""")
+        assertEquals(before + 1, b.loaderCalls.get())
+        assertEquals(longCjkHtml.take(4000), first.str("body"))
+        val pageId = first.str("pageId")
+        assertTrue("pageId 非空", pageId.isNotBlank())
+        assertEquals(longCjkHtml.length, first.str("totalChars").toInt())
+
+        val firstTail = callChecked(b, 3, "bench_read",
+            """{"contextId":"$ctx","id":"$pageId","offset":4000}""")
+        val firstPage = json.parseToJsonElement(firstTail.text()).jsonObject
+        val tailBody = StringBuilder(firstPage.getValue("body").jsonPrimitive.content)
+        var offset = firstPage.getValue("nextOffset").jsonPrimitive.content.toInt()
+        var hasMore = firstPage.getValue("hasMore").jsonPrimitive.content == "true"
+        var requestId = 4
+        while (hasMore) {
+            assertTrue(offset < longCjkHtml.length)
+            val previousOffset = offset
+            val next = callChecked(b, requestId++, "bench_read",
+                """{"contextId":"$ctx","id":"$pageId","offset":$offset}""")
+            val nextPage = json.parseToJsonElement(next.text()).jsonObject
+            tailBody.append(nextPage.getValue("body").jsonPrimitive.content)
+            offset = nextPage.getValue("nextOffset").jsonPrimitive.content.toInt()
+            hasMore = nextPage.getValue("hasMore").jsonPrimitive.content == "true"
+            assertTrue("nextOffset 必须持续向前", offset > previousOffset)
+            assertTrue(offset <= longCjkHtml.length)
+            assertEquals(before + 1, b.loaderCalls.get())
+        }
+        assertEquals(longCjkHtml.length, offset)
+        assertEquals(longCjkHtml.substring(4000), tailBody.toString())
+        assertEquals(before + 1, b.loaderCalls.get())
+    }
+
     /**
      * compact 下的显式 maxChars 与 preview/reference 缺省均保持旧输出：
      * 显式 0/6000 优先覆盖 compact 的 2000 缺省；preview/reference 无 maxChars 仍 6000。

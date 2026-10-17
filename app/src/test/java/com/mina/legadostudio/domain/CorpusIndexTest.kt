@@ -2,11 +2,16 @@ package com.mina.legadostudio.domain
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import java.io.File
+import java.util.Optional
 
 class CorpusIndexTest {
     private val indexJson = """
@@ -168,5 +173,197 @@ class CorpusIndexTest {
         }
         assertEquals("""{"bookSourceName":"乙阁小说"}""", index.sourceJson(1))
         assertEquals("""{"bookSourceName":"丙漫画"}""", index.sourceJson(2))
+    }
+
+    @Test fun sourceAndFamilyCountReflectRecords() {
+        val index = build()
+        assertEquals(3, index.sourceCount)
+        assertEquals(2, index.familyCount)
+    }
+
+    // ---------- 真实 assets 全库去重验收（global-dedupe-rebuild 语料安装后生效） ----------
+
+    private fun corpusAssetsDir(): File = listOf(
+        File("src/main/assets/corpus"),
+        File("app/src/main/assets/corpus"),
+    ).first { it.isDirectory }
+
+    private class ShardStore(private val dir: File) {
+        private val shardsDir = File(dir, "shards")
+        private val names = shardsDir.listFiles().orEmpty()
+            .filter { it.isFile && it.name.endsWith(".json") }
+            .map { it.name }
+            .toSet()
+        private val cache = java.util.concurrent.ConcurrentHashMap<String, Optional<String>>()
+
+        fun text(fid: String): String? = cache.computeIfAbsent(fid) {
+            val direct = "$fid.json"
+            if (direct in names) {
+                Optional.of(File(shardsDir, direct).readText())
+            } else {
+                val parts = names
+                    .filter { it.startsWith("$fid-") && it.endsWith(".json") }
+                    .mapNotNull { name ->
+                        name.substringAfter("$fid-").removeSuffix(".json").toIntOrNull()?.let { it to name }
+                    }
+                    .sortedBy { it.first }
+                    .map { File(shardsDir, it.second).readText() }
+                Optional.ofNullable(if (parts.isEmpty()) null else mergeShardParts(fid, parts))
+            }
+        }.orElse(null)
+    }
+
+    /** 读真实 index + 最新 provenance，非全库去重构建时清楚失败（等 stage 安装后再跑）。 */
+    private fun mergedCorpusIndex(): Pair<CorpusIndex, JsonObject> {
+        val dir = corpusAssetsDir()
+        val root = JsonParser.parseString(File(dir, "index.json").readText()).asJsonObject
+        val provArray = root.getAsJsonArray("provenance")
+            ?: throw AssertionError("index.json 无 provenance 数组：去重语料尚未安装")
+        require(provArray.size() > 0) { "provenance 为空：去重语料尚未安装" }
+        val prov = provArray.last().asJsonObject
+        assertEquals(
+            "最新 provenance 必须是全库去重重建（global-dedupe-rebuild）；当前语料可能仍是旧的追加式合入",
+            "global-dedupe-rebuild", prov.get("mergePolicy")?.asString,
+        )
+        val store = ShardStore(dir)
+        return CorpusIndex(root.toString()) { fid -> store.text(fid) } to prov
+    }
+
+    @Test fun rebuiltCorpus_countsAndSampledSourcesReadable() = runBlocking {
+        val dir = corpusAssetsDir()
+        val root = JsonParser.parseString(File(dir, "index.json").readText()).asJsonObject
+        val (index, prov) = mergedCorpusIndex()
+        // 计数契约：重建后 rec 就是主语料全集，计数全部动态读取、不硬编码预期条数
+        val selected = prov.get("selectedSources")?.asInt
+        if (selected != null) {
+            assertEquals("provenance.selectedSources 与实际 rec 条数不符", selected, index.sourceCount)
+        }
+        assertEquals("root.n 与 rec 条数不符", root.get("n").asInt, index.sourceCount)
+        assertEquals("familyCount 与 fam 条目数不符", root.getAsJsonObject("fam").size(), index.familyCount)
+        // 全库去重会重编全局 i：旧编号不再稳定，但新编号必须连续覆盖 [0, n)
+        val rec = root.getAsJsonArray("rec")
+        val seen = HashSet<Int>(rec.size() * 2)
+        for (e in rec) {
+            val i = e.asJsonObject.get("i").asInt
+            assertTrue("rec.i=$i 越界 [0, ${index.sourceCount})", i in 0 until index.sourceCount)
+            assertTrue("rec.i=$i 重复", seen.add(i))
+        }
+        assertEquals("rec.i 未连续覆盖 [0, n)", index.sourceCount, seen.size)
+        // 跨首/中/末均匀抽 100 条（不足则全量）：族归属、分片回读、meta/exemplars 一致性。
+        // 分片完整性由 Python 侧全量验证，这里只做 JVM 抽样回读。
+        val n = index.sourceCount
+        val sampleCount = minOf(100, n)
+        val sampleIs = if (sampleCount <= 1) {
+            setOf(0)
+        } else {
+            (0 until sampleCount).map { k -> (k.toLong() * (n - 1) / (sampleCount - 1)).toInt() }.toSet()
+        }
+        val checkedFamilies = mutableSetOf<String>()
+        for (i in sampleIs) {
+            val fid = index.sourceFamily(i) ?: throw AssertionError("i=$i 无族")
+            val meta = index.familyMeta(fid) ?: throw AssertionError("族 $fid 无 meta")
+            assertTrue("族 $fid exemplars 超 6", meta.exemplars.size <= 6)
+            val json = index.sourceJson(i) ?: throw AssertionError("i=$i 回读失败")
+            val node = JsonParser.parseString(json).asJsonObject
+            assertNotNull("i=$i 缺 bookSourceName", node.get("bookSourceName"))
+            if (checkedFamilies.add(fid)) {
+                val exIds = index.familyExemplars(fid)
+                assertTrue("族 $fid exemplars 为空", exIds.isNotEmpty())
+                for (exId in exIds) {
+                    val exI = exId.removePrefix("i").toIntOrNull()
+                        ?: throw AssertionError("族 $fid exemplar $exId 非 iN 格式")
+                    assertEquals("exemplar $exId 族归属不符", fid, index.sourceFamily(exI))
+                    assertNotNull("exemplar $exId 回读失败", index.sourceJson(exI))
+                }
+            }
+        }
+        assertTrue("抽样未覆盖任何族", checkedFamilies.isNotEmpty())
+    }
+
+    @Test fun rebuiltCorpus_selectedNewSource_matchAndRoundTrip() = runBlocking {
+        val dir = corpusAssetsDir()
+        val root = JsonParser.parseString(File(dir, "index.json").readText()).asJsonObject
+        val rec = root.getAsJsonArray("rec")
+        val (index, prov) = mergedCorpusIndex()
+        val byI = HashMap<Int, JsonObject>(rec.size() * 2)
+        val domainCount = mutableMapOf<String, Int>()
+        val nameCount = mutableMapOf<String, Int>()
+        for (e in rec) {
+            val r = e.asJsonObject
+            byI[r.get("i").asInt] = r
+            domainCount.merge(r.get("d").asString.lowercase(), 1, Int::plus)
+            nameCount.merge(r.get("n").asString.lowercase(), 1, Int::plus)
+        }
+
+        // 约定字段：selectedNewSourceIndices = 重建后所有 YCK 侧赢家的全局 i 列表。
+        // 缺该字段时退化为全量 rec 挑代表样本，仍验证 match→sourceJson→familyExemplars 链路。
+        val candidates = ArrayList<JsonObject>()
+        val selArr = prov.getAsJsonArray("selectedNewSourceIndices")
+        val label: String
+        if (selArr != null) {
+            label = "selectedNewSourceIndices"
+            for (e in selArr) {
+                candidates += byI[e.asInt]
+                    ?: throw AssertionError("selectedNewSourceIndices 含未知 i=${e.asInt}")
+            }
+            require(candidates.isNotEmpty()) { "selectedNewSourceIndices 为空" }
+        } else {
+            label = "rec"
+            for (e in rec) candidates += e.asJsonObject
+        }
+
+        fun toMatch(r: JsonObject) = CorpusMatch(
+            i = r.get("i").asInt, domain = r.get("d").asString, name = r.get("n").asString,
+            type = r.get("t").asInt, family = r.get("f").asString, flags = r.get("g").asInt,
+        )
+
+        var picked: CorpusMatch? = null
+        var pickedQuery: String? = null
+        // 优先选全库仅出现一次的域名：精确域命中可稳定反查回自身
+        for (r in candidates) {
+            val domain = r.get("d").asString
+            if (domain.isNotBlank() && (domainCount[domain.lowercase()] ?: 0) == 1 &&
+                index.match(domain).any { it.i == r.get("i").asInt }
+            ) {
+                picked = toMatch(r)
+                pickedQuery = domain
+                break
+            }
+        }
+        // 退化一：全库唯一 name
+        if (picked == null) {
+            for (r in candidates) {
+                val name = r.get("n").asString
+                if (name.isNotBlank() && (nameCount[name.lowercase()] ?: 0) == 1 &&
+                    index.match(name).any { it.i == r.get("i").asInt }
+                ) {
+                    picked = toMatch(r)
+                    pickedQuery = name
+                    break
+                }
+            }
+        }
+        // 退化二：候选中任取一条可被 match 命中的记录
+        if (picked == null) {
+            for (r in candidates) {
+                val name = r.get("n").asString
+                if (name.isNotBlank() && index.match(name).any { it.i == r.get("i").asInt }) {
+                    picked = toMatch(r)
+                    pickedQuery = name
+                    break
+                }
+            }
+        }
+
+        val target = picked ?: throw AssertionError("$label 中无可 match 的源")
+        val query = pickedQuery ?: throw AssertionError("pickedQuery 未随 picked 设置")
+        // match → sourceJson → familyExemplars 完整链路
+        val hits = index.match(query)
+        assertTrue("match($query) 未命中 i=${target.i}", hits.any { it.i == target.i })
+        val json = index.sourceJson(target.i)
+        assertNotNull("i=${target.i} 回读失败", json)
+        val exemplars = index.familyExemplars(target.family)
+        assertTrue(exemplars.size <= 6)
+        assertNotNull(index.familyMeta(target.family))
     }
 }

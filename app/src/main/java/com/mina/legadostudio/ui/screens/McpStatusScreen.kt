@@ -102,6 +102,8 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
     var readiness by remember { mutableStateOf(DeviceReadiness(context).inspect((status["port"] as? Int) ?: McpConfigStore.DEFAULT_PORT, status["running"] == true)) }
     var tab by remember { mutableStateOf(McpTab.CONNECT) }
     var configTargetLan by remember { mutableStateOf(false) }
+    val mcpConfigStore = remember { McpConfigStore(context) }
+    var compactMode by remember { mutableStateOf(mcpConfigStore.loadCompactMode()) }
     val scope = rememberCoroutineScope()
     suspend fun refresh(skipHealth: Boolean = false) {
         val snapshot = withContext(Dispatchers.IO) {
@@ -131,8 +133,10 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
     val activeToken = status["token"]?.toString().orEmpty().ifBlank { token }
     val activeTokenRequired = status["tokenRequired"] == true || tokenRequired
     val headerLine = McpAccess.tokenHeaderLine(activeToken)
-    val localConfigJson = McpAccess.clientConfigJson(endpoint, activeToken, activeTokenRequired)
-    val lanConfigJson = lanEndpoints.firstOrNull()?.let { McpAccess.clientConfigJson(it, activeToken, activeTokenRequired) }
+    val localClientUrl = McpAccess.connectionUrl(endpoint, compactMode)
+    val lanClientUrl = lanEndpoints.firstOrNull()?.let { McpAccess.connectionUrl(it, compactMode) }
+    val localConfigJson = McpAccess.clientConfigJson(localClientUrl, activeToken, activeTokenRequired)
+    val lanConfigJson = lanClientUrl?.let { McpAccess.clientConfigJson(it, activeToken, activeTokenRequired) }
     fun copy(label: String, value: String) {
         (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             .setPrimaryClip(ClipData.newPlainText(label, value))
@@ -219,12 +223,33 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
                         item {
                             val cs = MaterialTheme.colorScheme
                             val showingLan = configTargetLan && lanEndpoints.isNotEmpty()
-                            val shownUrl = if (showingLan) lanEndpoints.first() else endpoint
+                            val shownUrl = if (showingLan) lanClientUrl ?: localClientUrl else localClientUrl
                             val bearerValue = McpAccess.bearerTokenValue(activeToken)
                             val hasToken = activeTokenRequired && activeToken.isNotBlank()
                             GlassCard {
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Text("接入信息", style = MaterialTheme.typography.titleMedium)
+                                    Text("连接模式", style = MaterialTheme.typography.labelMedium, color = cs.secondary)
+                                    StudioSegmentedControl(
+                                        options = listOf("标准", "精简（省 token）"),
+                                        selectedIndex = if (compactMode) 1 else 0,
+                                        onSelect = { index ->
+                                            compactMode = index == 1
+                                            mcpConfigStore.saveCompactMode(compactMode)
+                                            copied = ""
+                                        },
+                                    )
+                                    Text(
+                                        if (compactMode)
+                                            "精简：工具数量与功能与标准完全相同（共 67 个工具，非基础/进阶权限划分），只把工具目录换成简短描述，fetch_page 的 auto 首次预览缺省 2000 字，被截断的完整定义可随时按名读回。"
+                                        else
+                                            "标准：工具目录回完整描述与入参说明（共 67 个工具），fetch_page 的 auto 首次预览缺省 6000 字。",
+                                        style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        "两种模式都能完整抓取，正文始终保存可分段读回。切换只改变下方生成的链接与配置：在客户端改用它生成的地址后重新连接才生效，已连接的会话不会自动切换，必要时刷新客户端的工具目录。",
+                                        style = MaterialTheme.typography.bodySmall, color = cs.outline,
+                                    )
                                     StudioSegmentedControl(
                                         options = listOf("本机", "局域网"),
                                         selectedIndex = if (showingLan) 1 else 0,
@@ -286,13 +311,14 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
                             val cs = MaterialTheme.colorScheme
                             val showingLan = configTargetLan && lanEndpoints.isNotEmpty()
                             val shownConfig = if (showingLan) lanConfigJson ?: localConfigJson else localConfigJson
+                            val shownUrl = if (showingLan) lanClientUrl ?: localClientUrl else localClientUrl
                             var jsonExpanded by remember { mutableStateOf(false) }
                             GlassCard {
                                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                                         Column(Modifier.weight(1f)) {
-                                            Text("配置文件客户端（高级）", style = MaterialTheme.typography.titleMedium)
-                                            Text("Claude Code / Cline / Cherry Studio 等支持整段 mcpServers JSON 配置的客户端", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                                            Text("配置文件客户端（JSON）", style = MaterialTheme.typography.titleMedium)
+                                            Text("Claude Code / Cline / Cherry Studio 等支持整段 mcpServers JSON 配置的客户端；这是另一种粘贴方式，不是额外功能模式", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
                                         }
                                         TextButton(onClick = { jsonExpanded = !jsonExpanded }) { Text(if (jsonExpanded) "收起" else "展开") }
                                     }
@@ -307,7 +333,7 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
                                             modifier = Modifier.fillMaxWidth(),
                                         ) { Icon(Icons.Outlined.ContentCopy, null, Modifier.size(18.dp)); Text("复制客户端配置", Modifier.padding(start = 6.dp)) }
                                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            OutlinedButton(onClick = { copy("MCP URL", if (showingLan) lanEndpoints.first() else endpoint) }, modifier = Modifier.weight(1f)) { Text("仅复制 URL") }
+                                            OutlinedButton(onClick = { copy("MCP URL", shownUrl) }, modifier = Modifier.weight(1f)) { Text("仅复制 URL") }
                                             if (activeTokenRequired) OutlinedButton(onClick = { copy("鉴权请求头", headerLine) }, modifier = Modifier.weight(1f)) { Text("仅复制鉴权头") }
                                         }
                                         if (copied.isNotBlank()) Text(copied, color = cs.primary, style = MaterialTheme.typography.bodySmall)

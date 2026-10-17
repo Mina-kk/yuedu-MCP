@@ -11,9 +11,11 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 /** 真机修书源复盘回归：java.get/post/head 的 timeout 重载、null headers 警告、签名提示改写。 */
 class RhinoJavaSignatureTest {
@@ -61,6 +63,51 @@ class RhinoJavaSignatureTest {
             val out = rhino().evaluate("java.get('${server.url("/n")}', null).body()")
             assertEquals("n", out.value)
             assertTrue(out.logs.any { it.contains("null headers") && it.contains("HashMap") })
+        }
+    }
+
+    @Test fun postSendsRawBodyAndEncodeURIUsesPercent20() = runBlocking {
+        // java.post：body 原样发送（JS 侧已自行编码，不再二次编码），缺省 Content-Type form-urlencoded
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("p-ok"))
+            server.start()
+            val js = """
+                var body = "keyboard=" + java.encodeURI(key) + "&tempid=1";
+                var r = java.post("${server.url("/e/search")}", body, {"X-Post":"yes"});
+                r.body()
+            """.trimIndent()
+            val out = rhino().evaluate(js, bindings = mapOf("key" to "万相 之王+100%&"))
+            assertEquals("p-ok", out.value)
+            val recorded = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("java.post 请求应在 5 秒内到达", recorded)
+            checkNotNull(recorded)
+            assertEquals("POST", recorded.method)
+            assertEquals("/e/search", recorded.path)
+            assertEquals("keyboard=%E4%B8%87%E7%9B%B8%20%E4%B9%8B%E7%8E%8B%2B100%25%26&tempid=1", recorded.body.readUtf8())
+            assertEquals("application/x-www-form-urlencoded; charset=utf-8", recorded.getHeader("Content-Type"))
+            assertEquals("yes", recorded.getHeader("X-Post"))
+        }
+    }
+
+    @Test fun postSendsRawKeyBodyUnencoded() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("raw-ok"))
+            server.start()
+            val js = """
+                var body = "keyboard=" + key + "&tempid=1";
+                var r = java.post("${server.url("/e/search")}", body, {"X-Post":"yes"});
+                r.body()
+            """.trimIndent()
+            val out = rhino().evaluate(js, bindings = mapOf("key" to "万相 之王+100%&"))
+            assertEquals("raw-ok", out.value)
+            val recorded = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("java.post 请求应在 5 秒内到达", recorded)
+            checkNotNull(recorded)
+            assertEquals("POST", recorded.method)
+            assertEquals("/e/search", recorded.path)
+            assertEquals("keyboard=万相 之王+100%&&tempid=1", recorded.body.readUtf8())
+            assertEquals("application/x-www-form-urlencoded; charset=utf-8", recorded.getHeader("Content-Type"))
+            assertEquals("yes", recorded.getHeader("X-Post"))
         }
     }
 

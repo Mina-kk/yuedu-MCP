@@ -84,7 +84,7 @@ MCP 是默认入口。`save_source` 对同一完整 `bookSourceUrl` 且内容相
 
 ### 0.0 语料命中（省 token 第一步）
 
-写任何规则前先查内置语料（26861 个现成书源、1838 个模板族，返回字段详见 [`references/corpus.md`](references/corpus.md)）：
+写任何规则前先查内置语料（17743 个唯一身份书源、1544 个规则特征族；由旧底库 26861 条与 YCK 快照 3047 条共 29908 条候选全库去重重建，全局序号 `i` 与族编号 `f` 已整体重新编号，与旧编号不对应；时间缺失的入选记录不声称最新，入选只说明静态质量通过，不等于在线可用。返回字段详见 [`references/corpus.md`](references/corpus.md)）：
 
 1. `match_sources(目标域名或站名)`：命中同域 → `get_corpus_source(i)` 取现成源做底本，按 0.1 查重流程最小修改。
 2. 未命中同域 → 从结果取 `f`（族 ID）→ `get_corpus_shard(f)` 读同模板族代表样例（≤6 个最完整），参考其结构改写到目标站。

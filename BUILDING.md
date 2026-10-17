@@ -19,6 +19,26 @@ APK 输出至 `app/build/outputs/apk/debug/app-debug.apk`，测试报告位于 `
 
 GitHub Actions 配置见 `.github/workflows/ci.yml`，运行单元测试并构建 Debug APK，不使用 Release 签名凭据。
 
+## 全库去重重建语料
+
+```bash
+python -m unittest discover -s scripts -p 'test_*.py'
+python scripts/reconcile_corpus.py \
+  --base app/src/main/assets/corpus \
+  --src /path/to/curated-sources.json \
+  --stage /path/to/corpus-stage \
+  --report /path/to/reconcile-report.json \
+  --merge-source source-label
+```
+
+只把静态筛选后的主候选作为输入。工具按身份键对底库与新快照的全部候选整体去重并做版本仲裁，凡是规则实质相同的副本合并为一条；新库由 `build_corpus.py` 在全新 `--stage` 目录重建，序号 `i` 与族编号 `f` 整体重新编号，因此与旧编号不对应。同一身份键的规则不同时，先按静态质量级别取舍，同级别只采纳唯一的最高可信 `lastUpdateTime`；可信时间缺失、相等或冲突的整键转入待复核（`reviewKeys`），静态不合规的转入隔离（`quarantineKeys`），两者都不进主库，也不存在「照抄列表日期当最新」的推断。
+
+`--stage` 必须是不存在或空的新目录，`--report` 也必须位于底库、输入与 stage 之外；底库与输入全程只读，不会被改写（临时文件只落在系统临时目录并在结束时清理）。先在 stage 里完成构建与整体校验，再备份现有 `app/src/main/assets/corpus`，然后整体切换（替换整个语料目录，不是原地覆盖分片），最后重新构建 APK 并跑测试。再次应用同一输入应得到相同的记录、族与序号（`rec`/`fam`/`n` 一致）；传 `--report` 时 `provenance.auditSha256` 取自含生成时间戳的报告文件，因此两次运行的 `index.json` 不必逐字节相同。索引中的 `provenance` 记录公开来源标签、计数和输入哈希，`mergePolicy` 为 `global-dedupe-rebuild`，不代表联网可用性证明。
+
+重建后的底库（`provenance` 最后一条 `mergePolicy` 为 `global-dedupe-rebuild`）本身就是整体重建的结果，再次重建时会把全部 `n` 条记录作为候选，不存在需要另行声明的追加尾，因此无需 `--base-sources`；历史里遗留的旧 `firstSourceIndex` 只属于被替换的追加血缘，不会影响边界。仍停留在追加策略的底库（`provenance.firstSourceIndex`）继续保留原有的尾部去重保护，只把该边界之前的记录作为候选。`--base-sources` 仅在需要显式声明且与解析出的边界一致时才被接受。
+
+`scripts/append_corpus.py` 是旧的增量追加策略（保留底库、新记录序号与族编号接续、原分片字节不变），仅作历史参考；其输出仍走同一套 staging、备份与整体切换流程。
+
 ## 构建标识
 
 `get_app_info` 的 `buildRevision` 和 `buildType` 用于版本诊断。源码提交标识按以下顺序读取：

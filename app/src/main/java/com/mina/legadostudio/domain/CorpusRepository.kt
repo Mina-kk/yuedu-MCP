@@ -85,6 +85,12 @@ class CorpusIndex(
         families = famMap
     }
 
+    /** 语料书源总数（rec 条数）。 */
+    val sourceCount: Int get() = records.size
+
+    /** 模板族总数。 */
+    val familyCount: Int get() = families.size
+
     /**
      * 规范化用户查询，转小写、去空白、去协议前缀和路径
      */
@@ -307,6 +313,10 @@ class CorpusRepository(private val context: Context) {
 
         return mergeShardParts(fid, partTexts)
     }
+
+    val sourceCount: Int get() = index.sourceCount
+
+    val familyCount: Int get() = index.familyCount
 
     fun match(query: String, limit: Int = 20): List<CorpusMatch> = index.match(query, limit)
 

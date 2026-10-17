@@ -3,7 +3,7 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.2.0`（versionCode 188，以 `app/build.gradle.kts` 为准）
+- 当前版本：`1.2.1`（versionCode 189，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
@@ -24,13 +24,15 @@ MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查
    - 客户端有 **Token / Bearer Token 输入框** → 只粘贴令牌本身，不要加 `Bearer` 前缀
    - 客户端只有 **自定义请求头（名称 + 值）两个框** → 名称填 `Authorization`，值填 `Bearer <令牌>`（名称填成 `Bearer` 是常见错误，会 401）
    - 客户端没有任何鉴权输入 → 建议换用支持鉴权的客户端；不要为局域网或远程接入关闭令牌校验
-   - **「配置文件客户端（高级）」折叠卡**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制
+   - **「配置文件客户端（JSON）」折叠卡**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制，跟随连接模式
 3. 鉴权统一使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
 4. 调用 `get_app_info` 可查看版本、运行能力及构建标识 `buildRevision`（源码提交标识）与 `buildType`（`debug`/`release`）。反馈问题时请提供版本和构建标识，不要提交访问令牌或未脱敏日志。
 
-#### 精简工具目录（省 token）
+#### 连接模式：标准 / 精简（省 token）
 
-服务器链接末尾追加 `?compact=1`（如 `http://127.0.0.1:58823/mcp?compact=1`）后建立的会话，`tools/list` 只回每个工具的首句描述、入参 `description` 同样截断（单句超过 100 字符硬截并加 `…`），工具数量、名称顺序、`inputSchema` 的 `type`/`required`/`enum`/数值约束逐字不变。被截掉的完整定义随时经只读资源模板 `studio://tools/{name}` 按名读回（返回 `{"name","description","inputSchema","annotations"}`）。不带该参数的默认行为逐字不变。
+「接入信息」卡顶部有 **连接模式** 选择：**标准**（默认）直接复制完整描述的服务器链接；**精简** 生成的链接带 `?compact=1`（如 `http://127.0.0.1:58823/mcp?compact=1`），本机/局域网、复制服务器链接、「配置文件客户端（JSON）」整段配置与「仅复制 URL」都统一跟随所选模式。切换只改这里生成的地址：在客户端换成新地址重新连接才生效，已连接会话不自动切换，必要时刷新客户端的工具目录。
+
+精简会话的 `tools/list` 只回每个工具的首句描述、入参 `description` 同样截断（单句超过 100 字符硬截并加 `…`）；工具数量、名称顺序、`inputSchema` 的 `type`/`required`/`enum`/数值约束逐字不变，67 个工具与抓取能力与标准模式完全相同（非基础/进阶权限）。被截掉的完整定义随时经只读资源模板 `studio://tools/{name}` 按名读回（返回 `{"name","description","inputSchema","annotations"}`）。不带该参数的默认行为逐字不变。
 
 `fetch_page` 首次自动预览的默认长度：普通连接 `responseMode=auto` 为 6000 字符；`preview` 模式无论连接类型缺省 6000；同一 compact 会话的 `auto` 未传 `maxChars` 时降为 2000。显式 `maxChars`（0..12000）始终优先；`reference` 模式与 auto 命中缓存本就不回正文（仅返回 `pageId` 引用），不涉及预览长度。正文仍完整保存在 `pageId`，可照常经 `read_page` 或 `inspect_rule`/`analyze_html`/`eval_js` 引用恢复。
 
@@ -73,17 +75,25 @@ match_sources 语料命中（同域/同模板族现成书源）
 
 ### eval_js 与书源 JS 环境
 
-`eval_js` 与书源 `<js>` / `{{}}` 段运行在与官方一致的 Rhino + analyzeRule 引擎上，除 `java`（ajax/connect/加解密）外还注入官方同名对象：`cookie`、`cache`、`source`（`debug_source` 时与书源变量互通）。规则求值与官方语义一致：CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性，多段落 `@text` 合并全部段落。`set_cookie` 默认 `merge=true` 按 Cookie 名合并（不会冲掉该域其他 Cookie，如登录态），`merge=false` 为整串替换。
+`eval_js` 与书源 `<js>` / `{{}}` 段使用项目内置的 Rhino 与 analyzeRule 引擎。`java` 由工坊的 `StudioJsApi` 桥接，并注入 `cookie`、`cache`、`source` 等同名对象（`debug_source` 时与书源变量互通）。同名不代表与各版本原版阅读的全部签名、状态和平台能力一致；具体支持范围见内置 Skill 的 `js-api.md`「Studio 沙箱可用 API 清单」。导出后仍需在目标阅读版本验证。
+
+对称加解密支持原始字节，以及明确编码的输入和输出：`decryptStr(String)` 只解码标准 Base64 密文，Hex 密文应先用 `java.hexDecodeToByteArray` 转成字节；`encryptBase64` / `encryptHex` 支持 UTF-8 明文字符串或原始字节。搜索请求的普通模板会对 `{{key}}` 作表单编码（包括请求选项的 body 内）；`@js:` 与 `java.post` 的 body 按脚本构造值发送，需要编码时应显式处理，避免重复编码。
+
+CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUrl: "@href"`）取当前节点属性，多段落 `@text` 合并全部段落。`set_cookie` 默认 `merge=true` 按 Cookie 名合并（不会冲掉该域其他 Cookie，如登录态），`merge=false` 为整串替换。
 
 ### 校验闭环
 
-`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用真实搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时自动用「我」探测并在 `warnings` 标注。零结果、验证墙和脚本错误应分开处理，任何一次通过也不保证站点永远可用。
+`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时自动用「我」探测并在 `warnings` 标注。
+
+正文报告的 `data.contentDiagnostics` 记录逐页可观测状态、执行路径及分页停止原因，不含 URL、请求头或正文。`httpStatus` 只记录可确认的原始 HTTP 状态；WebView 或缓存回调路径无法确认时保持未知。缓存回调的 `reportedStatus` 只表示其返回状态，不能等同于实时 HTTP 观测；是否真正命中快照应查看 MCP 顶层 `cache` 统计。已知非成功状态、分页循环／达到页数上限，以及明确的加载／失败占位输出不能仅因非空而判为正文通过；兜底、整页 HTML 和分页不完整等有限模式标记为 `content_unverified`。正常短正文不受最小字数门槛限制。`full` 只表示本次静态校验及四阶段样本检查通过，不证明章节全文完整、解密语义正确、目标阅读版本兼容或站点长期可用。诊断细节见内置 Skill 的 `troubleshoot.md`。
 
 `analyze_sources` 只读分析本地书源（可传 `ids`）或外部 JSON 数组 `sources`：同 URL 但规则不同是冲突；`list_sources` 逐条列出各版本，同 URL 多版本用项目 ID `get_source` 取回。`export_checked_sources(ids=[…])` 仅导出显式选中的本地项目，排除开关 `exclude.excludeLogin`、`excludeCaptcha`、`excludeFailed`、`excludeUnverified` 默认全部关闭；`collapseIdentical=true` 只折叠 JSON 完全一致且无冲突的副本。过滤只采信本 App `check_source` 最近 30 分钟的证据；MCP 单次结果超过 11,500 字符会报错，请缩小 `ids` 或分批导出。书源页「分析/过滤」提供同样的静态预览、逐条检测和不受该回包上限约束的本地导出/分享/导入；外部数组静态分析**不会执行陌生书源的 JS 或批量探测网络**。
 
 ### 语料命中（省 token 第一步）
 
-内置 **26861 个现成书源**，按内容规则签名聚成 **1838 个模板族**（同族 = 同 CMS / 同模板结构）：
+内置 **17743 个唯一身份书源、1544 个规则特征族**：由 29908 条候选（旧底库 26861 条 + YCK 快照 3047 条）按身份键全库去重与版本仲裁后重建，其中旧底库入选 15898 条、YCK 新入选 1845 条；1443 个待复核键与 2842 个隔离键不进入主库。重建后全局序号 `i` 与族编号 `f` 整体重新编号，与旧版本编号不对应。
+
+特征族按类型、请求方式和规则风格等特征分组，仅作结构参考，不保证同一 CMS。同一身份键在主库只保留一个版本：规则实质相同的副本合并为一条，规则不同且可信时间可比较时保留较新者，实质冲突且无法以可信时间区分时整键转待复核，不猜「最新」。入选只表示静态质量筛选通过，没有逐条联网验证；2474 条入选记录缺少可信的规则时间，均不声称最新，也不能把总数当成独立站点数或在线可用数。
 
 - `match_sources(域名或站名)`：返回 `i`（序号）、`d`（域名）、`f`（族 ID）、`t`（类型）、`g`（特征位掩码：CookieJar / 登录 / 验证码 / Cloudflare / 禁用等）；
 - 命中同域 → `get_corpus_source(i)` 取完整书源做底本最小修改；

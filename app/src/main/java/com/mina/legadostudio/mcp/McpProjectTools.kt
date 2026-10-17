@@ -26,7 +26,7 @@ internal fun StudioMcpServer.registerProjectTools(server: Server) {
             "mcpPath" to McpAccess.PATH,
             "contextProtocol" to mapOf("version" to 2, "workflow" to "match_sources(语料命中) → create_context → fetch_page → read_page/inspect_rule/analyze_html/eval_js(pageId) → update_context；JS渲染页用 webview_render(url 或 url+pageId) 转真实DOM；半成品存 save_project、成品 save_source，推送阅读用 import_reader；重连后get_context或list_contexts", "cacheTtlSeconds" to 300, "idleTtlSeconds" to 1800, "persistence" to "memory+snapshot", "maxInlineChars" to 12000, "hint" to "调用时传contextId；并行做多个书源时每个任务各自 create_context 并全程显式传同一 contextId，互不串数据；POST搜索也入缓存；大结果用read_result不重复运行；check_source/debug_source默认复用本任务快照，最终验收传refresh=true；check_source 可加 exploreUrl/exploreKey 跑发现链"),
             "captureProtocol" to mapOf("workflow" to "capture_once(url,method,headers,body) 发起→返回 contextId/logs/hopLogIds/finalLogIds→get_capture(contextId) 回看逐跳→get_http_log(id) 看单条详情→list_captures 翻历史会话", "perHop" to "重定向中间跳另记 originKind=capture_hop 独立日志（3xx+Location，同 cap:contextId/sourceAnchor），被SSRF拦截的跳也先落库", "privacy" to "URL/query 可能带令牌；正文/头经 get_http_log 查看且已脱敏（Cookie/Authorization/Set-Cookie 打 ***）"),
-            "corpus" to mapOf("sources" to 26861, "hint" to "内置语料特征索引，做源前先 match_sources(域名)"),
+            "corpus" to mapOf("sources" to app.corpus.sourceCount, "hint" to "内置语料特征索引，做源前先 match_sources(域名)"),
             "license" to "GPL-3.0",
             "ai" to false,
             "role" to "mcp-runtime",

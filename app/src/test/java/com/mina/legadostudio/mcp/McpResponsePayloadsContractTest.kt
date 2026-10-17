@@ -127,7 +127,7 @@ class McpResponsePayloadsContractTest {
         assertEquals(6000, p.pagePreviewLimit(true, "preview", null))
         assertEquals(6000, p.pagePreviewLimit(true, "reference", null))
         // 显式 maxChars 跨 mode 与 compact 一律优先（0/边界/超默认原样返回，范围校验留在 fetchPageOk 的 require）
-        for (explicit in listOf(0, 2000, 6000, 12000)) {
+        for (explicit in listOf(0, 2000, 4000, 6000, 12000)) {
             for (mode in listOf("auto", "preview", "reference")) {
                 for (compact in listOf(false, true)) {
                     assertEquals("explicit=$explicit mode=$mode compact=$compact",

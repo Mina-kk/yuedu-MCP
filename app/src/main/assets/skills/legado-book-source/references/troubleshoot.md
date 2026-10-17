@@ -4,9 +4,29 @@
 >
 > **调试期遇到验证码 / CF / WAF 盾**（工具返回 `verification_required` 或 `webview_mode_enabled` 的 JSON）：不要按本文改规则，先走 [`verification.md`](verification.md) 的验证中心 playbook。本文第 4 节的 `loginCheckJs` 是写进**成品书源**、让官方阅读 App 自己过盾的方案。
 
-## 1. 更换 User-Agent（第一步）
+## 0. 先核对正文证据与请求通道
 
-遇到反爬时，**先换 UA**，这是最简单的反爬手段。在书源 `header` 字段中填写 `User-Agent`。
+HTTP 成功、规则返回非空、正文验证通过是不同的结论。先检查 `check_source` 的正文 `evidence`、`category` 和报告 `data.contentDiagnostics`，不要仅凭「获取成功」继续验收或反复换页请求。
+
+| 诊断字段 | 含义 |
+|---|---|
+| `endReason=complete` | 按当前规则已无下一页；不证明规则覆盖了章节全文 |
+| `endReason=next_chapter` | 下一章链接已被阻止，不并入当前章；属于正常停止 |
+| `endReason=cycle` / `page_limit` | 分页循环／仍有下一页但已达 10 页上限，不能声称分页完成 |
+| `pages[].httpStatus` | 可确认的原始 HTTP 状态，在 `loginCheckJs`／`bodyJs` 改写前记录；WebView 和缓存回调路径不能确认时为 null，序列化时也可能省略空字段 |
+| `pages[].reportedStatus` | 返回结果声明的状态；缓存回调可能返回快照或重新抓取结果，不应当作实时 HTTP 观测；WebView 不填占位 200 |
+| `pages[].transport` | `http`、`webview` 或 `cache_fetch`；后者只说明经过缓存回调，不能据此判断是否命中快照或原始通道 |
+| `pages[].cacheUsed` | 直连路径为 false；缓存回调路径为 null／省略，表示无法在此确认是否命中，不是 true；实际命中看 MCP 顶层 `cache.requests[].cacheHit` 与汇总计数 |
+
+诊断字段采用白名单，不包含 URL、请求／响应头、Cookie、正文或密钥。既有显式调试的正文样本和脚本日志是另一类输出，不因新增诊断而自动获得全面脱敏保证。排障时不要通过 `java.log` 或异常故意打印凭据。
+
+`content_unverified` 表示本次输出不足以确认正文可用，例如明确的获取／加载／解密失败提示、整页 HTML 或不完整分页；不等于站点永久失效。检测只覆盖有限的明确模式，不能识别任意自定义兜底或证明解密语义正确。正常短正文、小说对白中的登录／充值／验证码等词，不应仅因字数或关键词被判失败。旧报告缺少诊断时状态及完成性保持未知，不能补成 HTTP 成功。
+
+`full` 仅表示静态校验及四阶段样本检查通过，不是整章完整性、密码学语义或目标阅读版本兼容证明。出现差异时固定同一最小样例，核对实际 JSON 参数、快照使用情况和通道；首次结果不符合预期就先自检，不要连续换页重试。必要的实时复验用 `refresh=true`，同时遵守站点限速。
+
+## 1. 核对 User-Agent
+
+怀疑 UA 差异时，先比较书源是否在 `header` 显式声明 `User-Agent`，以及目标阅读版本使用的 UA，再决定是否调整，不要把空响应直接归因为 UA。
 
 最稳妥的方式是用户在手机上获取自己的浏览器 UA，例如使用 https://tool.ip138.com/useragent/ 网站查看 UA。注意部分网站针对手机 UA 和 PC UA 会分别做适配，网页结构可能变化。
 
@@ -141,7 +161,7 @@ window.run("java.toast('执行成功');'成功'")
 
 > 本节是**成品源**在官方阅读 App 内过盾的方案。MCP 调试期遇到盾请走 [`verification.md`](verification.md)（验证中心 + 每域模式），两者互补不冲突：调试期过完盾验证规则后，若目标站真实使用中会频繁出盾，仍应把本节的 `loginCheckJs` 写进书源。
 >
-> **覆盖边界**：`loginCheckJs` 由官方阅读 App 在请求后执行；**Studio 沙箱的 `debug_source`/`check_source`/`eval_js` 不执行它**（运行时没有该钩子），调试期验证 `loginCheckJs` 逻辑只能把其中的检测/改写片段拷进 `eval_js` 手动跑。沙箱里 `java.startBrowserAwait` 已接通手机验证中心：创建 webview 会话→用户在 App 内 WebView 过盾→返回整页源码（见 [`verification.md`](verification.md)），取消/超时返回空 body；但 `loginCheckJs` 这个钩子本身沙箱不执行。
+> **覆盖边界**：工坊 `debug_source`／`check_source` 的阶段抓取会在拿到响应后、`bodyJs` 之前执行书源的 `loginCheckJs`，`result` 是工坊响应桥接对象；返回字符串可改写 body，返回支持的响应对象可接管 body／headers，脚本异常中止该阶段。独立 `eval_js` 不会自动加载并执行书源钩子；脚本内部 `java.ajax`／`java.post` 等二次请求也不应假定会再次执行该钩子。接口同名不保证与目标阅读版本完全相同。`java.startBrowserAwait` 接入手机验证中心（见 [`verification.md`](verification.md)）；HTTP／WebView 的验证状态是否可复用仍需分别确认。
 
 `loginCheckJs` 位于书源**基础**选项卡。Legado 在每次请求网站后都会执行此 JS 代码，`result` 为响应对象（包含 `url`、`code`、`body` 等属性）。JS 需返回修改后的响应对象。
 
@@ -224,9 +244,9 @@ Java 网络请求方法（**Studio 沙箱实测签名**，详见 `references/js-
 
 ## 6. 字体解析（正文乱码）
 
-> ⚠️ **仅官方 App 可用**：`java.queryTTF` / `java.replaceFont` 在 **Studio 沙箱未实现**（`StudioJsApi` 无此方法），调试期调用必报「方法不存在」。字体替换逻辑无法在沙箱内验证——规则可先写好，但效果只能到官方 App 实测；`eval_js`/`debug_source` 里调试其余规则时请先把字体段注释掉或短路。
+> 工坊已提供 `java.queryTTF(data)` 和 `java.replaceFont(text, errFont, correctFont[, filter])`，可在支持的字体格式内比较字形轮廓；具体输入和 WOFF2 限制见 `js-api.md`，不保证覆盖所有字体混淆。不要因方法同名就假定与目标阅读版本完全一致。
 >
-> 沙箱内替代能力：`java.fetchFont(url)` 只放行字体响应并返回原始 `ByteArray`；`java.decodeWoff2(bytes|base64)` 解 WOFF2（内部 Brotli）/WOFF/TTF/OTTO 的 cmap，返回 `{"U+4E2D": gid}`。注意：`decodeWoff2` 给的是码点→**glyphId**，glyphId 不等于汉字；gid→真实汉字必须做字形轮廓比对——沙箱已实现官方同名 `java.queryTTF(data)` + `java.replaceFont(text, errFont, correctFont[, filter])`：queryTTF 解析 TTF/OTF/WOFF/WOFF2 建立码点↔轮廓指纹映射（woff2 的 glyf transformed 除外，见 js-api.md），replaceFont 逐码点用轮廓指纹跨字体反查还原汉字，任意 cmap 打乱字体通用。MCP 侧对应工具是 `fetch_font`/`get_font_map`（见工具描述）。
+> `java.fetchFont(url)` 只放行字体响应并返回原始 `ByteArray`；`java.decodeWoff2(bytes|base64)` 解析 cmap，返回 `{"U+4E2D": gid}`。glyphId 不等于汉字，不能把 cmap 编号直接当作还原结果。MCP 对应工具是 `fetch_font`／`get_font_map`。
 
 正文替换规则中使用，根据 f1 字体的字形数据到 f2 中查找字形对应的编码。
 
@@ -320,7 +340,7 @@ fields={"ruleSearch":{...}}
 
 菠萝猫正文/简介为 base64 + 逐字节 XOR `(i%127)+1` 混淆。**按页面实际机制选解码方式**，不要一律套 XOR——
 
-普通 base64/AES 混淆（语料主流，沙箱均已跑通）：
+Base64／AES 调用示例（输入必须与实际编码、密钥字节、IV 和模式一致；示例存在不代表任意书源已验证）：
 
 ```js
 // base64 直出字符串
@@ -346,7 +366,7 @@ return java.getString(".content p@text"); // CSS 兜底
 
 要点：
 
-- 字节转字符串用 `new Packages.java.lang.String(bytes, "UTF-8")`；**不要**用 `java.bytesToStr`（真实书源仅 2/26861 在用，官方 App 未验证）、`new java.lang.String(...)`（不存在）、手写位运算拼 UTF-8（已翻车）
+- 字节转字符串用 `new Packages.java.lang.String(bytes, "UTF-8")`；**不要**用 `java.bytesToStr`（重建前语料仅 2/26861 在用，官方 App 未验证）、`new java.lang.String(...)`（不存在）、手写位运算拼 UTF-8（已翻车）
 - 域名替换等纯文本修正直接用 `.replace("www.boluomao.com", "www.boluomao1.com")`，不要对 java 返回值上正则 replace
 
 目录/正文分页走官方字段，**不要**写循环翻页：

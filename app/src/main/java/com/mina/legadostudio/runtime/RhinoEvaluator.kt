@@ -145,6 +145,14 @@ class RhinoEvaluator(
      */
     private fun decorateApiError(error: Exception, script: String? = null, jsLib: String? = null): Exception {
         val scriptError = error as? com.script.ScriptException
+        if (error.causeChainContainsSanitizedInput()) {
+            return com.script.ScriptException(
+                StudioSymmetricCrypto.SanitizedInputException.MESSAGE,
+                scriptError?.fileName,
+                scriptError?.lineNumber ?: -1,
+                scriptError?.columnNumber ?: -1,
+            )
+        }
         val scriptContext = scriptError?.lineNumber?.takeIf { it > 0 }?.let { line ->
             lineContext(script.orEmpty(), line)?.let { "\n[规则 JS 第${line}行] $it" }
                 ?: lineContext(jsLib.orEmpty(), line)?.let { "\n[jsLib 第${line}行（可能对应）] $it" }
@@ -178,6 +186,16 @@ class RhinoEvaluator(
             scriptError?.lineNumber ?: -1,
             scriptError?.columnNumber ?: -1,
         ).also { it.initCause(error.cause ?: error) }
+    }
+
+    private fun Throwable?.causeChainContainsSanitizedInput(): Boolean {
+        val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+        var current = this
+        while (current != null && seen.add(current)) {
+            if (current is StudioSymmetricCrypto.SanitizedInputException) return true
+            current = current.cause
+        }
+        return false
     }
 
     /** 取脚本第 [line] 行内容（截断 200 字符）+ 前后各 1 行，供错误归属提示；行号越界返回 null。 */
@@ -773,7 +791,6 @@ class StudioJsApi(
         StudioSymmetricCrypto(transformation, key, iv)
 }
 
-/** 官方阅读兼容的对称加解密对象：java.createSymmetricCrypto("AES/CBC/PKCS5Padding", key, iv) */
 class StudioSymmetricCrypto(
     private val transformation: String,
     key: Any,
@@ -810,16 +827,36 @@ class StudioSymmetricCrypto(
 
     fun decrypt(data: ByteArray): ByteArray = newCipher(javax.crypto.Cipher.DECRYPT_MODE).doFinal(data)
 
-    /** 入参为 Base64 字符串，输出 UTF-8 字符串（官方 legado SymmetricCrypto.decryptStr 语义） */
-    fun decryptStr(value: String): String = String(decrypt(Base64.getDecoder().decode(value)))
+    fun decryptStr(value: String): String {
+        val cipherBytes = try {
+            Base64.getDecoder().decode(value)
+        } catch (_: IllegalArgumentException) {
+            throw SanitizedInputException()
+        }
+        return String(decrypt(cipherBytes), Charsets.UTF_8)
+    }
+
+    fun decryptStr(data: ByteArray): String = String(decrypt(data), Charsets.UTF_8)
 
     fun decryptBase64Str(value: String): String = decryptStr(value)
 
     fun encrypt(data: ByteArray): ByteArray = newCipher(javax.crypto.Cipher.ENCRYPT_MODE).doFinal(data)
 
-    fun encryptStr(value: String): ByteArray = encrypt(value.toByteArray())
+    fun encryptStr(value: String): ByteArray = encrypt(value.toByteArray(Charsets.UTF_8))
 
-    fun encryptBase64Str(value: String): String = Base64.getEncoder().encodeToString(encrypt(value.toByteArray()))
+    fun encryptBase64(data: ByteArray): String = Base64.getEncoder().encodeToString(encrypt(data))
+
+    fun encryptBase64(value: String): String = encryptBase64(value.toByteArray(Charsets.UTF_8))
+
+    fun encryptHex(data: ByteArray): String = encrypt(data).joinToString("") { "%02x".format(it) }
+
+    fun encryptHex(value: String): String = encryptHex(value.toByteArray(Charsets.UTF_8))
+
+    fun encryptBase64Str(value: String): String = encryptBase64(value)
+
+    internal class SanitizedInputException : IllegalArgumentException(MESSAGE) {
+        companion object { const val MESSAGE = "decryptStr：密文必须是合法的标准 Base64 字符串" }
+    }
 }
 
 /** 官方 java.toURL 返回对象：java.net.URL 解析出的 host/origin/pathname/searchParams */

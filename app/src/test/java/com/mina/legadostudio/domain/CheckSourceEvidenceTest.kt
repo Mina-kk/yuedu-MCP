@@ -14,6 +14,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -612,5 +613,265 @@ class CheckSourceEvidenceTest {
             }
         }.exceptionOrNull()
         assertTrue("autoChain 中的 CancellationException 必须上浮，实际=${ex?.javaClass}", ex is CancellationException)
+    }
+
+    // ---------- 正文误判修复回归：HTTP 非 2xx / 分页未完整 / 兜底短语 / 整页 HTML / 拦截词误杀 ----------
+
+    private fun contentRuntime(content: String, lines: List<String> = listOf("第1页 HTTP 200，正文 ${content.length} 字符"), extraData: Map<String, Any?> = emptyMap()) = object : LegadoRuntime {
+        override suspend fun inspect(request: LegadoRuntime.InspectRequest) = error("unused")
+        override suspend fun debug(sourceJson: String, entry: String) = LegadoRuntime.DebugReport(
+            "正文", entry, lines,
+            mapOf("pages" to 1, "content" to content, "contentTotalChars" to content.length) + extraData,
+        )
+        override suspend fun evaluate(js: String, baseUrl: String, previous: Any?) = error("unused")
+        override fun validate(sourceJson: String) = BookSourceValidator().validate(sourceJson)
+    }
+
+    private fun runContent(runtime: LegadoRuntime): SourceCheckEvidence.StageEvidence = runBlocking {
+        val result = CheckSourceRunner.run(
+            CheckSourceRunner.Request("""{"bookSourceName":"x","bookSourceUrl":"https://a.com","ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}""", contentUrl = "https://a.com/c"),
+            runtime, null,
+        )
+        @Suppress("UNCHECKED_CAST")
+        (result["evidence"] as Map<String, SourceCheckEvidence.StageEvidence>)["正文"]!!
+    }
+
+    @Test fun normalShortContentIsOk() {
+        // 正常短正文不因字数少被杀
+        val ev = runContent(contentRuntime("他点了点头。"))
+        assertTrue(ev.ok)
+    }
+
+    @Test fun dialogueWithPayLoginWordsIsNotGate() {
+        // 小说对白/正文含充值、验证码、请登录 → 不算拦截页
+        assertTrue(runContent(contentRuntime("他说：你要充值才能看。她答：验证码发你了，请登录后再试。")).ok)
+        assertTrue("首行以「请登录，」开头但不是明确整段提示，不能误杀",
+            runContent(contentRuntime("请登录，这是他给机器下达的第一条指令。\n随后他继续写下后续内容。")).ok)
+        assertTrue("「请购买这份报纸」是叙事不是拦截",
+            runContent(contentRuntime("请购买这份报纸。她把铜币放在柜台。")).ok)
+    }
+
+    @Test fun fixedFallbackMessageIsUnverified() {
+        for (msg in listOf("获取失败", "解密失败请重试", "解密失败，请稍后重试。", "内容正在加载", "加载失败", "加载中")) {
+            val ev = runContent(contentRuntime(msg))
+            assertFalse("'$msg' 整段兜底提示不能算正文可用", ev.ok)
+            assertEquals("content_unverified", ev.category)
+        }
+        // 简单 HTML 片段内提示也算（Jsoup 剥标签后归一化）
+        val wrapped = runContent(contentRuntime("<p>获取失败</p>"))
+        assertFalse(wrapped.ok)
+        assertEquals("content_unverified", wrapped.category)
+        // 正常故事含「解密失败」不误杀
+        assertTrue(runContent(contentRuntime("解密失败，他却笑了。")).ok)
+    }
+
+    @Test fun wholeHtmlContentIsUnverified() {
+        for (html in listOf("<!DOCTYPE html><html><body><p>章节正文</p></body></html>",
+            "<html lang=\"zh\"><body>x</body></html>", "<!-- c --><html><body>x</body></html>", "\uFEFF  <html><body>x</body></html>")) {
+            val ev = runContent(contentRuntime(html))
+            assertFalse("$html", ev.ok)
+            assertEquals("content_unverified", ev.category)
+        }
+        assertTrue(runContent(contentRuntime("<p>这就是一段正文。</p>")).ok)
+        assertTrue(runContent(contentRuntime("他写下<html>标签，接着解释了网页结构。")).ok)
+        assertTrue(runContent(contentRuntime("<htmlish>不是根元素</htmlish>")).ok)
+        assertTrue(runContent(contentRuntime("<!DOCTYPE htmlish>不是 HTML 文档声明")).ok)
+    }
+
+    @Test fun explicitGateMessageIsEmpty() {
+        // 明确整段拦截提示仍判 empty（含新增的验证码/人机验证/Access Denied）
+        for (msg in listOf("请先登录后查看本章内容", "请输入验证码", "请完成人机验证", "Access Denied")) {
+            val ev = runContent(contentRuntime(msg))
+            assertFalse("'$msg' 是明确拦截提示，不能算正文可用", ev.ok)
+            assertEquals("empty", ev.category)
+        }
+    }
+
+    @Test fun httpNon2xxPageIsNetworkFailure() {
+        // 有正文但抓取页 HTTP 404（回退 lines）→ network
+        val ev = runContent(contentRuntime("残留正文", lines = listOf("第1页 HTTP 404，正文 4 字符")))
+        assertFalse(ev.ok)
+        assertEquals("network", ev.category)
+    }
+
+    @Test fun diagnosticsNon2xxIsNetwork() {
+        // contentDiagnostics：先 200 后 500 → network（HTTP 是 loginCheckJs 前真实状态）
+        val diag = mapOf("endReason" to "complete", "pages" to listOf(
+            mapOf("page" to 1, "httpStatus" to 200, "transport" to "http", "cacheUsed" to false),
+            mapOf("page" to 2, "httpStatus" to 500, "transport" to "http", "cacheUsed" to false),
+        ))
+        val ev = runContent(contentRuntime("第二页挂了", extraData = mapOf("contentDiagnostics" to diag)))
+        assertFalse(ev.ok)
+        assertEquals("network", ev.category)
+    }
+
+    @Test fun cacheFetchReportedNon2xxIsNotOk() {
+        // cache_fetch 通道：raw httpStatus=null（无实际观测），reported=500 → 不得 ok/full
+        val diag = mapOf("endReason" to "complete", "pages" to listOf(
+            mapOf("page" to 1, "httpStatus" to null, "reportedStatus" to 500, "transport" to "cache_fetch", "cacheUsed" to null),
+        ))
+        val ev = runContent(contentRuntime("缓存正文", extraData = mapOf("contentDiagnostics" to diag)))
+        assertFalse("cache_fetch reported 500 不能算可用", ev.ok)
+        assertEquals("network", ev.category)
+    }
+
+    @Test fun cacheFetchReported200RawUnknownIsOkButNotFabricated() {
+        // reported 200 但 raw 未知（null）：可判 ok（内容本身可用），但 facts 不伪造 raw=200
+        val diag = mapOf("endReason" to "complete", "pages" to listOf(
+            mapOf("page" to 1, "httpStatus" to null, "reportedStatus" to 200, "transport" to "cache_fetch", "cacheUsed" to null),
+        ))
+        val ev = runContent(contentRuntime("正常正文", extraData = mapOf("contentDiagnostics" to diag)))
+        assertTrue(ev.ok)
+        assertNull("raw 未知不能回填 200", ev.facts["httpStatusMin"])
+        assertNull(ev.facts["httpStatusMax"])
+        assertEquals(200, ev.facts["reportedStatusMin"])
+    }
+
+    @Test fun cacheFetchReported500SurvivesGsonRoundtripInFilter() {
+        // 序列化 roundtrip 后：reported 500 正文经 SourceFilterPolicy 仍判失败
+        val stages = mapOf(
+            "搜索" to LegadoRuntime.DebugReport("搜索", "我", listOf("ok"), listOf(mapOf("name" to "书", "bookUrl" to "https://a.com/b"))),
+            "详情" to LegadoRuntime.DebugReport("详情", "u", listOf("ok"), mapOf("name" to "书", "tocUrl" to "https://a.com/t")),
+            "目录" to LegadoRuntime.DebugReport("目录", "t", listOf("ok"), mapOf("totalChapters" to 1, "chapters" to listOf(mapOf("url" to "https://a.com/c1")))),
+            "正文" to LegadoRuntime.DebugReport("正文", "c", listOf("第1页 HTTP 200，正文 3 字符"),
+                mapOf("pages" to 1, "content" to "正文", "contentTotalChars" to 2,
+                    "contentDiagnostics" to mapOf("endReason" to "complete", "pages" to listOf(
+                        mapOf("page" to 1, "httpStatus" to null, "reportedStatus" to 500, "transport" to "cache_fetch"))))),
+        )
+        val check = mapOf(
+            "搜索" to stages["搜索"]!!, "详情" to stages["详情"]!!, "目录" to stages["目录"]!!, "正文" to stages["正文"]!!,
+            "validation" to BookSourceValidator().validate("""{"bookSourceName":"x","bookSourceUrl":"https://a.com","ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}"""),
+            "evidence" to stages.mapValues { (s, r) -> SourceCheckEvidence.of(s, r) },
+            "verdict" to mapOf("summary" to "partial", "stagesRan" to 4, "stagesOk" to 3,
+                "stagesFailed" to listOf("正文"), "validationOk" to true, "validationIssues" to 0),
+        )
+        val gson = Gson()
+        val roundtrip = gson.fromJson(gson.toJson(check), Map::class.java) as Map<String, Any>
+        val report = SourceFilterPolicy.filter(
+            listOf("""{"bookSourceName":"x","bookSourceUrl":"https://a.com","ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}"""),
+            checkResults = mapOf(0 to roundtrip),
+            excludes = setOf(SourceFilterPolicy.Exclude.FAILED),
+        )
+        assertEquals("reported 500 经 roundtrip 仍不能过 FAILED 过滤", 0, report.keptCount)
+    }
+
+    @Test fun cycleAndPageLimitAreUnverified() {
+        for (reason in listOf("cycle", "page_limit")) {
+            val diag = mapOf("endReason" to reason, "pages" to listOf(mapOf("page" to 1, "httpStatus" to 200)))
+            val ev = runContent(contentRuntime("有一些正文", extraData = mapOf("contentDiagnostics" to diag)))
+            assertFalse("endReason=$reason 不能算可用", ev.ok)
+            assertEquals("content_unverified", ev.category)
+        }
+    }
+
+    @Test fun completeAndNextChapterDiagnosticsAreNotFailed() {
+        // complete/next_chapter 只说明观测分页终止，不证语义完整——但不因此判失败
+        for (reason in listOf("complete", "next_chapter")) {
+            val diag = mapOf("endReason" to reason, "pages" to listOf(mapOf("page" to 1, "httpStatus" to 200)))
+            val ev = runContent(contentRuntime("正常内容", extraData = mapOf("contentDiagnostics" to diag)))
+            assertTrue("endReason=$reason 不该判失败", ev.ok)
+        }
+    }
+
+    @Test fun legacyReportWithoutDiagnosticsIsCompatible() {
+        // 旧报告无 contentDiagnostics：diagnosticsAvailable=false，按现有内容判，不伪造 HTTP 成功
+        val ev = runContent(contentRuntime("正常正文内容"))
+        assertTrue(ev.ok)
+        assertEquals(false, ev.facts["diagnosticsAvailable"])
+        assertNull(ev.facts["pagesEndReason"])
+        assertNull(ev.facts["httpStatusMin"])
+        assertNull(ev.facts["httpStatusMax"])
+        assertEquals(200, ev.facts["reportedStatusMin"])
+    }
+
+    @Test fun diagnosticsFieldsDoNotLeakRawData() {
+        // facts 只带有限枚举/计数/状态，不转发 URL/正文/头等原始诊断字段
+        val diag = mapOf("endReason" to "complete", "pages" to listOf(
+            mapOf("page" to 1, "httpStatus" to 200, "transport" to "webview", "cacheUsed" to true, "url" to "https://a.com/secret")))
+        val ev = runContent(contentRuntime("正常", extraData = mapOf("contentDiagnostics" to diag)))
+        assertTrue(ev.ok)
+        val factKeys = ev.facts.keys
+        assertTrue(factKeys.none { it in setOf("url", "content", "headers", "transport", "cacheUsed") })
+        assertTrue(ev.facts.values.none { it.toString().contains("a.com/secret") })
+        assertTrue(ev.facts.values.none { it.toString().contains("webview") })
+    }
+
+    @Test fun failedContentIsNotFullAfterGsonRoundtrip() {
+        // 四段全跑但正文是兜底提示 → 序列化 roundtrip 后仍不能判 full
+        val stages = mapOf(
+            "搜索" to LegadoRuntime.DebugReport("搜索", "我", listOf("ok"), listOf(mapOf("name" to "书", "bookUrl" to "https://a.com/b"))),
+            "详情" to LegadoRuntime.DebugReport("详情", "u", listOf("ok"), mapOf("name" to "书", "tocUrl" to "https://a.com/t")),
+            "目录" to LegadoRuntime.DebugReport("目录", "t", listOf("ok"), mapOf("totalChapters" to 1, "chapters" to listOf(mapOf("url" to "https://a.com/c1")))),
+            "正文" to LegadoRuntime.DebugReport("正文", "c", listOf("第1页 HTTP 200，正文 4 字符"), mapOf("pages" to 1, "content" to "获取失败", "contentTotalChars" to 4)),
+        )
+        val check = mapOf(
+            "搜索" to stages["搜索"]!!, "详情" to stages["详情"]!!, "目录" to stages["目录"]!!, "正文" to stages["正文"]!!,
+            "validation" to BookSourceValidator().validate("""{"bookSourceName":"x","bookSourceUrl":"https://a.com","ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}"""),
+            "evidence" to stages.mapValues { (s, r) -> SourceCheckEvidence.of(s, r) },
+            "verdict" to mapOf("summary" to "partial", "stagesRan" to 4, "stagesOk" to 3,
+                "stagesFailed" to listOf("正文"), "validationOk" to true, "validationIssues" to 0),
+        )
+        val gson = Gson()
+        val roundtrip = gson.fromJson(gson.toJson(check), Map::class.java) as Map<String, Any>
+        val report = SourceFilterPolicy.filter(
+            listOf("""{"bookSourceName":"x","bookSourceUrl":"https://a.com","ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}"""),
+            checkResults = mapOf(0 to roundtrip),
+            excludes = setOf(SourceFilterPolicy.Exclude.FAILED),
+        )
+        assertEquals("兜底提示正文不能判 full/通过过滤", 0, report.keptCount)
+        assertTrue(report.excluded[0].reasons.any { it.contains("正文") })
+    }
+
+    @Test fun rhinoDecryptionThrowBecomesErrorNotSwallowed() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("<div>加密内容</div>"))
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "x", "bookSourceUrl" to server.url("/").toString(),
+                "ruleToc" to mapOf("chapterList" to "a"),
+                "ruleContent" to mapOf("content" to "@js:java.createSymmetricCrypto('AES/ECB/PKCS5Padding','0123456789abcdef').decryptStr('!!!not-base64!!!')"),
+            ))
+            val result = CheckSourceRunner.run(
+                CheckSourceRunner.Request(source, contentUrl = server.url("/chapter").toString()),
+                runtime(), null,
+            )
+            val failure = result["正文"] as Map<*, *>
+            assertTrue(failure["error"].toString().contains("decryptStr：密文必须是合法的标准 Base64 字符串"))
+            val evidence = result["evidence"] as Map<*, *>
+            assertFalse((evidence["正文"] as SourceCheckEvidence.StageEvidence).ok)
+            assertNotEquals("full", (result["verdict"] as Map<*, *>)["summary"])
+            assertEquals("/chapter", server.takeRequest(5, TimeUnit.SECONDS)?.path)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test fun fullRuntimeFailuresSurviveRoundtripAndFiltering() = runBlocking {
+        for ((code, body) in listOf(200 to "获取失败", 500 to "仍有部分正文")) {
+            MockWebServer().use { server ->
+                val normal = fullChainDispatcher()
+                server.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse =
+                        if (request.path == "/book/1/1") MockResponse().setResponseCode(code).setBody("<div id='content'>$body</div>")
+                        else normal.dispatch(request)
+                }
+                server.start()
+                val source = fullChainSource(server)
+                val result = CheckSourceRunner.run(CheckSourceRunner.Request(source, auto = true), runtime(), null)
+                val verdict = result["verdict"] as Map<*, *>
+                assertEquals("partial", verdict["summary"])
+                assertEquals(3, verdict["stagesOk"])
+                val gson = Gson()
+                val roundtrip = gson.fromJson(gson.toJson(result), Map::class.java)
+                val filtered = SourceFilterPolicy.filter(listOf(source), mapOf(0 to roundtrip), setOf(SourceFilterPolicy.Exclude.FAILED))
+                assertEquals(0, filtered.keptCount)
+                assertTrue(filtered.excluded.single().reasons.any { it.contains("正文") })
+                assertEquals(4, server.requestCount)
+            }
+        }
+    }
+
+    @Test fun cleanedContentIgnoresNavigationInPreReplaceSample() {
+        val evidence = runContent(contentRuntime("他推开门，屋内一片寂静。", extraData = mapOf("mergedBeforeReplace" to "请先登录后查看本章内容")))
+        assertTrue(evidence.ok)
     }
 }

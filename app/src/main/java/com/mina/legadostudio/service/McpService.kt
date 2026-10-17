@@ -227,8 +227,13 @@ class McpService : Service() {
         engine = null
     }
 
+    private fun clientEndpoint(): String =
+        endpoints.firstOrNull()
+            ?.let { McpAccess.connectionUrl(it, McpConfigStore(this).loadCompactMode()) }
+            .orEmpty()
+
     private fun copyEndpoint() {
-        val endpoint = endpoints.firstOrNull().orEmpty()
+        val endpoint = clientEndpoint()
         if (endpoint.isNotEmpty()) {
             (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Endpoint", endpoint))
             Toast.makeText(this, "Endpoint 已复制", Toast.LENGTH_SHORT).show()
@@ -251,7 +256,7 @@ class McpService : Service() {
         val stats = McpStats.snapshot()
         val title = if (running) "阅读书源MCP · 运行中" else "阅读书源MCP · 已停止"
         val detail = buildString {
-            append(endpoints.firstOrNull() ?: "暂无回环 Endpoint")
+            append(clientEndpoint().ifEmpty { "暂无回环 Endpoint" })
             append(" · ${stats["clientCount"] ?: 0} 个活跃会话")
             append("\n最近访问：")
             append(if ((stats["lastAccessAt"] ?: 0) > 0) java.text.DateFormat.getTimeInstance().format(stats["lastAccessAt"]) else "暂无")
