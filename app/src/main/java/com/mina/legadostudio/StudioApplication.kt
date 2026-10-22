@@ -130,6 +130,46 @@ class StudioApplication : Application() {
         )
     }
     val corpus by lazy { com.mina.legadostudio.domain.CorpusRepository(this) }
+    /** 阅读 App Web 服务连接配置（与 MCP 自身配置完全分离，改动不重启 MCP）。 */
+    val readerWebConfig by lazy { com.mina.legadostudio.reader.ReaderWebConfigStore(this) }
+    /** 只向已保存 origin 发固定 allowlist 路由的专用客户端：无 cookie、无 HTTP 日志、禁重定向。 */
+    val readerWebClient by lazy {
+        com.mina.legadostudio.reader.ReaderWebClient(configProvider = { readerWebConfig.load() })
+    }
+    /** 只读能力探测：固定路由、无副作用、不回显地址/令牌。 */
+    val readerWebBridge by lazy { com.mina.legadostudio.reader.ReaderWebBridge(readerWebClient) }
+    /** 把本地已保存成品写入阅读：预检→按需写入→回读核对。 */
+    val readerWebSourceSync by lazy {
+        com.mina.legadostudio.reader.ReaderWebSourceSync(readerWebClient) { id -> projects.get(id)?.sourceJson }
+    }
+    /** 旧版 WS 调试客户端（固定「Web 端口 + 1」），也可由独立调试工具主动调用。 */
+    val readerWebLegacyDebug by lazy {
+        com.mina.legadostudio.reader.ReaderWebLegacyDebugClient(configProvider = { readerWebConfig.load() })
+    }
+    val readerWebSearch by lazy {
+        com.mina.legadostudio.reader.ReaderWebSearchClient(configProvider = { readerWebConfig.load() })
+    }
+    val readerWebDirectActions by lazy {
+        com.mina.legadostudio.reader.ReaderWebDirectActions(readerWebClient, readerWebLegacyDebug, readerWebSearch)
+    }
+    val readerWebVerifier by lazy {
+        com.mina.legadostudio.reader.ReaderWebVerifier(
+            readerWebClient,
+            legacyDebug = { config, url, keyword, timeoutMs ->
+                readerWebLegacyDebug.debugAt(config, url, keyword, totalTimeoutMs = timeoutMs)
+            },
+        )
+    }
+    /**
+     * 持续阅读 Web 页面会话（进程级单例）：跨 MCP 调用保留同一 WebView，SPA 的 DOM/JS 状态不丢。
+     * 目标只来自已保存配置；模型只能传 selector/文本/滚动量，会话内不提供 URL/host/JS 入口。
+     */
+    val readerWebUiSession by lazy {
+        com.mina.legadostudio.reader.ReaderWebUiSession(
+            this,
+            configProvider = { readerWebConfig.load() },
+        )
+    }
     val taskContexts by lazy { com.mina.legadostudio.mcp.TaskContextStore(snapshotDir = java.io.File(filesDir, "contexts")) }
     val analyzer by lazy { HtmlAnalyzer() }
     fun fetchCaptchaImage(imageUrl: String, origin: HttpOrigin): String {

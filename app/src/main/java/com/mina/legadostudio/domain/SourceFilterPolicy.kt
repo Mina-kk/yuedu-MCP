@@ -134,7 +134,7 @@ object SourceFilterPolicy {
     internal fun checkSummaryCoherent(check: Map<String, Any>, sourceType: Int): Boolean {
         val verdict = check["verdict"] as? Map<*, *> ?: return false
         val summary = verdict["summary"]?.toString()
-            ?.takeIf { it in setOf("full", "partial", "unusable", "unverified") } ?: return false
+            ?.takeIf { it in setOf("full", "partial", "unusable", "inconclusive", "unverified") } ?: return false
         val declaredEv = check["evidence"] as? Map<*, *> ?: return false
         val stages = listOf("搜索", "详情", "目录", "正文")
 
@@ -172,7 +172,7 @@ object SourceFilterPolicy {
         // verdict.summary 与证据分布必须自洽
         return when (summary) {
             "full" -> declaredOk == 4
-            "unusable" -> declaredRan > 0 && declaredOk == 0
+            "unusable", "inconclusive" -> declaredRan > 0 && declaredOk == 0
             "unverified" -> declaredRan == 0
             else -> declaredOk in 1..3 || (declaredOk == 4 && declaredRan >= 4)
         }

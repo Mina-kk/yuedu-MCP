@@ -4,8 +4,11 @@ import com.google.gson.JsonParser
 import com.mina.legadostudio.network.HttpOrigin
 import com.mina.legadostudio.domain.SourceDedupeAnalyzer
 import com.mina.legadostudio.domain.SourceFilterPolicy
+import com.mina.legadostudio.reader.ReaderExecutionRegistry
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -114,9 +117,16 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
                 asArray = req.arguments.bool("asArray") == true,
             )
             require(exportErr == null) { exportErr!! }
+            val readerRows = keptRows.map { row ->
+                val url = runCatching {
+                    JsonParser.parseString(row.sourceJson).asJsonObject.get("bookSourceUrl")?.asString?.trim()
+                }.getOrNull().orEmpty()
+                ReaderDeliveryRow(row.projectId, url, url.takeIf { it.isNotEmpty() }?.let { ReaderExecutionRegistry.summary(it, now) })
+            }
             ok(app.gson.toJson(linkedMapOf<String, Any?>(
                 "export" to exportText,
                 "summary" to summary,
+            ) + exportDeliveryFields(readerWebConfigured(), readerRows) + linkedMapOf<String, Any?>(
                 "filter" to McpSourceTools.filterPayload(filterReport),
                 // 可信证据命中数；externalClaims 只回显不自证
                 "verifiedSources" to checkMap.size,
@@ -126,15 +136,15 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
             )))
         }.getOrElse { err(it.message.orEmpty()) }
     }
-    server.tool("import_reader", "把书源推送到本机已安装的「阅读」系客户端（经 legado://import/bookSource + 本机回环 JSON 端点）。二选一提供书源：projectId（已存项目 ID，优先）或 source（完整 BookSource JSON 临时导入）。packageName 缺省时不发起导入——返回 device 上可处理该协议的目标列表（packageName/label/known，上次所用置顶）让你或用户选定后重传；给定的 packageName 不在目标列表内会报错并附合法清单。推送成功后由阅读客户端自己的勾选页完成导入，本工具只负责唤起，不保证对方最终收下。", ToolSchema(properties = buildJsonObject {
+    server.tool("import_reader", "仅唤起勾选页，未确认导入；优先Web同步：把书源推送到本机已安装的「阅读」系客户端（经 legado://import/bookSource + 本机回环 JSON 端点）。二选一提供书源：projectId（已存项目 ID，优先）或 source（完整 BookSource JSON 临时导入）。必须显式传 packageName 才发起唤起；缺省只返回本机可处理该协议的目标列表（packageName/label/known，上次所用置顶）且不启动任何界面；给定的 packageName 不在目标列表内会报错并附合法清单。唤起成功只代表阅读的勾选页被打开，用户还要在勾选页里确认——回包 launched=true、confirmation=pending_user、confirmed=false，绝不能当作已导入、也绝不能因此跳过核实；确认后用 reader_web_status 或 reader_web_verify 核实（verify 只检验阅读里已保存的书源），推荐优先用 reader_web_sync_source(projectId) 把已保存项目直接写入阅读并回读确认。", ToolSchema(properties = buildJsonObject {
         put("projectId", stringProp("可选：已存书源项目 ID（与 source 二选一，优先）"))
-        put("source", stringProp("可选：完整 BookSource JSON（与 projectId 二选一）"))
-        put("packageName", stringProp("可选：目标阅读包名（须为 targets 之一）；缺省返回可选目标列表不导入"))
-    }, required = emptyList()), toolAnnotations = write) { req ->
+        put("source", stringProp("可选：完整 BookSource JSON（与 projectId 二选一）；传 JSON 字符串或已解析的对象均可"))
+        put("packageName", stringProp("可选：目标阅读包名（须为 targets 之一）；缺省只返回可选目标列表、不唤起任何界面"))
+    }, required = emptyList()), toolAnnotations = openWrite) { req ->
         runCatching {
             val targets = app.readerTargets()
             val projectIdArg = req.arguments.str("projectId")?.takeIf { it.isNotBlank() }
-            val sourceArg = req.arguments.str("source")?.takeIf { it.isNotBlank() }
+            val sourceArg = req.arguments.jsonText("source")?.takeIf { it.isNotBlank() }
             require(!(projectIdArg == null && sourceArg == null)) { "需要 projectId 或 source 之一" }
             require(!(projectIdArg != null && sourceArg != null)) { "projectId 与 source 只能传一个" }
             val sourceJson = when {
@@ -144,32 +154,48 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
             }
             val targetList = targets.map { mapOf("packageName" to it.packageName, "label" to it.label, "known" to it.known) }
             val pkg = req.arguments.str("packageName")?.takeIf { it.isNotBlank() }
-                ?: return@tool ok(app.gson.toJson(mapOf(
-                    "imported" to false, "needsPackageName" to true,
+                ?: return@tool ok(app.gson.toJson(linkedMapOf<String, Any?>(
+                    "launched" to false, "confirmation" to "not_requested", "confirmed" to false,
+                    "needsPackageName" to true,
                     "targets" to targetList,
-                    "hint" to "未指定 packageName：以上是本机可处理 legado://import/bookSource 的阅读客户端；请选其一（上次所用置顶）作为 packageName 重新调用以真正推送。",
+                    // 兼容字段：旧版 imported=true 的语义是错的（只唤起、未确认），保留也必须恒为 false
+                    "imported" to false,
+                    "deprecated" to "imported 字段已废弃，恒为 false；本次没有发起任何导入。以 launched/confirmation/confirmed 为准",
+                    "nextAction" to "用户选定 targets 中一个 packageName 后重传本工具才会唤起；若要真正写入阅读，优先用 reader_web_sync_source(projectId) 并回读确认",
+                    "hint" to "未指定 packageName：以上是本机可处理 legado://import/bookSource 的阅读客户端；请选其一（上次所用置顶）作为 packageName 重新调用以唤起勾选页。",
                 )))
             val target = targets.firstOrNull { it.packageName == pkg }
                 ?: error("packageName 不是本机可处理书源导入的阅读客户端：$pkg；合法目标：${targets.joinToString { it.packageName }.ifBlank { "（无，请先安装阅读系客户端）" }}")
             app.importToReader(sourceJson, target.packageName)
             // 回执带推送内容的指纹：jsLib 是远程依赖，长度+sha256 让调用方确认推过去的就是本地这份
             val receipt = linkedMapOf<String, Any?>(
-                "imported" to true, "packageName" to target.packageName, "label" to target.label,
+                // startActivity 成功只是拉起勾选页，导入仍待用户在阅读里确认
+                "launched" to true, "confirmation" to "pending_user", "confirmed" to false,
+                "packageName" to target.packageName, "label" to target.label,
                 "sourceChars" to sourceJson.length,
                 "sourceSha256" to TaskContextStore.digest(sourceJson),
+                // 兼容字段：绝不回 imported=true；旧语义会误导调用方跳过核实
+                "imported" to false,
+                "deprecated" to "imported 字段已废弃，恒为 false；本次只唤起了阅读的勾选页，导入是否完成以 confirmed/confirmation 为准",
             )
+            projectIdArg?.let { receipt["projectId"] = it }
             runCatching { JsonParser.parseString(sourceJson).asJsonObject.get("jsLib") }
                 .getOrNull()?.takeIf { it.isJsonPrimitive }?.asString?.let { jsLib ->
                     receipt["jsLibChars"] = jsLib.length
                     receipt["jsLibSha256"] = TaskContextStore.digest(jsLib)
                 }
-            receipt["hint"] = "已唤起 ${target.label} 的导入勾选页；最终是否导入由该客户端与用户确认，本工具不保证结果。sourceSha256/jsLibSha256 是本次推送内容的指纹，可与本地书源核对。"
+            receipt["nextAction"] = if (projectIdArg != null) {
+                "先让用户在阅读的勾选页确认导入，再用 reader_web_status/reader_web_verify 核实；更推荐直接优先用 reader_web_sync_source(projectId=\"$projectIdArg\") 写入阅读并回读确认"
+            } else {
+                "先让用户在阅读的勾选页确认导入，再用 reader_web_status/reader_web_verify 核实；本次传的是临时 source 未入库，无法 reader_web_sync_source，建议先 save_project 再同步"
+            }
+            receipt["hint"] = "已唤起 ${target.label} 的勾选页（launched=true），但用户尚未确认，confirmed=false——不要当作导入成功，也不要停止核实。sourceSha256/jsLibSha256 是本次推送内容的指纹，可与本地书源核对。"
             ok(app.gson.toJson(receipt))
         }.getOrElse { err(it.message.orEmpty()) }
     }
-    server.tool("check_source", "按提供的搜索/详情/目录/正文入口批量运行校验；书源含 searchUrl 而未传 searchKey 时会自动用关键词「我」探测搜索链路并在 warnings 标注（搜索页结构常与列表页不同，漏验会让真机搜索零结果）；默认复用本任务快照避免重复联网，refresh=true 全程实时（上线验收用）；auto=true 启用链路推进（搜索→详情→目录→正文自动补全，缺省保持旧行为只跑显式阶段）；verdict.summary 的 full 仅在静态校验及文本源搜索、详情、目录、正文四阶段全部通过时返回；refresh=false 可能复用任务快照，refresh=true 仅表示本次请求重新联网，不保证后续持续可用或阅读客户端可用；返回 timingsMs 为各阶段与总耗时（含缓存、JS 求值与联网）", checkSourceSchema(), toolAnnotations = openWrite) { req ->
+    server.tool("check_source", "工坊沙箱初筛，不代表阅读端通过；已配置阅读 Web 时还须用 reader_web_page 导航书源管理/调试并确认实际反馈，或以 reader_web_verify 本次结构化结果验证；旧 WS 日志不可判通过。按提供的搜索/详情/目录/正文入口批量运行；书源含 searchUrl 而未传 searchKey 时自动用「我」探测并在 warnings 标注；默认复用任务快照，refresh=true 全程实时；auto=true 自动链路推进；verdict.summary=full 仅表示沙箱静态及文本源四阶段样本通过，不保证阅读客户端可用；无法访问阅读时须标注阅读端未覆盖。返回 timingsMs 含缓存、JS 求值与联网。", checkSourceSchema(), toolAnnotations = openWrite) { req ->
         runCatching {
-            val source = req.arguments.str("source") ?: return@tool err("source 不能为空")
+            val source = resolveSourceArg(req.arguments) ?: return@tool err("source/projectId 至少传一个")
             // 与 save_source/debug_source 同一套 JSON 错误提示：语法错直接回行列定位片段，不进后续 debug
             runCatching { JsonParser.parseString(source).asJsonObject }.getOrNull()
                 ?: return@tool err(app.validator.validate(source).issues.firstOrNull()?.let { "source 不是合法 JSON 对象：${it.message}" }
@@ -211,13 +237,105 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
             val summary = cacheTrace.summary()
             val fromCache = (summary["cacheHits"] as? Int ?: 0) > 0
             val ageSec = cacheTrace.snapshotAgeSeconds()
+            val sourceUrl = runCatching {
+                JsonParser.parseString(source).asJsonObject.get("bookSourceUrl")?.asString?.trim()
+            }.getOrNull().orEmpty()
+            val readerConfigured = readerWebConfigured()
             ok(app.gson.toJson(hinted + mapOf(
                 "cache" to summary,
                 "fromCache" to fromCache,
                 "snapshotAgeSeconds" to ageSec,
+                "readerWebVerification" to "not_performed",
+                "readerWebNote" to "此结果仅为工坊沙箱样本初筛；已配置阅读 Web 时需用 reader_web_page 导航书源管理/调试确认实际反馈，或用 reader_web_verify 的本次结构化结果。网页入口可开和旧版 WS 日志均不等于书源通过；无法访问阅读则明确标记阅读端未覆盖。",
+            ) + sandboxVerdictFields(
+                readerConfigured,
+                sourceUrl.isNotEmpty() && ReaderExecutionRegistry.hasExecuted(sourceUrl),
+                sourceUrl.isNotEmpty() && readerSidePassed(ReaderExecutionRegistry.summary(sourceUrl)),
             ) + if (fromCache) mapOf(
                 "warning" to "⚠ 复用缓存快照（${(ageSec ?: 0) / 60} 分钟前抓取），最终验收请传 refresh=true 实时校验",
             ) else emptyMap()))
         }.getOrElse { verificationAware(it, req.arguments) }
     }
+}
+
+private suspend fun StudioMcpServer.readerWebConfigured(): Boolean =
+    withContext(Dispatchers.IO) { runCatching { app.readerWebConfig.load() }.getOrNull() } != null
+
+/**
+ * check_source 回包的口径字段（纯函数，JVM 可测）：沙箱结论永远只是 sandbox_only，
+ * 已配置阅读 Web 时列出必须走完的阅读端步骤与禁止话术。
+ */
+internal fun sandboxVerdictFields(
+    readerConfigured: Boolean,
+    readerSideExecuted: Boolean,
+    readerSidePassed: Boolean = false,
+): Map<String, Any?> {
+    val base = linkedMapOf<String, Any?>(
+        "verdictScope" to "sandbox_only",
+        "readerSideExecuted" to readerSideExecuted,
+        "readerSidePassed" to readerSidePassed,
+    )
+    if (!readerConfigured) {
+        base["deliveryRule"] = "未配置阅读 Web：只能说「工坊沙箱样本通过」，必须标注阅读端未覆盖"
+        return base
+    }
+    base["requiredNextActions"] = listOf("save_source", "reader_web_sync_source", "reader_web_debug")
+    base["forbiddenClaims"] = listOf("阅读端通过", "与阅读端一致", "4/4 通过即可用")
+    base["deliveryRule"] = when {
+        readerSidePassed ->
+            "阅读端最近一次调试四阶段均已到达且无失败行；交付以阅读端 reader_web_debug 回包的 structuredResult 为准，沙箱结果只作参考"
+        readerSideExecuted ->
+            "阅读端已执行过本源，但最近一次未走通四阶段或有失败行；按 reader_web_debug 的 structuredResult 修规则后重新同步"
+        else ->
+            "已配置阅读 Web 但本源还没有任何阅读端执行记录：沙箱 4/4 不能作为交付结论。" +
+                "必须 save_source → reader_web_sync_source（服务端会自动跑阅读端调试）→ 读 structuredResult.logVerdict 后再交付"
+    }
+    return base
+}
+
+internal fun readerSidePassed(summary: Map<String, Any?>?): Boolean {
+    if (summary == null || summary["executed"] != true) return false
+    if ((summary["failureSignals"] as? List<*>).orEmpty().isNotEmpty()) return false
+    val stages = (summary["stagesReached"] as? List<*>).orEmpty().map { it.toString() }.toSet()
+    return stages.containsAll(listOf("search", "detail", "toc", "content"))
+}
+
+internal data class ReaderDeliveryRow(val projectId: String, val bookSourceUrl: String, val execution: Map<String, Any?>?)
+
+/** export_checked_sources 的交付门槛（只标注，不拒绝导出）。 */
+internal fun exportDeliveryFields(readerConfigured: Boolean, rows: List<ReaderDeliveryRow>): Map<String, Any?> {
+    val perSource = rows.map { r ->
+        linkedMapOf<String, Any?>(
+            "projectId" to r.projectId,
+            "bookSourceUrl" to r.bookSourceUrl,
+            "readerExecution" to (r.execution ?: mapOf("executed" to false)),
+        )
+    }
+    fun failed(e: Map<String, Any?>?): Boolean {
+        if (e == null) return false
+        val signals = (e["failureSignals"] as? List<*>).orEmpty()
+        val hits = e["searchHits"] as? Int
+        val kinds = (e["kinds"] as? List<*>).orEmpty()
+        return signals.isNotEmpty() || ("search" in kinds && hits == 0 && e["latestDebugAtEpochMs"] == null)
+    }
+    val status = when {
+        !readerConfigured -> "reader_web_not_configured"
+        rows.any { it.execution?.get("latestDebugStatus") in setOf("TIMEOUT", "CONNECTION_LOST", "truncated") } -> "reader_debug_incomplete"
+        rows.any { failed(it.execution) } -> "reader_failure_signals"
+        rows.isEmpty() || rows.any { it.execution?.get("executed") != true } -> "sandbox_only_not_reader_verified"
+        else -> "reader_executed"
+    }
+    val out = linkedMapOf<String, Any?>("deliveryStatus" to status, "readerExecutions" to perSource)
+    when (status) {
+        "reader_web_not_configured" -> out["blockingReason"] =
+            "未配置阅读 Web，导出的书源只有工坊沙箱结果；交付时必须告诉用户「阅读端未覆盖」"
+        "reader_debug_incomplete" -> out["blockingReason"] =
+            "最近一次阅读调试没有完整终止证据；历史失败仍在 historicalFailureSignals，仅供排查；请重跑 reader_web_debug"
+        "reader_failure_signals" -> out["blockingReason"] =
+            "阅读端调试/搜索报告了失败（见 readerExecutions）；不得宣称可用，按阅读端日志修规则后重新同步"
+        "sandbox_only_not_reader_verified" -> out["blockingReason"] =
+            "有书源没有阅读端执行记录：先 reader_web_sync_source（会自动跑阅读端调试）并读 structuredResult，再交付；" +
+                "沙箱 4/4 不能当作阅读端可用"
+    }
+    return out
 }

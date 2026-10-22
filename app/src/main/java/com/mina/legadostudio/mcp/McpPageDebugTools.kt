@@ -9,6 +9,11 @@ import kotlinx.serialization.json.put
 
 internal fun StudioMcpServer.registerPageDebugTools(server: Server) {
     server.tool("fetch_page", "抓取并保存网页上下文。responseMode=auto首次抓取默认返回6000字符预览+pageId（?compact=1连接的auto缺省降为2000）；显式maxChars(0..12000)始终优先，preview模式缺省6000。reference模式或auto命中缓存时不回正文、仅引用。同任务相同URL(含POST)五分钟内复用。用read_page分段/搜索、analyze_html/inspect_rule(pageId)测试，勿重复传HTML。refresh=true强制联网。", fetchSchema(), toolAnnotations = openWrite) { req ->
+        // 与已保存阅读 Web origin 完全相同：不抓页，引导用专用页面工具（阅读网页要登录态与 SPA 交互）
+        val readerConfig = withContext(Dispatchers.IO) { runCatching { app.readerWebConfig.load() }.getOrNull() }
+        if (readerConfig != null && ReaderWebOriginHint.matches(req.arguments.str("url"), readerConfig)) {
+            return@tool ok(app.gson.toJson(ReaderWebOriginHint.payload(readerConfig)))
+        }
         runCatching { fetchPageOk(req.arguments) }.getOrElse { verificationAware(it, req.arguments) }
     }
     server.tool("analyze_html", "分析HTML或测试纯 jsoup CSS 选择器（selector 不支持 Legado 的 @css:/@@/XPath/JS 组合规则；完整规则请用 inspect_rule）。优先传pageId分析完整快照，无需联网；html与pageId二选一。", schema(mapOf("html" to "HTML（与pageId二选一）", "pageId" to "已存网页ID", "baseUrl" to "基础URL", "selector" to "仅纯 jsoup CSS 选择器；完整 Legado 规则用 inspect_rule"), emptyList()), toolAnnotations = readOnly) { req ->
@@ -49,9 +54,9 @@ internal fun StudioMcpServer.registerPageDebugTools(server: Server) {
                 "elements" to report.elements, "elementWarning" to report.elementWarning, "contextId" to contextId(req.arguments), "pageId" to e?.id, "cacheHit" to (hit?.reused ?: (pageId != null)), "snapshot" to (e?.let { contexts.metadata(it) } ?: mapOf("live" to true)))))
         }.getOrElse { verificationAware(it) }
     }
-    server.tool("debug_source", "使用 App 内运行时调试 BookSource JSON；entry 支持关键词、详情 URL、++目录、--正文、分类::URL。默认复用本任务快照，refresh=true 全程实时。注意 searchUrl 的 @js: 最后一行必须以纯表达式返回 http(s) URL 或 \"url,\"+JSON.stringify({method,body,headers})，带 return 或返回裸文本会报「返回的值无效」。", schema(mapOf("source" to "BookSource JSON", "entry" to "调试入口", "refresh" to "可选，true=不使用缓存"), listOf("source", "entry")), toolAnnotations = openWrite) { req ->
+    server.tool("debug_source", "使用 App 内运行时调试 BookSource JSON；entry 支持关键词、详情 URL、++目录、--正文、分类::URL。默认复用本任务快照，refresh=true 全程实时。注意 searchUrl 的 @js: 最后一行必须以纯表达式返回 http(s) URL 或 \"url,\"+JSON.stringify({method,body,headers})，带 return 或返回裸文本会报「返回的值无效」。", schema(mapOf("source" to "BookSource JSON（JSON 字符串或已解析的对象均可；与 projectId 二选一）", "projectId" to "可选：已保存项目 ID，与 source 二选一（绕过 source 传输，直接调试已存项目）", "entry" to "调试入口", "refresh" to "可选，true=不使用缓存"), listOf("entry")), toolAnnotations = openWrite) { req ->
         runCatching {
-            val source = req.arguments.str("source") ?: return@tool err("source 不能为空")
+            val source = resolveSourceArg(req.arguments) ?: return@tool err("source/projectId 至少传一个")
             // 与 save_source 同一套 JSON 错误提示：语法错直接回行列定位片段，不进后续 debug
             runCatching { JsonParser.parseString(source).asJsonObject }.getOrNull()
                 ?: return@tool err(app.validator.validate(source).issues.firstOrNull()?.let { "source 不是合法 JSON 对象：${it.message}" }
@@ -73,17 +78,22 @@ internal fun StudioMcpServer.registerPageDebugTools(server: Server) {
             if (hint.isEmpty()) verificationAware(e, req.arguments) else err(e.message.orEmpty() + hint)
         }
     }
-    server.tool("eval_js", "Legado Rhino执行JS；可传pageId，将完整已存正文注入result/src，免去复制HTML。已注入官方同名对象：java（ajax/connect/加解密）、cookie（getCookie/getKey/setCookie=合并/replaceCookie=替换/removeCookie）、cache（put/get/delete/putMemory/getFromMemory，进程内有效）、source（put/get/getVariable/setVariable，debug_source时与书源变量互通）。JS内ajax/connect仍会联网。每次调用都是全新作用域：JS 里 var/函数声明不会带到下一次调用，跨调用要共享数据请显式用 cache.put/get 或 source.put/get；报「Cannot find function / 方法不存在」类错误时对照沙箱可用 API 清单（get_skill_reference(id=legado-book-source, path=references/js-api.md)）。", schema(mapOf("js" to "JavaScript", "baseUrl" to "基础URL", "pageId" to "可选网页快照ID"), listOf("js")), toolAnnotations = openWrite) { req ->
+    server.tool("eval_js", "Legado Rhino执行JS；可传pageId，将完整已存正文注入result/src，免去复制HTML。已注入官方同名对象：java（ajax/connect/加解密）、cookie（getCookie/getKey/setCookie=合并/replaceCookie=替换/removeCookie）、cache（put/get/delete/putMemory/getFromMemory，进程内有效）、source（put/get/getVariable/setVariable，debug_source时与书源变量互通）。JS内ajax/connect仍会联网。每次调用都是全新作用域：JS 里 var/函数声明不会带到下一次调用，跨调用要共享数据请显式用 cache.put/get 或 source.put/get；报「Cannot find function / 方法不存在」类错误时对照沙箱可用 API 清单（get_skill_reference(id=legado-book-source, path=references/js-api.md)）。", schema(mapOf("js" to "JavaScript", "baseUrl" to "基础URL", "pageId" to "可选网页快照ID", "dumpVars" to "可选 true=回包附 vars 快照：result/baseUrl 等内置变量当前值"), listOf("js")), toolAnnotations = openWrite) { req ->
         runCatching {
             val e = req.arguments.str("pageId")?.let { savedEntry(req.arguments, it) }
             require(e == null || e.kind == "page") { "需要pageId" }
             val js = req.arguments.str("js") ?: return@tool err("js 不能为空")
             val evalCtxId = contextId(req.arguments)
-            val output = app.runtime.evaluate(js, req.arguments.str("baseUrl") ?: e?.page?.finalUrl.orEmpty(), e?.text,
+            val usedBaseUrl = req.arguments.str("baseUrl") ?: e?.page?.finalUrl.orEmpty()
+            val output = app.runtime.evaluate(js, usedBaseUrl, e?.text,
                 HttpOrigin(sourceAnchor = inheritedAnchor(req.arguments, evalCtxId), contextId = evalCtxId, originKind = "eval_js"))
             // 统一带上下文句柄：e==null（未传 pageId）时也要回 contextId，AI 拿得到任务上下文
-            ok(app.gson.toJson(if (e == null) mapOf("contextId" to evalCtxId, "output" to output)
-                else mapOf("contextId" to evalCtxId, "pageId" to e.id, "snapshot" to contexts.metadata(e), "output" to output)))
+            val base = if (e == null) mapOf("contextId" to evalCtxId, "output" to output)
+                else mapOf("contextId" to evalCtxId, "pageId" to e.id, "snapshot" to contexts.metadata(e), "output" to output)
+            val result = if (req.arguments.bool("dumpVars") == true) base + mapOf("vars" to mapOf(
+                "result" to output.value, "baseUrl" to usedBaseUrl, "pageId" to (e?.id ?: "")
+            )) else base
+            ok(app.gson.toJson(result))
         }.getOrElse { e ->
             val message = e.message.orEmpty()
             if (message.contains("【API 提示】")) err(message)

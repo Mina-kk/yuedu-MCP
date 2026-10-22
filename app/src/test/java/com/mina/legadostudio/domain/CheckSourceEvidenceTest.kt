@@ -529,6 +529,10 @@ class CheckSourceEvidenceTest {
         assertFalse("validation 不通过时不能报 full", "full" == verdict["summary"])
         assertEquals("partial", verdict["summary"])
         assertEquals(false, verdict["validationOk"])
+        // 文案只说「有样本证据」，不把四段称成「站点通」
+        val note = verdict["note"].toString()
+        assertTrue(note, note.contains("四段均有样本证据"))
+        assertFalse(note, note.contains("四段全通"))
     }
 
     @Test fun autoChainDoesNotAdvanceFromFailedReport() = runBlocking {
@@ -583,6 +587,27 @@ class CheckSourceEvidenceTest {
         val evidence = result["evidence"] as Map<String, SourceCheckEvidence.StageEvidence>
         assertFalse(evidence["详情"]!!.ok)
         assertEquals("unusable", (result["verdict"] as Map<*, *>)["summary"])
+    }
+
+    @Test fun sandboxOnlyFailuresAreInconclusiveNotUnusable() = runBlocking {
+        val runtime = object : LegadoRuntime {
+            override suspend fun inspect(request: LegadoRuntime.InspectRequest) = error("unused")
+            override suspend fun debug(sourceJson: String, entry: String): LegadoRuntime.DebugReport {
+                throw RuntimeException("JS 求值失败：找不到函数 foo\n【签名提示】沙箱不支持该签名：java.foo()；属验收环境限制，非书源错误。")
+            }
+            override suspend fun evaluate(js: String, baseUrl: String, previous: Any?) = error("unused")
+            override fun validate(sourceJson: String) = BookSourceValidator().validate(sourceJson)
+        }
+        val result = CheckSourceRunner.run(
+            CheckSourceRunner.Request("""{"bookSourceName":"x","bookSourceUrl":"https://a.com","ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}""", detailUrl = "https://a.com/b"),
+            runtime, null,
+        )
+        @Suppress("UNCHECKED_CAST")
+        val evidence = result["evidence"] as Map<String, SourceCheckEvidence.StageEvidence>
+        assertEquals("sandbox", evidence["详情"]!!.category)
+        val verdict = result["verdict"] as Map<*, *>
+        assertEquals("inconclusive", verdict["summary"])
+        assertEquals("sandbox", verdict["failureKind"])
     }
 
     @Test fun cancellationDuringAutoChainPropagates() = runBlocking {

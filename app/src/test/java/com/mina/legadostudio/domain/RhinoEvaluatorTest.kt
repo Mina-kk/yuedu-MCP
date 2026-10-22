@@ -40,6 +40,13 @@ class RhinoEvaluatorTest {
         assertTrue(System.currentTimeMillis() - started >= 100)
     }
 
+    @Test fun supportsCrossBranchPackagesThreadSleep() {
+        val started = System.currentTimeMillis()
+        val result = RhinoEvaluator(HttpFetcher(), Gson()).evaluate("Packages.java.lang.Thread.sleep(120); 'slept'")
+        assertEquals("slept", result.value)
+        assertTrue(System.currentTimeMillis() - started >= 100)
+    }
+
     @Test fun symmetricCryptoStringKeysRoundTrip() {
         val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
         val encrypted = evaluator.evaluate(

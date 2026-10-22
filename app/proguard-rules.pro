@@ -20,6 +20,14 @@
 -keep class io.legado.app.** { *; }
 -keep class com.script.** { *; }
 -keep class org.htmlunit.** { *; }
+# 书源 JS 经 Rhino 反射按名调用 jsoup / JsonPath 对象方法（Jsoup.parse(..).select 等），名字必须原样保留
+-keep class org.jsoup.** { *; }
+-keep class com.jayway.jsonpath.** { *; }
+-keep class net.minidev.** { *; }
+-keep class org.seimicrawler.xpath.** { *; }
+-dontwarn org.jsoup.**
+-dontwarn com.jayway.jsonpath.**
+-dontwarn net.minidev.**
 -keepclassmembers class * {
     @com.google.gson.annotations.SerializedName <fields>;
 }

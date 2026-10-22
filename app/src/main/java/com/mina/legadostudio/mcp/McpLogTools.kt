@@ -7,6 +7,36 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
+/** HTTP 事务 error 字段的列表摘要：列表页不回完整 Java 堆栈，截断为首行 + 关键帧。 */
+private fun summarizeHttpError(error: String?): String? {
+    if (error.isNullOrBlank()) return null
+    val first = error.lineSequence().firstOrNull()?.trim().orEmpty().ifBlank { error.trim() }
+    // 关键帧：TLS 握手/连接层（风控定位用），保留首个命中帧名
+    val keyFrame = listOf("doHandshake", "ConscryptEngineSocket", "connectSocket", "SSLInputStream")
+        .firstOrNull { error.contains(it) }
+    return if (keyFrame != null && !first.contains(keyFrame)) "$first @$keyFrame" else first.take(400)
+}
+
+/** 从 error 文本推断失败阶段：handshake / request / response，供风控与 TLS 问题快速区分。 */
+private fun failurePhaseOf(error: String?, statusCode: Int): String? {
+    if (statusCode != 0 && error.isNullOrBlank()) return null
+    val err = error.orEmpty().lowercase()
+    return when {
+        "handshake" in err || "conscrypt" in err || "sslinputstream" in err || "ssl" in err && "reset" in err -> "handshake"
+        "connection reset" in err || "socketexception" in err || "econnreset" in err || "socket" in err -> "connect"
+        statusCode == 0 -> "request"
+        else -> null
+    }
+}
+
+private fun isResetError(error: String?): Boolean {
+    val err = error.orEmpty().lowercase()
+    return "connection reset" in err || "socketexception" in err || "econnreset" in err ||
+        "software caused connection abort" in err || "connection aborted" in err
+}
+
+private fun hostOf(url: String?): String = url.orEmpty().substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
+
 internal fun StudioMcpServer.registerLogTools(server: Server) {
     server.tool("export_diagnostic", "创建诊断快照（仅含版本、MCP 状态与前置条件，不含 HTTP/崩溃正文）", ToolSchema(properties = buildJsonObject {}, required = emptyList()), toolAnnotations = readOnly) {
         val snap = app.snapshots.create()
@@ -78,10 +108,17 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
         if (contextIdParam.isNotBlank()) {
             val page = dao.httpLogSummariesByContextIdPage(contextIdParam, limit, offset)
             val total = dao.countHttpLogsByContextId(contextIdParam)
+            // 同 host reset 计数：跨本页全部事务统计，命中 ≥2 即标 suspectedRateLimit
+            val resetHosts = page.filter { isResetError(it.error) }
+                .groupingBy { hostOf(it.finalUrl.ifBlank { it.url }) }.eachCount()
+                .filterValues { it >= 2 }.keys
             val mapped = page.map { s ->
                 mapOf(
                     "id" to s.id, "method" to s.method, "url" to s.url, "finalUrl" to s.finalUrl,
-                    "statusCode" to s.statusCode, "durationMs" to s.durationMs, "error" to s.error,
+                    "statusCode" to s.statusCode, "durationMs" to s.durationMs,
+                    "error" to summarizeHttpError(s.error),
+                    "failurePhase" to failurePhaseOf(s.error, s.statusCode),
+                    "suspectedRateLimit" to (if (isResetError(s.error) && hostOf(s.finalUrl.ifBlank { s.url }) in resetHosts) true else null),
                     "createdAt" to s.createdAt,
                     "sourceAnchor" to s.sourceAnchor, "contextId" to s.contextId, "originKind" to s.originKind,
                 )
@@ -89,7 +126,9 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
             return@tool ok(app.gson.toJson(mapOf(
                 "count" to mapped.size, "total" to total, "offset" to offset, "limit" to limit,
                 "contextId" to contextIdParam, "items" to mapped,
-                "hint" to "已按 contextId 精确过滤（含中间跳 capture_hop）；要逐跳回看/历史会话用 get_capture/list_captures",
+                "rateLimitedHosts" to resetHosts.takeIf { it.isNotEmpty() }?.toList(),
+                "hint" to ("已按 contextId 精确过滤（含中间跳 capture_hop）；要逐跳回看/历史会话用 get_capture/list_captures" +
+                    if (resetHosts.isNotEmpty()) "；同一 host 连续 Connection reset（握手期 RST）疑似源站 IP 风控，停止联网改用 read_page 快照" else ""),
             )))
         }
 
@@ -154,17 +193,31 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
             items = filtered.drop(offset).take(limit)
         }
 
+        // 同 host reset 计数：用过滤后的全量候选集统计（不只是当前页），命中 ≥2 标 suspectedRateLimit
+        val resetHosts = items.filter { isResetError(it.error) }
+            .groupingBy { hostOf(it.finalUrl.ifBlank { it.url }) }.eachCount()
+            .filterValues { it >= 2 }.keys
         val mapped = items.map { s ->
             val d = com.mina.legadostudio.domain.HttpLogAttributor.attribute(s, anchors, ctxAnchors)
             mapOf(
                 "id" to s.id, "method" to s.method, "url" to s.url, "finalUrl" to s.finalUrl,
-                "statusCode" to s.statusCode, "durationMs" to s.durationMs, "error" to s.error,
+                "statusCode" to s.statusCode, "durationMs" to s.durationMs,
+                "error" to summarizeHttpError(s.error),
+                "failurePhase" to failurePhaseOf(s.error, s.statusCode),
+                "suspectedRateLimit" to (if (isResetError(s.error) && hostOf(s.finalUrl.ifBlank { s.url }) in resetHosts) true else null),
                 "anchor" to (d.anchor ?: com.mina.legadostudio.domain.HttpLogAttributor.UNATTRIBUTED_KEY),
                 "attribution" to d.kind.name, "confidence" to d.confidence, "evidence" to d.evidence,
                 "sourceAnchor" to s.sourceAnchor, "contextId" to s.contextId, "originKind" to s.originKind,
             )
         }
-        ok(app.gson.toJson(mapOf("count" to mapped.size, "total" to total, "offset" to offset, "limit" to limit, "items" to mapped)))
+        ok(app.gson.toJson(linkedMapOf<String, Any?>(
+            "count" to mapped.size, "total" to total, "offset" to offset, "limit" to limit, "items" to mapped,
+        ).apply {
+            if (resetHosts.isNotEmpty()) {
+                put("rateLimitedHosts", resetHosts.toList())
+                put("hint", "同一 host 连续 Connection reset（握手期 RST）疑似源站 IP 风控/限流：沙箱与阅读 App 同 IP 一封俱封，停止联网改用 read_page 快照调试")
+            }
+        }))
     }
 }
 

@@ -53,6 +53,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -61,6 +62,11 @@ import com.mina.legadostudio.device.DeviceReadiness
 import com.mina.legadostudio.mcp.McpAccess
 import com.mina.legadostudio.mcp.McpConfigStore
 import com.mina.legadostudio.network.RuntimeConfigStore
+import com.mina.legadostudio.reader.ReaderWebClient
+import com.mina.legadostudio.reader.ReaderWebConfigStore
+import com.mina.legadostudio.reader.ReaderWebGuidance
+import com.mina.legadostudio.reader.ReaderWebNetworkState
+import com.mina.legadostudio.reader.ReaderWebOrigin
 import com.mina.legadostudio.service.McpService
 import com.mina.legadostudio.verification.OverlayPrefs
 import com.mina.legadostudio.verification.VerificationOverlayManager
@@ -104,6 +110,14 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
     var configTargetLan by remember { mutableStateOf(false) }
     val mcpConfigStore = remember { McpConfigStore(context) }
     var compactMode by remember { mutableStateOf(mcpConfigStore.loadCompactMode()) }
+    val readerWebConfig = remember { ReaderWebConfigStore(context) }
+    var readerWebUrl by remember { mutableStateOf(readerWebConfig.load()?.baseUrl.orEmpty()) }
+    var readerWebToken by remember { mutableStateOf("") }
+    var readerWebHasToken by remember { mutableStateOf(readerWebConfig.hasToken()) }
+    var readerWebMessage by remember { mutableStateOf("") }
+    var readerWebStatus by remember { mutableStateOf("") }
+    var readerWebNetwork by remember { mutableStateOf(ReaderWebGuidance.NetworkKind.UNKNOWN) }
+    var readerWebBusy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     suspend fun refresh(skipHealth: Boolean = false) {
         val snapshot = withContext(Dispatchers.IO) {
@@ -118,7 +132,10 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
         lanEndpoints = snapshot.second
     }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { scope.launch { refresh() } }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { scope.launch { refresh() } }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        readerWebNetwork = ReaderWebNetworkState.currentKind(context)
+        scope.launch { refresh() }
+    }
     LaunchedEffect(Unit) {
         while (true) {
             refresh()
@@ -241,9 +258,9 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
                                     )
                                     Text(
                                         if (compactMode)
-                                            "精简：工具数量与功能与标准完全相同（共 67 个工具，非基础/进阶权限划分），只把工具目录换成简短描述，fetch_page 的 auto 首次预览缺省 2000 字，被截断的完整定义可随时按名读回。"
+                                            "精简：工具数量与功能与标准完全相同（共 73 个工具，非基础/进阶权限划分），只把工具目录换成简短描述，fetch_page 的 auto 首次预览缺省 2000 字，被截断的完整定义可随时按名读回。"
                                         else
-                                            "标准：工具目录回完整描述与入参说明（共 67 个工具），fetch_page 的 auto 首次预览缺省 6000 字。",
+                                            "标准：工具目录回完整描述与入参说明（共 73 个工具），fetch_page 的 auto 首次预览缺省 6000 字。",
                                         style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant,
                                     )
                                     Text(
@@ -378,6 +395,144 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
                                 }, modifier = Modifier.fillMaxWidth()) { Text("保存并重载") }
                                 if (configMessage.isNotBlank()) Text(configMessage, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
                                 Text("修改端口或令牌后需重新复制「连接」页的客户端配置。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } }
+                        }
+                        item {
+                            val cs = MaterialTheme.colorScheme
+                            GlassCard { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text("阅读 Web 服务", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "请按阅读 App「Web 服务」界面当前显示的地址与端口填写；端口可能已自定义，不要套用任何默认端口或凭据。同机可把主机改为 127.0.0.1，但必须保留阅读显示的端口。MCP 在 App 内持续 WebView 里操作网页：reader_web_status 探测该地址，reader_web_page(action=open/snapshot/click/press_enter/fill/scroll/back/close) 按快照元素列表浏览或操作；reader_web_debug 在阅读里调试已经存入的书源，reader_web_search 在阅读当前搜索范围真实全局搜索（不能当单源验证）。官方结构化接口仅在匹配时作为可选快捷；网页可用不代表书源通过。请求只发往所填地址，不跟随重定向、不扫描端口。",
+                                    style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant,
+                                )
+                                OutlinedTextField(
+                                    readerWebUrl,
+                                    { readerWebUrl = it; readerWebMessage = ""; readerWebStatus = "" },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("阅读 Web 服务地址（端口必须与阅读界面显示的一致）") },
+                                    placeholder = { Text("http://<阅读显示的IP>:<阅读显示的端口>") },
+                                    singleLine = true,
+                                    colors = studioFieldColors(),
+                                )
+                                val normalizedInput = ReaderWebOrigin.normalizeOrNull(readerWebUrl)
+                                val loopbackInput = normalizedInput?.let { ReaderWebGuidance.isLoopback(it) } == true
+                                val privateInput = normalizedInput?.let { ReaderWebGuidance.isPrivateLan(it) } == true
+                                val advice = ReaderWebGuidance.advise(loopbackInput, privateInput, readerWebNetwork)
+                                Text(advice.headline, style = MaterialTheme.typography.labelMedium, color = cs.secondary)
+                                Text(advice.detail, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                                val loopbackSuggestion = ReaderWebOrigin.loopbackFor(readerWebUrl)
+                                if (loopbackSuggestion != null && loopbackSuggestion != normalizedInput) {
+                                    // 已经是 127.0.0.1 时不显示；127.0.0.2 等其它回环主机也给一键换成 .1。
+                                    // 只在用户主动点选时替换输入；对用户填写的私网地址绝不静默改写
+                                    OutlinedButton(onClick = {
+                                        readerWebUrl = loopbackSuggestion
+                                        readerWebMessage = "已填入回环地址（端口保持不变）：仅当阅读与本 App 在同一台设备时可用"
+                                        readerWebStatus = ""
+                                    }) { Text("改用同机回环 $loopbackSuggestion") }
+                                }
+                                OutlinedTextField(
+                                    readerWebToken,
+                                    { readerWebToken = it; readerWebMessage = ""; readerWebStatus = "" },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text(if (readerWebHasToken) "访问令牌（已保存，留空则不修改）" else "访问令牌（可选）") },
+                                    supportingText = { Text("令牌与地址绑定：修改地址后需重新填写阅读该地址上的令牌，旧令牌会被清除") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    colors = studioFieldColors(),
+                                )
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = {
+                                            runCatching {
+                                                val previous = readerWebConfig.load()?.baseUrl
+                                                // 令牌框留空 = 不改动已存令牌；但地址变了会清除旧令牌，需重新填写
+                                                readerWebConfig.save(readerWebUrl, readerWebToken.takeIf { it.isNotBlank() })
+                                                val saved = readerWebConfig.load()
+                                                readerWebUrl = saved?.baseUrl.orEmpty()
+                                                readerWebToken = ""
+                                                readerWebHasToken = readerWebConfig.hasToken()
+                                                readerWebStatus = ""
+                                                readerWebMessage = when {
+                                                    previous != saved?.baseUrl && !readerWebHasToken ->
+                                                        "已保存。地址已修改，原地址的令牌已清除，请填写新地址的访问令牌后点「测试连接」"
+                                                    previous != saved?.baseUrl -> "已保存。修改地址后请点「测试连接」确认可达"
+                                                    else -> "已保存"
+                                                }
+                                            }.onFailure { readerWebMessage = it.message ?: "保存失败" }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    ) { Text("保存") }
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (readerWebBusy) return@OutlinedButton
+                                            // 测试前先按当前输入保存：否则测的是旧地址
+                                            if (readerWebUrl.isNotBlank()) {
+                                                try {
+                                                    readerWebConfig.save(readerWebUrl, readerWebToken.takeIf { it.isNotBlank() })
+                                                    readerWebUrl = readerWebConfig.load()?.baseUrl.orEmpty()
+                                                    readerWebToken = ""
+                                                    readerWebHasToken = readerWebConfig.hasToken()
+                                                } catch (error: Exception) {
+                                                    // 保存失败就停在这里：不能回退去测旧的已存地址
+                                                    readerWebMessage = "保存失败，未测试：${error.message ?: "地址无效"}"
+                                                    return@OutlinedButton
+                                                }
+                                            }
+                                            if (readerWebUrl.isBlank()) {
+                                                readerWebMessage = "请先填写阅读 Web 服务地址"
+                                                return@OutlinedButton
+                                            }
+                                            readerWebBusy = true
+                                            readerWebStatus = "正在连接…"
+                                            scope.launch {
+                                                val result = withContext(Dispatchers.IO) {
+                                                    runCatching { app.readerWebBridge.status() }
+                                                }
+                                                readerWebBusy = false
+                                                readerWebStatus = result.fold(
+                                                    onSuccess = { connection ->
+                                                        when {
+                                                            // 网页优先：页面能开就先用网页工具，官方接口不匹配不是「不是阅读」
+                                                            connection.webPageReachable && !connection.readerDetected ->
+                                                                "网页可达，官方接口未匹配：页面仍可照常操作。用 reader_web_page(action=open) 打开同一个网页，按快照的元素列表浏览或操作。"
+                                                            !connection.reachable && !connection.webPageReachable -> connection.message
+                                                            connection.authRequired && !connection.authReady -> connection.message
+                                                            connection.capabilities["check"]?.state == "supported" ->
+                                                                "网页可达，且结构化检验接口可用；可用 reader_web_page 操作网页，也可选 reader_web_verify 作为快捷方式。"
+                                                            connection.capabilities["check"]?.state == "unsupported" ->
+                                                                "网页可达，使用通用网页工具：结构化检验接口不可用，WebSocket 调试只返回日志，不代表已完成检验。"
+                                                            else -> "网页可达，使用通用网页工具；结构化检验接口状态未知，可按实际接口尝试 reader_web_verify。"
+                                                        }
+                                                    },
+                                                    onFailure = { error ->
+                                                        val failure = error as? ReaderWebClient.ReaderWebException
+                                                        val status = ReaderWebGuidance.describe(failure?.code, failure?.stage, failure?.message ?: error.message)
+                                                        listOfNotNull(status.title, status.stageLabel?.let { "阶段：$it" }, status.detail)
+                                                            .joinToString(" · ")
+                                                    },
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        enabled = !readerWebBusy,
+                                    ) { Text(if (readerWebBusy) "测试中…" else "测试连接") }
+                                    OutlinedButton(
+                                        onClick = {
+                                            readerWebConfig.clear()
+                                            readerWebUrl = ""
+                                            readerWebToken = ""
+                                            readerWebHasToken = false
+                                            readerWebStatus = ""
+                                            readerWebMessage = "已清除地址与令牌"
+                                        },
+                                    ) { Text("清除") }
+                                }
+                                if (readerWebStatus.isNotBlank()) Text(readerWebStatus, color = cs.primary, style = MaterialTheme.typography.bodySmall)
+                                if (readerWebMessage.isNotBlank()) Text(readerWebMessage, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                                Text(
+                                    "前提：阅读里打开「Web 服务」。同机（阅读与本 App 同一台设备）用 http://127.0.0.1:端口，不要求 Wi-Fi；不同设备用阅读显示的 Wi-Fi 地址，并连同一 Wi-Fi 或可达 VPN；蜂窝网络下私网地址通常不能跨设备互访，但同机回环仍可用。阅读开启「访问令牌保护」时必须填同一令牌。地址只接受 http(s)://主机:端口（不要带路径）。令牌只用于已保存的那个地址，改地址后需重新填写；探测期间改配置只影响下一次调用。默认用 reader_web_page 在网页里操作：读快照与元素列表不改变页面，click/press_enter/fill 会登录、翻页或提交筛选，保存/覆盖/删除书源前请先确认；动作没有效果不能视为成功。接口不匹配时网页照常可用；reader_web_debug 真实运行但只有日志，reader_web_search 是阅读端全局搜索，都不代表单源检验通过。",
+                                    style = MaterialTheme.typography.bodySmall, color = cs.outline,
+                                )
                             } }
                         }
                         item {

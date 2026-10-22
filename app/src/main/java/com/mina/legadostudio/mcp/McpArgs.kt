@@ -20,6 +20,27 @@ internal object McpArgs {
         return value.jsonPrimitive.contentOrNull
     }
 
+    /**
+     * 读「JSON 字符串，但容忍 MCP 传输层已自动反序列化成 object」的入参：
+     * 客户端按 schema 传 string 时，部分传输层/网关会把内容里本就是 JSON 的字符串
+     * 再解析一次成 object 送到服务端。这里在入口归一化——收到 string 原样返回；
+     * 收到 object/array 重新序列化回 JSON 文本交给下游（等价于客户端传入了序列化字符串）。
+     * 用于 BookSource JSON 这类「值本身是一段 JSON」的参数（source 等），消除
+     * 「客户端序列化 → 传输层又解析」的双重转换死锁。字段语义不变的标量参数仍走 str()。
+     */
+    fun jsonText(args: JsonObject?, key: String): String? {
+        val value = args?.get(key) ?: return null
+        if (value is JsonNull) return null
+        if (value is JsonPrimitive) {
+            require(value.isString) {
+                "$key 需要 JSON 字符串或对象，收到 ${jsonType(value)}"
+            }
+            return value.contentOrNull
+        }
+        // object/array：传输层把字符串里嵌套的 JSON 又解析了一次；按原结构重新序列化交还。
+        return value.toString()
+    }
+
     fun int(args: JsonObject?, key: String): Int? {
         val value = args?.get(key) ?: return null
         if (value is JsonNull) return null

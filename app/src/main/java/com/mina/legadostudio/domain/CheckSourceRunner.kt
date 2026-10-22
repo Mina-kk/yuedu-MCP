@@ -213,7 +213,8 @@ object CheckSourceRunner {
 
     /**
      * 总结论：full = 静态校验通过且搜索/详情/目录/正文四段全部 ok；partial = 有可跑阶段且至少一个 ok；
-     * unusable = 跑了但全部失败；unverified = 没有任何可判定阶段（例如只跑了 validation）。
+     * unusable = 跑了但全部失败；inconclusive = 跑了全部失败但失败全是沙箱能力不足（category=sandbox），不代表规则错误；
+     * unverified = 没有任何可判定阶段（例如只跑了 validation）。
      * 结论只看阶段证据+validation，不看 HTTP code——200 空列表 / 200 挑战页都不算可用；
      * validation.isValid=false 时即使四段全 ok 也只给 partial（full 必须是「校验+链路」双重通过）。
      */
@@ -234,8 +235,9 @@ object CheckSourceRunner {
             // 四段全 ok 也只标 partial——「full」保留给「校验+全文字链路」双重通过的文本源。
             ok == 4 && validationOk && sourceType > 0 -> "partial"
             ok == 4 && validationOk -> "full"
-            ok == 4 -> "partial"   // 四段全通但静态校验有 issue：不能算「全可用」
+            ok == 4 -> "partial"   // 四段均有样本证据但静态校验有 issue：不能算「全可用」
             ok > 0 -> "partial"
+            failed.isNotEmpty() && failed.all { it.category == "sandbox" } -> "inconclusive"
             else -> "unusable"
         }
         return buildMap {
@@ -245,15 +247,34 @@ object CheckSourceRunner {
             put("stagesFailed", failed.map { it.stage })
             put("validationOk", validationOk)
             put("validationIssues", validation?.issues?.size ?: -1)
+            failureKind(failed)?.let { put("failureKind", it) }
             put("note", when {
                 summary == "full" -> "静态校验通过且搜索/详情/目录/正文样本检查均可用（样本级证据，不保证全文/解密语义；外部传入的 checkResults 属未核验来源，仅供参考）"
                 summary == "partial" && ok == 4 && sourceType > 0 && validationOk ->
                     "非文本源（type=$sourceType）四段均有记录，但音视频/图片/文件正文无文字级可用性证据，封顶 partial"
-                summary == "partial" && ok == 4 -> "四段全通但静态校验未通过（${validation?.issues?.size ?: 0} 个 issue），不能声称全链路可用"
+                summary == "partial" && ok == 4 -> "四段均有样本证据，但静态校验未通过（${validation?.issues?.size ?: 0} 个 issue），不能声称全链路可用"
                 summary == "partial" -> "仅部分阶段可用；未跑齐的阶段不可声称全链路可用"
+                summary == "inconclusive" -> "沙箱引擎能力不足导致失败，不代表规则错误；请用 reader_web_debug 在阅读端取证后再下结论"
                 summary == "unusable" -> "已跑阶段全部失败"
                 else -> "没有可判定的阶段证据"
             })
+        }
+    }
+
+    /** 失败性质：rule（规则/页面问题）/ sandbox（沙箱能力不足）/ network / verification；多种并存为 mixed，无失败为 null。 */
+    private fun failureKind(failed: List<SourceCheckEvidence.StageEvidence>): String? {
+        val kinds = failed.map {
+            when (it.category) {
+                "sandbox" -> "sandbox"
+                "network" -> "network"
+                "verification", "captcha" -> "verification"
+                else -> "rule"
+            }
+        }.toSet()
+        return when (kinds.size) {
+            0 -> null
+            1 -> kinds.first()
+            else -> "mixed"
         }
     }
 

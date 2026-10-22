@@ -1,5 +1,6 @@
 package com.mina.legadostudio.domain
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -86,9 +87,23 @@ class McpToolCatalogTest {
             "get_capture_resource",
             "analyze_sources",
             "export_checked_sources",
+            "reader_web_status",
+            "reader_web_sync_source",
+            "reader_web_verify",
+            "reader_web_debug",
+            "reader_web_search",
+            "reader_web_page",
         )
         val missing = required - toolNames()
         assertTrue("missing required tools: $missing", missing.isEmpty())
+    }
+
+    @Test
+    fun readerWebToolTableHasSeventyThreeTools() {
+        val names = Regex("""(?:addTool|tool)\("([^"]+)"""")
+            .findAll(mcpServerSources()).map { it.groupValues[1] }.toList()
+        assertEquals("重复注册的工具体现在计数上", names.size, names.toSet().size)
+        assertEquals("两个阅读端 WS 工具加入后工具总数为 73", 73, names.size)
     }
 
     @Test

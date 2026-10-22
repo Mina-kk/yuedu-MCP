@@ -53,14 +53,14 @@ fun FeatureGuideScreen(onBack: () -> Unit = {}) {
                 }
             }
             item {
-                GuideSection("AI 抓包调试工作流") {
-                    GuideStep("①  capture_once(url)：AI 发起公网 HTTP 请求，返回 cap:contextId 与本次日志 ID；webview_capture(url) 发一次性无头浏览器抓包（不可交互）")
-                    GuideStep("②  list_captures / get_capture(contextId)：翻历史会话、按会话分页回看逐跳；活会话用 poll_capture 增量拉新事务")
-                    GuideStep("③  get_http_log(id)：查看单条请求/响应头及脱敏、截断的正文片段；字体/图片等二进制用 get_capture_resource(logId) 分片取")
-                    GuideStep("④  也可由用户在 App「日志→抓包→浏览器抓包」手动点页，AI 凭同一 cap:contextId 回看（MCP 不能遥控该浏览器）")
-                    GuideStep("⑤  debug_source(source, entry)：用 App 内 Legado 运行时按入口（关键词/详情 URL/++目录/--正文/分类::发现URL）跑整源；JS 渲染页用 webview_render(url 或 url+pageId) 转真实 DOM")
-                    GuideStep("⑥  check_source(source, auto=true, refresh=true, searchKey)：逐源联网检查搜索→详情→目录→正文（exploreUrl/exploreKey 可加发现链），返回各阶段耗时与证据；未覆盖阶段不能算可用")
-                    GuideStep("⑦  半成品存 save_project、成品 save_source 入书源库；同 URL 旧版本用 archive_source_versions 清理；import_reader(projectId, packageName) 推送到本机阅读客户端（包名缺省先回目标列表）")
+                GuideSection("网页与书源工具") {
+                    GuideText("这一页介绍本 App 提供的通用能力，具体站点、地址、端口与连接方式都由你在自己的客户端和书源里配置。")
+                    GuideStep("① 抓包：capture_once / webview_capture 记录一次请求，返回 cap:contextId；list_captures / get_capture / poll_capture 回看会话，get_http_log 看单条请求与响应，get_capture_resource 分片取资源。")
+                    GuideStep("② 书源调试：debug_source 按当前书源跑单个指定入口，check_source 可沿着书源规则依次尝试多个入口并返回耗时与过程记录；已跑的内容按本次样本如实展示，未跑到的部分标注为未覆盖。半成品存 save_project，成品存 save_source，同一地址的历史版本用 archive_source_versions 归档。")
+                    GuideStep("③ 阅读 Web：在「设置→阅读 Web 服务」按阅读 App 当前显示的地址与端口填写，同机可把主机改为 127.0.0.1。reader_web_status 探测所填地址；reader_web_page(action=open/snapshot/click/press_enter/fill/scroll/back/close) 在 App 内网页里按元素列表操作。click/press_enter/fill 会登录、翻页或提交筛选，保存或覆盖书源前请先确认；动作无效果不能算成功。")
+                    GuideStep("④ 阅读端执行：reader_web_debug 对阅读里已保存的书源真实调试，日志仅供参考；reader_web_search 在阅读当前搜索范围真实全局搜索，不能冒充单源验证。接口匹配时可选 reader_web_sync_source(projectId) 写入（同地址旧源默认 conflict 不写，须你明确授权才 overwrite=true）与 reader_web_verify(bookSourceUrl, keyword=实际关键词)。")
+                    GuideStep("⑤ 导入：import_reader(projectId, packageName) 只唤起本机阅读的导入勾选页，最终是否导入由你在阅读里确认。客户端重新连接后 tools/list 才会刷新到 73 个工具；精简连接可按名读 studio://tools/reader_web_page 取完整定义。")
+                    GuideText("以上能力只作用于你自己填写的地址与书源，不包含任何站点或客户端的内置预设。")
                 }
             }
             item {
@@ -78,8 +78,8 @@ fun FeatureGuideScreen(onBack: () -> Unit = {}) {
                     GuideText("抓包只记录本 App 自己发出的 HTTP 流量，不抓其他应用、不抓系统流量。")
                     GuideText("逐次抓包仅允许公网 HTTP/HTTPS：私网、回环地址、URL 内嵌凭据、公网域名解析到私网（DNS 重绑定）都会被拒绝。")
                     GuideText("WebView 验证模式的域名不支持逐次抓包（WebView 内部跳转无法逐跳校验），会被拒绝；请改用 HTTP 模式、fetch_page，或在 App 内用「浏览器抓包」。")
-                    GuideText("浏览器抓包（可见 WebView 与 MCP webview_capture 无头）供给/观察的是 OkHttp 侧证据，不是 WebView 原生网络栈抓包；3xx/POST 等记 OBSERVED_ONLY，私网/非法目标记 BLOCKED。")
-                    GuideText("重定向逐跳校验：每个带 Location 的中间跳单独保存为 capture_hop 日志，最终响应另有一条 capture_once 日志；旧版 redirectChain 文本仍保留。")
+                    GuideText("浏览器抓包（可见 WebView 与 MCP webview_capture 无头）记录的是 OkHttp 侧的 HTTP 事务，不是 WebView 原生网络栈抓包；3xx/POST 等记 OBSERVED_ONLY，私网/非法目标记 BLOCKED。")
+                    GuideText("重定向逐跳校验：每个带 Location 的中间跳单独保存为 capture_hop 日志，最终响应另有一条 capture_once 日志；redirectChain 文本字段同时保留。")
                     GuideText("HTTP 正文最多保存 8KB，超出部分截断；Authorization、Cookie 等敏感请求头会自动脱敏为 ***。")
                     GuideText("日志与摘要仍含完整 URL/query，可能带令牌等参数，分享前请自行检查。")
                 }

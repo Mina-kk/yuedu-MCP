@@ -12,15 +12,15 @@ import kotlinx.serialization.json.putJsonObject
 
 internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
     server.tool("save_source", "校验并写入 BookSource JSON。同 bookSourceUrl 同内容幂等覆写最新版本；同 URL 不同 JSON 一律保留为新版本并回执 conflict，绝不静默覆盖（身份键=规范化 URL 全文，不再合并尾部 / 差异）。巨型 @js 规则务必用 fields 分字段传入（如 fields={\"ruleSearch\":{...}}），避免整包 source 手写 JSON 转义漏字符；解析失败会回传错误列附近源码片段。", ToolSchema(properties = buildJsonObject {
-        put("source", stringProp("BookSource JSON（与 fields 至少传一个）。合并语义：fields 只在顶层按键覆盖——同名顶层键整个被 fields 值替换（含 null=删除该键），不递归、不合并子键；source 里没被点名的顶层键原样保留"))
+        put("source", stringProp("BookSource JSON（与 fields 至少传一个）。传 JSON 字符串或已解析的对象均可——传输层若把字符串里的 JSON 自动解析成 object 也照常接收。合并语义：fields 只在顶层按键覆盖——同名顶层键整个被 fields 值替换（含 null=删除该键），不递归、不合并子键；source 里没被点名的顶层键原样保留"))
         putJsonObject("newVersion") { put("type", "boolean"); put("description", "true 时强制追加新版本（同内容时不产生空副本）；默认 false：同内容覆写、不同内容也保留为新版本（不静默覆盖）") }
         putJsonObject("fields") {
             put("type", "object")
-            put("description", "可选：分字段覆盖，键为书源顶层字段（bookSourceName/bookSourceUrl/searchUrl/ruleSearch/ruleToc/ruleContent/header 等）。**顶层键整体覆盖**——同名键被替换为 fields 里的值（不递归合并子键），传 null 即删除该顶层键；未点名的键保留。合并后整体校验保存；适合逐字段修补、免去整包转义")
+            put("description", "可选：分字段覆盖，键为书源顶层字段（bookSourceName/bookSourceUrl/searchUrl/ruleSearch/ruleToc/ruleContent/header 等）。**顶层键整体覆盖**——同名键被替换为 fields 里的值（不递归合并子键），传 null 即删除该顶层键；未点名的键保留。source 为空时按 fields.bookSourceUrl 找已存同 URL 最新版本作基底再覆盖合并（即增量补丁），合并后整体校验；找不到基底时报「需先完整创建」。适合逐字段修补、免去整包转义")
         }
     }, required = emptyList()), toolAnnotations = write) { req ->
         runCatching {
-            val sourceText = req.arguments.str("source").orEmpty().ifBlank { "{}" }
+            val sourceText = req.arguments.jsonText("source").orEmpty().ifBlank { "{}" }
             val fieldsValue = req.arguments?.get("fields")
             require(fieldsValue == null || fieldsValue is JsonObject) {
                 "fields 需要 JSON 对象（type: object），收到 ${jsonType(fieldsValue!!)}"
@@ -30,9 +30,27 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
             // 解析失败走 validator 的错误提示路径：多行 JSON 给出行列定位的源码片段，不是只回一句「不是合法 JSON」
             val fieldsKeys = fields?.keySet()?.sorted().orEmpty()
             val fieldsSuffix = fieldsKeys.takeIf { it.isNotEmpty() }?.let { "（本次收到 fields 键：${app.gson.toJson(it)}）" }.orEmpty()
+            var mergedFromExisting = false
             val obj = runCatching { JsonParser.parseString(sourceText).asJsonObject }.getOrNull()
                 ?: error((app.validator.validate(sourceText).issues.firstOrNull()?.let { "source 不是合法 JSON 对象：${it.message}" }
                     ?: "source 不是合法 JSON 对象") + fieldsSuffix)
+            // fields 增量模式：把 fields 当补丁打到「基底书源」上，再整体校验。
+            // 基底选取：fields 模式且 source 为空 {} 时，按 fields.bookSourceUrl 找已存同 URL 最新版本作基底；
+            // source 也给了内容时以 source 为基底（fields 只覆盖点名键，其余取 source 的）。找不到基底才报「需先完整创建」。
+            if (fields != null && obj.entrySet().isEmpty()) {
+                val wantUrl = fields.get("bookSourceUrl")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                val base = if (wantUrl.isNotBlank()) {
+                    app.projects.list()
+                        .filter { it.siteUrl.trim() == wantUrl }
+                        .maxByOrNull { it.updatedAt }
+                        ?.let { runCatching { JsonParser.parseString(it.sourceJson).asJsonObject }.getOrNull() }
+                } else null
+                if (base != null) {
+                    obj.entrySet().toList().forEach { obj.remove(it.key) }
+                    base.entrySet().forEach { obj.add(it.key, it.value) }
+                    mergedFromExisting = true
+                }
+            }
             // fields 顶层键整体覆盖，null 值表示删除该顶层键（obj.remove，与工具描述一致）——
             // 不是写入 null（写入后 has(key) 仍为 true，会让下游以为字段还在）
             fields?.let { McpSourceTools.mergeFieldsInto(obj, it) }
@@ -42,7 +60,16 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
                 "fields 键：${app.gson.toJson(fieldsKeys)}）"
             val newVersion = req.arguments.bool("newVersion") ?: false
             val report = app.validator.validate(app.gson.toJson(obj))
-            require(report.isValid) { "书源验证未通过：${app.gson.toJson(report.issues)}$receivedFieldsSuffix" }
+            if (!report.isValid) {
+                val hint = when {
+                    fields != null && !mergedFromExisting && fields.get("bookSourceUrl") == null ->
+                        "；fields 增量模式需先给出 bookSourceUrl 以定位已存版本作基底，或改用 source 传完整书源（本次 source 为空且 fields 未含 bookSourceUrl，无法合并到既有版本）"
+                    fields != null && !mergedFromExisting ->
+                        "；按 fields.bookSourceUrl 未找到已存版本作基底，fields 模式需先完整创建该书源"
+                    else -> ""
+                }
+                error("书源验证未通过：${app.gson.toJson(report.issues)}$receivedFieldsSuffix$hint")
+            }
             // 缺省时按用户在 MCP 页选择的目标类型写入 bookSourceType(0 文本/1 音频/2 图片/3 文件/4 视频)；「自动」时不干预，保留 JSON 原样
             if (app.runtimeConfig.bookSourceType >= 0 && (!obj.has("bookSourceType") || obj.get("bookSourceType").isJsonNull)) obj.addProperty("bookSourceType", app.runtimeConfig.bookSourceType)
             // 落库决策集中在 McpSourceTools.decideSave：身份 = 规范化 bookSourceUrl 全文（保留尾部/与 #标签），
@@ -50,13 +77,23 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
             val now = System.currentTimeMillis()
             val decision = McpSourceTools.decideSave(obj, newVersion, app.projects.list(), now)
             val saved = app.projects.save(decision.project)
+            val versionCount = McpSourceTools.versionCounts(app.projects.list())[saved.siteUrl.trim()] ?: 1
             ok(app.gson.toJson(linkedMapOf<String, Any?>(
-                "project" to saved,
+                "projectId" to saved.id,
+                "name" to saved.name,
+                "bookSourceUrl" to saved.siteUrl,
+                "stage" to saved.stage,
+                "sha256" to TaskContextStore.digest(saved.sourceJson),
+                "sourceChars" to saved.sourceJson.length,
+                "versionCount" to versionCount,
+                "action" to if (decision is McpSourceTools.SaveDecision.NewVersion) "new_version" else "overwrite",
+                "conflict" to decision.conflicts.isNotEmpty(),
                 "identityKey" to decision.identityKey,
                 "note" to decision.note,
                 "conflicts" to decision.conflicts.takeIf { it.isNotEmpty() },
+                "fieldsMergedOntoExisting" to (if (mergedFromExisting) true else null),
                 // stage 命名须如实：VALIDATED=静态校验通过，不代表已联网实测——联网实测请以 check_source 的 verdict 为准
-                "stageMeaning" to "VALIDATED=静态校验通过（未联网）；联网实测结果用 check_source 的 verdict/evidence 字段判定",
+                "stageMeaning" to "VALIDATED=静态校验通过（未联网）；联网实测结果用 check_source 的 verdict/evidence 字段判定；回读完整 JSON 用 get_source(projectId)",
             )))
         }.getOrElse { err(it.message.orEmpty()) }
     }
@@ -148,8 +185,8 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
                 err("未找到书源（ID 与 URL 均为精确匹配；同 URL 多版本请先用 list_sources 拿到具体 projectId）")
         }
     }
-    server.tool("validate_source", "验证 BookSource JSON", schema(mapOf("source" to "BookSource JSON"), listOf("source")), toolAnnotations = readOnly) { req ->
-        ok(app.gson.toJson(app.validator.validate(req.arguments.str("source").orEmpty())))
+    server.tool("validate_source", "验证 BookSource JSON", schema(mapOf("source" to "BookSource JSON（JSON 字符串或已解析的对象均可）"), listOf("source")), toolAnnotations = readOnly) { req ->
+        ok(app.gson.toJson(app.validator.validate(req.arguments.jsonText("source").orEmpty())))
     }
     server.tool("export_source", "校验并返回项目中的 BookSource JSON", schema(mapOf("projectId" to "项目 ID"), listOf("projectId")), toolAnnotations = readOnly) { req ->
         val project = app.projects.get(req.arguments.str("projectId") ?: return@tool err("projectId 不能为空"))

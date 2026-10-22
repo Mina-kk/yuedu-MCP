@@ -77,6 +77,192 @@ class UiSurfaceContractTest {
         assertTrue(guide.contains("poll_capture"))
         assertTrue(guide.contains("get_capture_resource"))
         assertTrue(guide.contains("list_captures"))
+        // 阅读端闭环也必须在功能介绍里可见，且不能把 import_reader 写成导入成功
+        assertTrue(guide.contains("reader_web_status"))
+        assertTrue(guide.contains("reader_web_sync_source"))
+        assertTrue(guide.contains("reader_web_verify"))
+        assertTrue(guide.contains("import_reader"))
+        assertTrue(guide.contains("conflict"))
+        assertTrue(guide.contains("overwrite=true"))
+    }
+
+    /** 阅读端闭环契约：SKILL.md 必须把「本机 check_source → 保存回读 → status → sync → verify」
+     *  写进完成标准，并写清 overwrite 授权、confirmed 门槛、旧版只出日志不判通过、
+     *  import_reader 只唤起。参考文件必须同步给出分诊，避免 AI 只交本地报告。 */
+    @Test
+    fun skillDeclaresReaderWebClosureAsDefault() {
+        val skillDir = listOf(
+            File("src/main/assets/skills/legado-book-source"),
+            File("app/src/main/assets/skills/legado-book-source"),
+        ).first { it.isDirectory }
+        val skillMd = File(skillDir, "SKILL.md").readText()
+        assertTrue("完成标准须点名阅读端闭环", skillMd.contains("阅读端闭环"))
+        listOf("reader_web_status", "reader_web_sync_source", "reader_web_verify", "studio://tools/")
+            .forEach { assertTrue("SKILL.md 缺少 $it", skillMd.contains(it)) }
+        assertTrue("须写清覆盖授权", skillMd.contains("overwrite=true"))
+        assertTrue("须以 confirmed=true 作为下一步门槛", skillMd.contains("confirmed=true"))
+        assertTrue("旧版分支须标 legacy_debug_only", skillMd.contains("legacy_debug_only"))
+        assertTrue("旧版分支须标 unverifiable", skillMd.contains("unverifiable"))
+        assertTrue("import_reader 只能定位为唤起", skillMd.contains("只负责唤起"))
+        assertTrue("阅读端证据与本地证据互不替代", skillMd.contains("互不替代"))
+
+        val indexMd = File(skillDir, "references/index.md").readText()
+        assertTrue("index.md 须把闭环列入基线", indexMd.contains("reader_web_sync_source"))
+        assertTrue(indexMd.contains("reader_web_verify"))
+
+        val verification = File(skillDir, "references/verification.md").readText()
+        assertTrue("verification.md 须有阅读端检验口径", verification.contains("阅读端检验口径"))
+        assertTrue(verification.contains("conflict"))
+        assertTrue(verification.contains("legacy_debug_only"))
+
+        val troubleshoot = File(skillDir, "references/troubleshoot.md").readText()
+        assertTrue("troubleshoot.md 须覆盖漏做阅读端检验", troubleshoot.contains("本机跑通但没做阅读端检验"))
+    }
+
+    /** `reader_web_status` 鉴权合同（文档侧）：status=auth_required / authRequired / authReady /
+     *  capability unauthorized 必须如实写清——401 有响应不等于离线或不是阅读，
+     *  鉴权未过时只给 configure_reader_web_token，不得推荐 sync/verify。 */
+    @Test
+    fun docsMatchReaderWebAuthContract() {        val skillDir = listOf(
+            File("src/main/assets/skills/legado-book-source"),
+            File("app/src/main/assets/skills/legado-book-source"),
+        ).first { it.isDirectory }
+        val skillMd = File(skillDir, "SKILL.md").readText()
+        assertTrue("SKILL.md 须写 status=auth_required", skillMd.contains("status=auth_required"))
+        assertTrue(skillMd.contains("authRequired=true"))
+        assertTrue(skillMd.contains("authReady=false"))
+        assertTrue("须给出唯一的下一步", skillMd.contains("configure_reader_web_token"))
+        assertTrue("须写清 401 有响应不等于离线", skillMd.contains("不能判成离线") || skillMd.contains("不是离线"))
+        assertTrue("须写清 unauthorized 不等于 unsupported", skillMd.contains("`unauthorized`"))
+
+        val verification = File(skillDir, "references/verification.md").readText()
+        assertTrue("verification.md 分诊须含 auth_required", verification.contains("status=auth_required"))
+        assertTrue("分诊须含 unauthorized", verification.contains("unauthorized"))
+        assertTrue("分诊须说明不是离线/不是阅读", verification.contains("不是离线") || verification.contains("不是「不是阅读」"))
+
+        val readme = listOf(File("../README.md"), File("README.md")).first { it.isFile }.readText()
+        assertTrue("README 须列出 auth_required 状态", readme.contains("auth_required"))
+        assertTrue(readme.contains("unauthorized"))
+        assertTrue(readme.contains("authRequired") && readme.contains("authReady"))
+        assertTrue("README 须写清不推荐 sync/verify", readme.contains("不推荐 `reader_web_sync_source`"))
+
+        val changelog = listOf(File("../CHANGELOG.md"), File("CHANGELOG.md")).first { it.isFile }.readText()
+        assertTrue("CHANGELOG 须记录鉴权状态新增", changelog.contains("status=auth_required"))
+        assertTrue(changelog.contains("unauthorized"))
+
+        val info = listOf(
+            File("src/main/java/com/mina/legadostudio/mcp/McpProjectTools.kt"),
+            File("app/src/main/java/com/mina/legadostudio/mcp/McpProjectTools.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue("get_app_info workflow 须带鉴权口径", info.contains("status=auth_required"))
+        assertTrue(info.contains("不判离线"))
+    }
+
+    /** 阅读 Web 网页优先契约（文档/UI 侧）：默认闭环必须包含阅读端真实执行与网页核对，
+     *  官方 API 只作可选快捷；端口不可猜、网页 200 不等于书源通过、页面动作有副作用、
+     *  旧版 WS 日志不判 PASSED，UI 与文档统一按 73 个工具计数。 */
+    @Test
+    fun docsAndUiDeclareReaderWebPageAsDefault() {
+        val skillDir = listOf(
+            File("src/main/assets/skills/legado-book-source"),
+            File("app/src/main/assets/skills/legado-book-source"),
+        ).first { it.isDirectory }
+        val skillMd = File(skillDir, "SKILL.md").readText()
+        // 默认闭环：网页是主轴
+        assertTrue("SKILL.md 须把 reader_web_page 列入默认闭环", skillMd.contains("reader_web_page(action=open)"))
+        assertTrue("须写明网页优先", skillMd.contains("先网页") || skillMd.contains("网页优先"))
+        assertTrue("须写明身份标准是用户填的网页", skillMd.contains("判定身份的标准是**用户填写的那个阅读 Web 网页**"))
+        assertTrue("接口只作可选快捷", skillMd.contains("可选快捷"))
+        // 端口不可猜（不锁死某个具体示例端口）
+        assertTrue("须写明不要猜默认端口", Regex("不要猜[^\\n]{0,12}(端口|1122)").containsMatchIn(skillMd))
+        assertTrue("须让模型读 originEcho 拿端口", skillMd.contains("originEcho"))
+        // 非官方分支同样适用
+        assertTrue("须写 apiProfile=mismatch 不代表不是阅读", skillMd.contains("mismatch"))
+        // 证据口径
+        assertTrue("须写明网页 200 不等于书源通过", skillMd.contains("不等于书源通过"))
+        assertTrue("旧版 WS 日志不判 PASSED", skillMd.contains("旧版 WS 日志不判 `PASSED`") || skillMd.contains("旧版 WS 日志不判"))
+        // 副作用与确认
+        assertTrue("须写明 click/fill 有副作用", skillMd.contains("有副作用"))
+        assertTrue("保存/覆盖书源须用户确认", skillMd.contains("必须用户确认") || skillMd.contains("须用户确认"))
+        // 重连刷新
+        assertTrue("须写重新连接才会刷新 tools/list", skillMd.contains("tools/list"))
+
+        val indexMd = File(skillDir, "references/index.md").readText()
+        assertTrue("index.md 基线须含 reader_web_page", indexMd.contains("reader_web_page(action=open)"))
+        assertTrue("index.md 须写明网页是身份标准", indexMd.contains("判定身份的是用户填的网页"))
+
+        val verification = File(skillDir, "references/verification.md").readText()
+        assertTrue("verification.md 须含 web_page_available 分诊", verification.contains("status=web_page_available"))
+        assertTrue("verification.md 须含 reader_web_page 错误码", verification.contains("OFF_ORIGIN"))
+        assertTrue("verification.md 须写明网页在线不等于通过", verification.contains("网页根路径 200"))
+
+        val troubleshoot = File(skillDir, "references/troubleshoot.md").readText()
+        assertTrue("troubleshoot.md 须含猜端口条目", troubleshoot.contains("originEcho") && troubleshoot.contains("猜"))
+        assertTrue("troubleshoot.md 须含「不是阅读」误判条目", troubleshoot.contains("不是阅读"))
+
+        val knowledge = listOf(
+            File("src/main/assets/knowledge/js-reverse-s2-booksource.md"),
+            File("app/src/main/assets/knowledge/js-reverse-s2-booksource.md"),
+        ).first { it.isFile }.readText()
+        assertTrue("知识库须写网页优先通道", knowledge.contains("reader_web_page(action=open)"))
+        assertTrue("知识库须写 mismatch 不代表不是阅读", knowledge.contains("mismatch"))
+        assertTrue("知识库须写 200 不等于通过", knowledge.contains("不等于书源通过"))
+
+        val readme = listOf(File("../README.md"), File("README.md")).first { it.isFile }.readText()
+        assertTrue("README 工具表须列出 reader_web_page", readme.contains("| 阅读 Web 服务 | `reader_web_status` `reader_web_page`"))
+        assertTrue("README 须写 73 个工具", readme.contains("共 73 个工具"))
+        assertTrue("README 须写网页优先闭环", readme.contains("默认闭环：网页优先"))
+        assertTrue("README 须写 web_page_available", readme.contains("web_page_available"))
+        assertTrue("README 须写网页 200 不等于通过", readme.contains("都不等于书源通过"))
+        assertTrue("README 须写副作用确认", readme.contains("必须先征得用户确认"))
+        assertTrue("README 须写重连刷新 tools/list", readme.contains("必须重新连接 MCP"))
+        assertTrue("README 须给 compact 按名读路径", readme.contains("studio://tools/reader_web_page"))
+        assertFalse("README 不得再把官方 API 写成身份标准", readme.contains("按实际响应而非版本号判断能力，返回 `status`"))
+        assertTrue("README 须写清身份标准是用户填的网页", readme.contains("身份标准是用户填的那个阅读 Web 网页"))
+
+        val changelog = listOf(File("../CHANGELOG.md"), File("CHANGELOG.md")).first { it.isFile }.readText()
+        assertTrue("CHANGELOG 须记录 reader_web_page", changelog.contains("`reader_web_page`"))
+        assertTrue("CHANGELOG 须记录工具总数变化", changelog.contains("67 → 73"))
+        assertTrue("CHANGELOG 须记录 web_page_available", changelog.contains("web_page_available"))
+
+        val ui = listOf(
+            File("src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt"),
+            File("app/src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue("设置页须按 73 个工具计数（标准）", ui.contains("共 73 个工具"))
+        assertFalse("不得残留 71 个工具", ui.contains("共 71 个工具"))
+        assertTrue("网页可达/官方 API 不匹配须显示通用网页工具", ui.contains("网页可达"))
+        assertTrue("状态须区分网页可达与接口不匹配", ui.contains("官方接口未匹配"))
+        assertFalse("设置页不得写死示例端口", Regex("\\b1122\\b").containsMatchIn(ui))
+        assertTrue("设置页须引导 reader_web_page", ui.contains("reader_web_page(action=open/snapshot/click/press_enter/fill/scroll/back/close)"))
+        assertTrue("须保留同机回环提示", ui.contains("http://127.0.0.1:端口"))
+        assertTrue("须保留异机同 Wi-Fi 提示", ui.contains("同一 Wi-Fi"))
+        assertTrue("须提示页面动作的副作用", ui.contains("click/press_enter/fill 会登录、翻页或提交筛选"))
+        assertTrue("端口由用户按阅读界面填写", ui.contains("按阅读 App「Web 服务」界面当前显示的地址与端口填写"))
+
+        val guide = listOf(
+            File("src/main/java/com/mina/legadostudio/ui/screens/FeatureGuideScreen.kt"),
+            File("app/src/main/java/com/mina/legadostudio/ui/screens/FeatureGuideScreen.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue("功能介绍须含 reader_web_page", guide.contains("reader_web_page(action=open/snapshot/click/press_enter/fill/scroll/back/close)"))
+        assertTrue("功能介绍须写重连刷新 73 个工具", guide.contains("刷新到 73 个工具"))
+        // 面向多人使用的 App：只描述通用能力，不写某阶段通过/失败或单次任务的验收结论
+        assertTrue("功能介绍须说明配置由用户自己提供", guide.contains("都由你在自己的客户端和书源里配置"))
+        assertTrue("功能介绍须说明不含内置站点预设", guide.contains("不包含任何站点或客户端的内置预设"))
+        assertTrue("功能介绍须说明跑过的内容如实展示", guide.contains("按本次样本如实展示"))
+        assertFalse("功能介绍不得出现通过/失败结论模板", guide.contains("通过/失败"))
+        assertFalse("功能介绍不得写身份判定口径", guide.contains("判定身份"))
+        assertFalse("功能介绍不得写根路径判定口径", guide.contains("不算书源通过"))
+        assertFalse("功能介绍不得写死示例端口", Regex("\\b1122\\b").containsMatchIn(guide))
+        assertFalse("功能介绍不得出现私有客户端别名 gf", Regex("\\bgf\\b").containsMatchIn(guide))
+
+        val info = listOf(
+            File("src/main/java/com/mina/legadostudio/mcp/McpProjectTools.kt"),
+            File("app/src/main/java/com/mina/legadostudio/mcp/McpProjectTools.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue("get_app_info workflow 须走 reader_web_page", info.contains("reader_web_page(action=open"))
+        assertTrue("workflow 须写明不猜端口，从 originEcho 读真实端口", info.contains("不猜默认端口") && info.contains("originEcho"))
+        assertTrue("workflow 须写 mismatch 不断言不是阅读", info.contains("不断言不是阅读"))
     }
 
     /** 技能包引用路径防回归锁：SKILL.md / index.md 里公开声明的 references/... 路径

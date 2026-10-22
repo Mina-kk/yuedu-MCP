@@ -221,7 +221,7 @@ function fqLibDecode(text) {
 - 分步验证：`validate → 发现页分类/搜索 → 搜索 → 详情 → 目录 → 正文（普通章 + 插图章）`，每步确认 `validation.issues` 为空。
 - 最终版实测口径：`issues=[]`；发现页男频都市 p1/p2 各 20 本且分页不重复；发现页搜索「玄幻」10 条；
   搜索「我的绝美女友」8 条；详情字段齐全；目录章节名/URL 正确；普通章 0 图纯文本、插图章 2 张 HTTPS 官方插图。
-- MCP 侧两个已知坑：`save_source` 的 `source` 参数在某些版本必须传 stringified JSON 字符串（传对象会报 `JsonPrimitive` 类型错）；
+- MCP 侧已知坑：`save_source`/`debug_source`/`check_source` 的 `source` 参数曾要求「必须传 stringified JSON 字符串」（传对象会报 `JsonPrimitive` 类型错）。新版已归一化：传 JSON 字符串或已解析的对象均可，传输层自动反序列化不再死锁。
   大结果被包装成 `{resultId, preview, nextOffset, hasMore}`，用 `read_result` 分段取回（上限与上下文纪律见 `SKILL.md`）。
 
 ## 六、排障清单

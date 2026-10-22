@@ -2,6 +2,35 @@
 
 按版本倒序记录对外可见的变化。每个版本的完整说明见 [GitHub Releases](https://github.com/Mina-kk/yuedu-MCP/releases)。
 
+## [1.2.2] - 2026-10-23
+
+**阅读端调试**
+- 新增 `reader_web_page`、`reader_web_debug`、`reader_web_search`（工具总数 67 → 73）：在用户填写的阅读 Web 网页或调试通道里真实运行书源，不猜默认端口，端口只取用户保存的地址（回包 `originEcho`）。
+- `reader_web_sync_source` 写入或确认存在后自动在阅读端调试一次；回包附 `deliveryStatus`、`readerExecution`。调试日志超过 2000 字符时只保留尾部（`debugLogsTruncated`），全量用 `reader_web_debug` 查看。
+- 阅读端调试回包新增 `structuredResult`（`logVerdict`、`stagesReached`、`failureSignals`、各阶段 `*Reached`），可直接机读四阶段是否到达；全局 `reader_web_search` 改为可选，不再作为默认下一步。
+- `reader_web_status` 区分网页可用（`web_page_available`）、接口不匹配、鉴权未通过（`status=auth_required`，能力记 `unauthorized`）等状态；接口不匹配不代表不是阅读，网页照常可用。
+- 阅读 Web 地址按场景处理：同机可用回环地址（无需 Wi-Fi），异机用阅读显示的局域网地址；令牌与地址绑定、加密保存。
+
+**规则引擎与沙箱**
+- 修复 JSON 列表中字段规则使用 `$.x` 时报 `Unexpected End Of File`：列表项保留原始 JSON 对象，按字段规则类型解析。
+- 字段解析失败时报错带字段名与规则（`fieldErrors`）。
+- 修复 release 包中 Jsoup、JsonPath、XPath 对象在 `eval_js` 里方法「找不到函数」：补齐混淆保留规则。
+- `check_source` 失败全部来自沙箱环境限制（缺 Android/Java 类、引擎内部异常）时判为 `inconclusive`，与规则真正失败的 `unusable` 区分，并给出 `failureKind`。
+- `check_source` 回包字段 `readerSideVerified` 拆为 `readerSideExecuted`（阅读端执行过）与 `readerSidePassed`（四阶段到达且无失败信号）。
+
+**工具与回包**
+- `fetch_page` 等未传 `contextId` 时复用最近一次 `create_context` 创建的上下文，回包标 `contextIdSource`（`explicit`/`last_created`/`auto-created`）。
+- `save_source` 回包精简为 `projectId`、`sha256`、`sourceChars`、`versionCount`、`conflict` 等，不再回传整份书源；全文用 `get_source`。
+- `debug_source.refresh`、`eval_js.dumpVars` 的参数类型改为 boolean（仍兼容字符串 `"true"`）。
+- `reader_web_sync_source`、`delete_projects`、`clear_cookies` 标注 `destructiveHint=true`。
+- `get_app_info` 新增 `versionName`、`versionCode` 与 `buildRevision` 说明。
+- `save_source` 的 `source` 参数同时接受 JSON 字符串与对象；`fields` 增量模式自动以同地址最新版本为基底合并。
+- `fetch_page` 识别连接重置类错误为疑似限流（`suspectedRateLimit`）。
+
+**文档**
+- 技能包与参考文档同步上述口径：沙箱结论只作初筛，交付以阅读端执行结果为准；补充跨分支 `Packages.java.lang.Thread.sleep` 写法等常见坑。
+- 去掉文档与知识库中的具体实例地址、写死端口与站点通过/失败结论。
+
 ## [1.2.1] - 2026-10-17
 
 - `app_status` 新增 `toolUsage` 字段：当前服务运行期间各工具的调用次数、失败/取消数、耗时与返回文本量（UTF-16 字符与 UTF-8 字节）概览，另列按文本量排序的前 10 个工具。统计只含工具名与数值，不含调用内容；`app_status` 自身不计入；服务重启后清零。

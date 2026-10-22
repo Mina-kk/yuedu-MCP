@@ -105,6 +105,28 @@ class McpArgsTest {
         assertTrue(failure { McpArgs.bool(args, "a") }.contains("收到 array"))
     }
 
+    @Test fun jsonTextAcceptsStringOrObject() {
+        val args = buildJsonObject {
+            put("s", "{\"a\":1}")
+            putJsonObject("o") { put("a", 1) }
+            put("arr", buildJsonArray { })
+            put("nul", JsonNull)
+            put("n", 5)
+            put("b", true)
+        }
+        // string 原样返回
+        assertEquals("{\"a\":1}", McpArgs.jsonText(args, "s"))
+        // object 重新序列化回 JSON 文本（传输层把字符串里的 JSON 自动解析了）
+        assertEquals("{\"a\":1}", McpArgs.jsonText(args, "o"))
+        // array 也归一化为文本
+        assertEquals("[]", McpArgs.jsonText(args, "arr"))
+        assertNull(McpArgs.jsonText(args, "nul"))
+        assertNull(McpArgs.jsonText(null, "missing"))
+        // 标量非字符串仍报错
+        assertTrue(failure { McpArgs.jsonText(args, "n") }.contains("需要 JSON 字符串或对象"))
+        assertTrue(failure { McpArgs.jsonText(args, "b") }.contains("需要 JSON 字符串或对象"))
+    }
+
     @Test fun jsonTypeNamesEveryKind() {
         val args = buildJsonObject {
             put("s", "x"); put("numStr", "12"); put("n", 1.5); put("b", false); put("nul", JsonNull)

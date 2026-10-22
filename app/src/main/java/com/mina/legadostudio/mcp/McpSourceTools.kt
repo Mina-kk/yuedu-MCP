@@ -1,5 +1,6 @@
 package com.mina.legadostudio.mcp
 
+import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -432,9 +433,23 @@ object McpSourceTools {
      * （obj.remove，不是写入 null——写入 null 会让 has(key) 仍为 true，与「删除」语义不符）。
      * 不递归合并子键；未点名的键原样保留。
      */
+    /**
+     * 顶层字段里「值本身就是一段 JSON 字符串」的字段集合：Legado 规范中
+     * header/loginUi/loginCheckJs/jsLib 等字段的合法值是序列化后的 JSON 文本。
+     * MCP 传输层会把 fields 里 `"header": "{...}"` 的字符串再解析成 object，
+     * 导致落库/校验时 type 变成对象而非字符串（BookSourceValidator 报
+     * 「字段类型必须是字符串」）。这里对这些字段做归一化：收到 object/array
+     * 时重新序列化回 JSON 文本，等价于调用方传入了序列化字符串。
+     */
+    private val JSON_STRING_VALUED_FIELDS = setOf("header", "loginUi", "loginCheckJs", "jsLib")
+    private val GSON = Gson()
+
     fun mergeFieldsInto(obj: JsonObject, fields: JsonObject) {
         for ((key, value) in fields.entrySet()) {
-            if (value == null || value.isJsonNull) obj.remove(key) else obj.add(key, value)
+            val normalized = if (key in JSON_STRING_VALUED_FIELDS && value != null && !value.isJsonNull && !value.isJsonPrimitive) {
+                com.google.gson.JsonPrimitive(GSON.toJson(value))
+            } else value
+            if (normalized == null || normalized.isJsonNull) obj.remove(key) else obj.add(key, normalized)
         }
     }
 

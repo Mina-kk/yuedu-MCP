@@ -33,7 +33,8 @@ object ReaderImport {
             context.startActivity(view)
             remember(context, packageName)
         } catch (error: Exception) {
-            ReaderImportService.cancel(context)
+            // 只撤销本次端点：并行的其它导入仍在阅读里等拉取，不能被一起杀掉。
+            ReaderImportService.cancel(context, url)
             throw error
         }
     }

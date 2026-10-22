@@ -199,6 +199,28 @@ class McpSourceToolsTest {
         assertFalse(obj.getAsJsonObject("ruleSearch").has("name")) // 子键被整体替换掉
     }
 
+    @Test fun `mergeFields normalizes json-string valued fields received as object`() {
+        // header/loginUi 等字段合法值是「JSON 字符串」；传输层把 "{\"a\":1}" 再解析成 object 时归一化回字符串
+        val obj = JsonParser.parseString("""{"bookSourceUrl":"https://h.com"}""").asJsonObject
+        val fields = JsonParser.parseString(
+            """{"header":{"User-Agent":"UA","Referer":"https://h.com"},"ruleSearch":{"bookList":".x"},"bookSourceName":"n"}""").asJsonObject
+        McpSourceTools.mergeFieldsInto(obj, fields)
+        // header 落库为 JSON 字符串而非对象
+        assertTrue(obj.get("header").isJsonPrimitive)
+        val headerObj = JsonParser.parseString(obj.get("header").asString).asJsonObject
+        assertEquals("UA", headerObj.get("User-Agent").asString)
+        // 非 JSON 字符串字段不受影响：ruleSearch 仍是对象
+        assertTrue(obj.get("ruleSearch").isJsonObject)
+        assertEquals("n", obj.get("bookSourceName").asString)
+    }
+
+    @Test fun `mergeFields json-string valued field passed as string stays string`() {
+        val obj = JsonParser.parseString("""{"bookSourceUrl":"https://h.com"}""").asJsonObject
+        val fields = JsonParser.parseString("""{"header":"{\"User-Agent\":\"UA\"}"}""").asJsonObject
+        McpSourceTools.mergeFieldsInto(obj, fields)
+        assertEquals("{\"User-Agent\":\"UA\"}", obj.get("header").asString)
+    }
+
     // ---------- resolveGetSource：ID 精确优先 / URL 恰一条才读 / 多条报 ID ----------
 
     @Test fun `getSource by id wins over url`() {

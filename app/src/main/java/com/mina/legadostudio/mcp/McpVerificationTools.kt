@@ -70,7 +70,7 @@ internal fun StudioMcpServer.registerVerificationTools(server: Server) {
             ok("Cookie 已写入")
         }.getOrElse { err(it.message.orEmpty()) }
     }
-    server.tool("clear_cookies", "清除指定 URL 所属域的 Runtime/WebView Cookie", schema(mapOf("url" to "URL"), listOf("url")), toolAnnotations = write) { req ->
+    server.tool("clear_cookies", "清除指定 URL 所属域的 Runtime/WebView Cookie", schema(mapOf("url" to "URL"), listOf("url")), toolAnnotations = destructive) { req ->
         app.cookieStore.clear(req.arguments.str("url") ?: return@tool err("url 不能为空")); ok("Cookie 已清除")
     }
     // 人过 CF/JS 挑战后的一键回填：采当前 WebView CookieManager 的整串（同步落 prefs 桶），

@@ -320,7 +320,7 @@ class RhinoEvaluator(
             "官方有但沙箱未实现（写了必报错）：java.getElement/getElements java.importScript java.cacheFile java.toNumChapter java.t2s/s2t " +
             "java.androidId java.openUrl java.searchBook java.startBrowser java.getReadBookConfig/getThemeConfig " +
             "java.downloadFile/readTxtFile 等文件读写 java.getZip*/getRar*/get7z* java.createAsymmetricCrypto/createSign；" +
-            "java.lang.* 除 Thread.sleep 外全部不可用，标准库类请走 Packages.*（如 new Packages.java.lang.String(b,\"UTF-8\")）。\n" +
+            "java.lang.* 除 Thread.sleep 外全部不可用，标准库类请走 Packages.*（如 new Packages.java.lang.String(b,\"UTF-8\")）；部分阅读分支没有 java.lang（jl=undefined），跨分支书源睡眠写 Packages.java.lang.Thread.sleep(ms)。\n" +
             "完整说明见 references/js-api.md「Studio 沙箱可用 API 清单」。"
     }
 

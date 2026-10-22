@@ -26,6 +26,8 @@ interface LegadoRuntime {
         @SerializedName("output") val output: LegadoRuleEngine.Output?,
         @SerializedName("elements") val elements: List<String>,
         @SerializedName("elementWarning") val elementWarning: String? = null,
+        /** 当前解析引擎画像：标识沙箱用的是移植的官方 Legado 引擎，便于判断沙箱/真机差异来源 */
+        @SerializedName("engineProfile") val engineProfile: String? = "legado-official-jsoup+rhino",
     )
     @Keep
     data class DebugReport(
@@ -43,6 +45,8 @@ interface LegadoRuntime {
         @SerializedName("contentLength") val contentLength: Int? = null,
         /** 正文阶段：正文前 50 字预览；非正文阶段为 null */
         @SerializedName("contentPreview") val contentPreview: String? = null,
+        /** 字段规则解析失败明细：`ruleSearch.bookUrl 规则解析失败（JSONPath）：$.id → 原因`；无失败为 null */
+        @SerializedName("fieldErrors") val fieldErrors: List<String>? = null,
     )
 
     suspend fun inspect(request: InspectRequest): InspectReport

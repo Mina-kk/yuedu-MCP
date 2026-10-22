@@ -150,6 +150,7 @@ java.setCookie(url, cookie)
 ```js
 java.lang.Thread.sleep(ms)   // 仅此一个 java.lang 用法可用
 ```
+> 注意：部分阅读分支没有 `java.lang`（真机报 `jl=undefined` / TypeError），沙箱能跑不代表阅读端能跑。要兼容多个阅读分支，睡眠写 `Packages.java.lang.Thread.sleep(ms)`，并以 `reader_web_debug` 的阅读端日志为准。
 
 **全局同名对象：**
 ```js
@@ -204,6 +205,8 @@ chapter.putLyric(v) / chapter.putImgUrl(v) / chapter.update()
 - （仅 Studio 沙箱）`org.jsoup.Jsoup.parse` 等 Java 包路径直调不可用（报「parse 不是函数，它是 object」一类错误）；**沙箱注入了全局 `Jsoup` 代理对象**，用 `Jsoup.parse(html)` / `Jsoup.parseBodyFragment(html)` / `Jsoup.connect(url)` 代替；官方 App 中 `org.jsoup.Jsoup` 直调可用，但两环境下都建议优先 `java.getString`/`@css:` 规则
 - Rhino 里 java 方法返回的 `java.lang.String` 直接 `.replace(/正则/, ...)` 会报「选择不明确」，必须先 `String()` 包一层；域名等纯文本替换直接 `.replace("a","b")`
 - `'+'` 拼接产生的是 ConsString，直接传给 java 方法当 `java.lang.String` 参数可能 `ClassCastException`，包 `String()` 兜底
+
+> Jsoup 解析得到的 `Document`/`Element`/`Elements` 对象可直接调用其方法（`.select()`/`.text()`/`.attr()` 等）；旧版 App 中报「找不到函数」时请升级到 1.2.2 及以上。
 
 > 更多沙箱实测坑点（searchUrl 返回值校验、save_source 转义等）见 `troubleshoot.md` 第 9 节起。
 
@@ -479,6 +482,19 @@ cipher.encryptBase64Str(str)  // encryptBase64(str) 别名
 ```
 
 `decryptStr(String)` 不自动识别 Hex、URL-safe Base64 或其他编码。Hex 密文应先经 `java.hexDecodeToByteArray` 转成字节，再调用 `decrypt` 或 `decryptStr`。未提供 `InputStream`、字符集参数及任意额外参数的通用兼容重载。算法和模式由运行平台的密码提供程序决定，不保证与所有原版阅读版本完全一致。
+
+> **重要：`decryptStr` 等 Java 方法返回的是 `java.lang.String`，不是 JS 原生字符串。**
+> 对其直接调 JS 的 `.replace(/正则/, ...)`、`.match`、`.split` 等方法会报
+> `Java 方法 java.lang.String.xxx 的选择不明确`（Rhino 无法在 object/string 重载间抉择）。
+> **必须先 `String(...)` 包一层转成 JS 字符串**。完整可抄示例：
+>
+> ```js
+> // AES 解密正文（CBC + PKCS5，key/iv 为 UTF-8 串；Base64 密文）
+> var cipher = java.createSymmetricCrypto("AES/CBC/PKCS5Padding", "1234567890abcdef", "abcdef1234567890");
+> var plain = String(cipher.decryptStr(base64CipherText));   // ← String() 包装是必需的
+> plain = plain.replace(/<[^>]+>/g, "");                      // 现在能安全调 JS 正则/字符串方法
+> plain;
+> ```
 
 **Hex：**
 ```js

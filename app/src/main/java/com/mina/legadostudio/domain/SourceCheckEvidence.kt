@@ -28,7 +28,7 @@ object SourceCheckEvidence {
         val ok: Boolean,
         /** 失败/未跑原因（面向用户的可读说明）；ok 时为 null。 */
         val reason: String? = null,
-        /** 结构化分类：network / verification / captcha / config / empty / media_unverified / content_unverified / not_run / unrecognized / unknown；ok 时 null。 */
+        /** 结构化分类：network / verification / captcha / sandbox / config / empty / media_unverified / content_unverified / not_run / unrecognized / unknown；ok 时 null。 */
         val category: String? = null,
         /** 关键观测值（搜索条数、章节数、正文字数…），供 filter / 调用方写理由。 */
         val facts: Map<String, Any?> = emptyMap(),
@@ -304,6 +304,7 @@ object SourceCheckEvidence {
     /**
      * 按错误文本/异常类型归类，VerificationRequiredException（verification）与
      * JsChallengeException（captcha）与网络失败（network）分开——调用方/filter 按类别决策。
+     * sandbox = 沙箱自身能力不足（缺 API/签名、引擎内部异常），不代表规则错误，需到阅读端取证。
      */
     fun categorizeMessage(message: String, throwable: Throwable? = null): String {
         val lower = message.lowercase()
@@ -316,10 +317,20 @@ object SourceCheckEvidence {
             lower.contains("unknownhost") || lower.contains("无法解析") || lower.contains("sockettimeout") ||
                 lower.contains("connecttimeout") || lower.contains("failed to connect") || lower.contains("timed out") ||
                 lower.contains("连接超时") || lower.contains("network") || lower.contains("unreachable") -> "network"
+            isSandboxLimit(message, throwable) -> "sandbox"
             lower.contains("illegalargument") || lower.contains("缺少") || lower.contains("配置") ||
                 lower.contains("不是合法 json") || lower.contains("必须为") -> "config"
             else -> "unknown"
         }
+    }
+
+    private val SANDBOX_MARKERS = listOf("属验收环境限制", "沙箱不支持", "沙箱未实现", "【API 提示】")
+    private val ENGINE_INTERNAL = Regex("ClassCastException|NullPointerException|NoSuchMethod|NoClassDefFound|UnsupportedOperationException|NoSuchField")
+
+    private fun isSandboxLimit(message: String, throwable: Throwable?): Boolean {
+        if (SANDBOX_MARKERS.any { message.contains(it) }) return true
+        if (ENGINE_INTERNAL.containsMatchIn(message)) return true
+        return generateSequence(throwable) { it.cause }.any { ENGINE_INTERNAL.containsMatchIn(it.javaClass.name) }
     }
 
     private fun firstHttpCode(lines: List<String>): Int? =

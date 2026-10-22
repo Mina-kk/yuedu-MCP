@@ -120,13 +120,15 @@ internal fun StudioMcpServer.registerCaptureTools(server: Server) {
     }
     server.tool("webview_eval", "用真实 WebView 打开 URL 并执行一段 JS，直接返回脚本值（不落快照、不分页）。script 两种形态都行：表达式（如 document.title、document.querySelectorAll('a').length）或函数体（末尾 return ...）；返回 null/undefined 会按 300ms 间隔轮询直到超时——异步等待页面就绪时返回 null 即可。脚本抛错回 __STUDIO_ERROR__ 失败。与 webview_render 的区别：render 拿整页 DOM 存 pageId 供后续规则调试，eval 只取一个值适合探测/断言。url 仅公网 http/https，重定向落点同校验（SSRF 与 webview_render 同级）。", ToolSchema(properties = buildJsonObject {
         put("url", stringProp("WebView 加载的 HTTP/HTTPS URL（仅公网地址）"))
-        put("script", stringProp("要在页面上下文执行的 JS：纯表达式或函数体；返回 null 表示未就绪继续轮询"))
+        put("script", stringProp("要在页面上下文执行的 JS：纯表达式或函数体；返回 null 表示未就绪继续轮询。兼容别名 webJs（与 webview_render 同名参数）"))
+        put("webJs", stringProp("可选：script 的兼容别名（与 webview_render 的参数名对齐）；script 优先，二者都传时取 script"))
         putJsonObject("delayMs") { put("type", "integer"); put("description", "onPageFinished 后等待页面稳定的毫秒数，默认 800，最大 10000") }
         putJsonObject("timeoutSec") { put("type", "integer"); put("description", "加载+取值总超时，10..300 秒，默认 60") }
-    }, required = listOf("url", "script")), toolAnnotations = openWrite) { req ->
+    }, required = listOf("url")), toolAnnotations = openWrite) { req ->
         runCatching {
             val url = req.arguments.str("url") ?: error("url 不能为空")
-            val script = req.arguments.str("script") ?: error("script 不能为空")
+            val script = req.arguments.str("script") ?: req.arguments.str("webJs")
+                ?: error("script 不能为空（也可用兼容别名 webJs 传入）")
             val ctxId = contextId(req.arguments)
             val result = app.webViewLoader.load(
                 url = url,
