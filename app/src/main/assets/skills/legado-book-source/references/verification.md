@@ -68,15 +68,17 @@
 
 ## 阅读端检验口径（reader_web_status / reader_web_debug / reader_web_search / reader_web_page / 可选 sync + verify）
 
-本 playbook 解决本 App 调试期的过盾；**阅读端闭环**是另一条通道，操作用户在 MCP 页填写的那个阅读 Web 网页。`check_source(refresh=true)` 即使返回 `full`，也只是工坊沙箱本次样本初筛（**只可初筛**），不是阅读端验证通过，更不能当最终判断。书源交付必须以阅读端真实执行与页面证据为依据：`reader_web_debug`（阅读 App 真实运行已保存书源的调试通道）、`reader_web_search`（阅读当前搜索范围内的真实全局搜索）、`reader_web_page` 里实际显示的书源管理/调试反馈，或 `reader_web_verify` 归属本次的结构化结果。未配置或无法访问时明确写“阅读端未覆盖”。两侧证据互不替代，按 SKILL.md「阅读端闭环」的顺序执行。
+本 playbook 解决本 App 调试期的过盾；**阅读端闭环**是另一条通道，操作用户在 MCP 页填写的那个阅读 Web 网页。`check_source(refresh=true)` 即使返回 `full`，也只是工坊沙箱本次样本初筛（**只可初筛**），不是阅读端验证通过，更不能当最终判断。书源交付必须以阅读端真实执行与页面证据为依据：`reader_web_debug`（阅读 App 真实运行已保存书源的调试通道）、`reader_web_search`（阅读当前搜索范围内的真实全局搜索）、`reader_web_page` 里实际显示的书源管理/调试反馈，或 `reader_web_verify` 归属本次的结构化结果。未配置或无法访问时明确写“阅读端未覆盖”。两侧证据互不替代，按 SKILL.md「唯一主流程」的顺序执行。
 
-**默认顺序**：`reader_web_status()`（探测网页入口与真实端口）→ `reader_web_sync_source(projectId, keyword=站内真实书名)`（写入或确认已存在后，服务端**强制**在阅读端跑 `/bookSourceDebug`，回包 `readerExecution` + `deliveryStatus`）→ `reader_web_debug(bookSourceUrl, keyword=实际关键词)`（单源真实执行，日志 `unverifiable`；空关键词服务端改用「我的」；读 `structuredResult.logVerdict` 判断四阶段是否到达）→（可选）`reader_web_search(keyword)`（全局搜索补充，代价大，非单源验证）→ `reader_web_page(action=open)`（同一 WebView 会话打开）→ `snapshot`/元素列表 → `click`/`fill`/`scroll`/`back` 导航到书源管理或调试页面 → 按页面实际显示取证。**判定身份的是这个网页**，不是 Legado 官方 API；`reader_web_verify` 只在接口恰好匹配时作可选快捷。
+**默认顺序**：`reader_web_status()`（探测网页入口与真实端口）→ `reader_web_sync_source(projectId, keyword=站内真实书名)`（写入或确认已存在后，服务端**强制**在阅读端跑 `/bookSourceDebug`，回包 `readerExecution` + `deliveryStatus`；回包带关键调试日志，完整原文按 `readerExecutionResultId` 用 `read_result`；SPA/WebView 源可传可选 `debugTimeoutSec`，范围 15..180 秒）→ 读取本次 `readerExecution.structuredResult` 与调试记录（日志 `unverifiable`，阶段到达不等于通过；按实际入口和页面结果逐阶段核对，需要定位未覆盖阶段或修复后复测时用 `reader_web_debug`）→（可选）`reader_web_search(keyword)`（全局搜索补充，代价大，非单源验证）→ `reader_web_page(action=open)`（同一 WebView 会话打开）→ `snapshot`/元素列表 → `click`/`fill`/`scroll`/`back` 导航到书源管理或调试页面 → 按页面实际显示取证。**判定身份的是这个网页**，不是 Legado 官方 API；`reader_web_verify` 只在接口恰好匹配时作可选快捷。`unknown` 或接口画像未确认 **不等于**不支持，不要据此放弃阅读调试。沙箱 `check_source` 跑通不能写成这次阅读端通过。
 
-**交付门槛 `deliveryStatus`（服务端判定）**：`not_in_reader` 只用于回读确实不存在；`presentInReader=true` 而 `confirmed=false` 仍自动调试现存阅读版本，但标 `reader_fields_unconfirmed`，调试状态另见 `readerDebugDeliveryStatus`，**不得称本地字段已生效**。`reader_debug_incomplete` 包括 TIMEOUT、无终止信号或日志截断；已有失败行需照实转述，却不能称日志完整或通过。`reader_failure_signals` 指本次失败行，旧记录保留在 `historicalFailureSignals`，交付以最近一次 debug 为主。`stagesReached` 仅表示进入阶段（例如「开始解析搜索页」「开始解析详情页」；「按详情页解析」只是空列表回退提示，不代表进入详情），不等于该阶段完成。任何情况都禁止「通过 / 一致 / 验证成功」话术。
+**交付门槛 `deliveryStatus`（服务端判定）**：`not_in_reader` 表示未确认阅读中存在源；`reader_fields_unconfirmed` 表示不能确认本地字段生效。证据须匹配当前书源内容和阅读配置，后续失败或不完整尝试不能由旧成功覆盖。`reader_debug_incomplete` 包括 TIMEOUT、缺少完整终止或日志截断。`stagesReached` 仅表示进入阶段，不等于字段正确；对照完整日志与实际页面描述样本结果，不把日志当官方结构化 PASSED，也不能笼统宣称全站可用。
 
 **两个 WS 工具的目标与口径**：目标只由用户保存的 origin 派生——同主机、端口 = 用户保存端口 + 1（`http`→`ws`、`https`→`wss`）、路径固定 `/bookSourceDebug` 或 `/searchBook`，不带查询串、不跟随重定向、不走系统代理；65535 时 `PORT_OVERFLOW`。**端口只由用户配置推导，不固定、不猜、不扫描、不向其它私网主机发请求**。`reader_web_debug` 先 `GET /getBookSource?url=` 精确确认书源已保存（否则 `SOURCE_NOT_IN_READER`，不运行），回包恒为 `legacy_debug_only`/`machineVerdict=unverifiable`：证明阅读端确实执行过，但**不产 `PASSED`**。`reader_web_search` 只收真正的 JSON 数组帧，`status` 为 `completed`/`no_data`/`empty`/`incomplete`/`partial`；它是**全局搜索**，目标源被禁用或不在阅读当前搜索范围时结果里没有它**不代表该源失败**，登记为「本次全局搜索未覆盖该源」。分支不支持对应 WS 时按 `ENDPOINT_MISSING`/`HANDSHAKE_TIMEOUT`/`UNREACHABLE` 等如实回报。
 
-**结构化同步与诊断怎么读**：`reader_web_sync_source` 的请求顺序固定为 `GET /getBookSource`（精确预检成功）→ `POST /saveBookSource`（写入）→ `GET /getBookSource`（回读）；预检未证实不存在或已有源未获覆盖授权时不得 POST，`GET /saveBookSource` 不能当写入。旧版阅读可能把 ReturnData JSON 标成 `text/html`，须检查正文而非只看头；端口一律取用户保存的地址。`writeOutcome` 说明写入是否到达阅读：`not_attempted`/`not_sent` 表示没写，`rejected` 表示阅读拒绝，`accepted` 表示已接收（回读失败时报 `READBACK_FAILED`），`unknown` 表示写请求已发出但没拿到响应——此时**不要重发**，先在阅读书源列表确认该源是否已存在再决定。`diagnostic`/`webPageProbeDiagnostic` 只给失败阶段与异常类别，用来区分连接重置、超时还是拒绝连接，不要据此建议固定或更换端口。`fetch_page` 对已保存 origin 返回的引导（`requestIssued=false`）是本 App 生成的，不是阅读服务器的响应，不能当成调用结果。
+**结构化同步与诊断怎么读**：`reader_web_sync_source` 需要写入时按 `GET /getBookSource`（精确预检成功）→ `POST /saveBookSource`（写入）→ `GET /getBookSource`（回读）；`already_present` 则只预检一次：内容已一致，`confirmed=true`、`written=false`、`writeAttempted=false`，不重复保存和回读，但仍自动调试；预检未证实不存在或已有源未获覆盖授权时不得 POST，`GET /saveBookSource` 不能当写入。旧版阅读可能把 ReturnData JSON 标成 `text/html`，须检查正文而非只看头；端口一律取用户保存的地址。`writeOutcome` 说明写入是否到达阅读：`not_attempted`/`not_sent` 表示没写，`rejected` 表示阅读拒绝，`accepted` 表示已接收（回读失败时报 `READBACK_FAILED`），`unknown` 表示写请求已发出但没拿到响应——此时**不要重发**，先在阅读书源列表确认该源是否已存在再决定。`unknown` 不是「接口不支持」，也不是失败结论。`diagnostic`/`webPageProbeDiagnostic` 只给失败阶段与异常类别，用来区分连接重置、超时还是拒绝连接，不要据此建议固定或更换端口。`fetch_page` 对已保存 origin 返回的引导（`requestIssued=false`）是本 App 生成的，不是阅读服务器的响应，不能当成调用结果。
+
+同步自动调试回包会带**关键日志**（失败信号、阶段到达、结束或超时原因及必要原文行）。内联可能裁成尾部（`debugLogsTruncated=true`），完整记录按 `readerExecutionResultId` / `readerExecutionContextId` 调用 `read_result`：`query` 是原文**字面子串**（忽略大小写定位，不是正则），不要为搜一行日志重跑调试。WebView / 懒加载源默认等待不够时，给 `debugTimeoutSec`（15..180 秒）；这是同步工具的可选参数，与 `reader_web_debug` 的 `timeoutSec` 分开。TIMEOUT 是本次等待上限，不是阅读自己报的超时，也不得改用沙箱结论代替。
 
 ### 失败分诊
 
@@ -85,6 +87,7 @@
 | `status=not_configured` | 用户还没在 MCP 页「设置」→「阅读 Web 服务」填地址 | 提示填写（同机可填 `http://127.0.0.1:<阅读端口>`，端口以阅读设置为准）；登记未覆盖，继续汇报其余证据 |
 | `status=auth_required`（`authRequired=true`/`authReady=false`） | 地址**有响应**，但鉴权没过：令牌缺失/无效、`401`/`403` 或 Bearer 挑战。不是离线，也不是「不是阅读」 | `allowedNextActions` 给 `configure_reader_web_token`（网页可开或只是登录墙时同时给 `reader_web_page`）：让用户补令牌（改地址会清旧令牌），或直接在网页里登录后用 `reader_web_page`；**不要**先调结构化同步/检验 |
 | `capabilities.* = unauthorized` | 接口存在，但当前凭据过不了鉴权 | 不能当 `unsupported`（版本不支持），也不能当可用；先解决令牌，再重测 |
+| `capabilities.* = unknown` 或未出现某能力字段 | 尚未确认，不是「该版本没有」 | **unknown 不等于不支持**；在授权范围内实际尝试调试/网页操作，不要放弃阅读端 |
 | `status=unreachable` / 超时 | 根路径与接口都没有响应 | 核对阅读是否开启 Web 服务、端口是否一致、异机是否同一 Wi-Fi/可达 VPN；蜂窝下跨设备私网地址通常不可达。不要猜默认端口，端口从 `originEcho` 读用户保存的真实值 |
 | `status=web_page_available`（`webPageReachable=true`、`apiProfile=mismatch`） | **网页在线，官方接口不匹配**（分支/版本不同）。根路径 2xx 拿到 HTML 但没识别到官方接口，正确结果就是这条 | 直接用 `reader_web_page` 继续；不要断言「不是阅读」，不要要求升级，也不要因此改书源规则 |
 | `status=web_page_unavailable` | 服务有响应（HTTP 状态已到），但根路径不是可用的页面入口 | 核对端口是否指向阅读的 Web 服务入口；不要改规则 |
@@ -112,7 +115,8 @@
 
 ### 不要做
 
-- 不要把网页里看到的一次可用性、`reader_web_debug` 的日志或 `reader_web_search` 的全局搜索结果写成「书源通过」，也不要把阅读端 `PASSED` 写成本实例 `check_source` 的四阶段证据；两边证据互不替代，`export_checked_sources` 只采信本实例 `check_source`。沙箱 `check_source` 只可初筛，不是最终判断。
+- 阅读端日志、实际页面和结构化检验是目标环境证据，沙箱记录单独列出。导出返回的阅读执行信息要核对内容版本、配置身份、完整结束和覆盖阶段；导出本身不代表验证成功。可以描述阅读样本的实际输出，不能把一次样本外推为全站通过；沙箱 `check_source` 只可初筛，不是最终判断。不得把沙箱跑通写成阅读端通过。
+- 抓包会话用 `get_http_logs(contextId="cap:…", query, offset, limit)` 按 URL 子串过滤并分页；单条详情仍用 `get_http_log(id)`。`read_result(query)` 只做原文子串定位，不是正则。
 - 不要用网页根路径 200、登录页能打开、接口探测有响应来证明书源可用；只有页面实际显示搜索结果/目录/正文、或阅读端真实执行结果才算。
 - 不要把 `reader_web_search` 当成单源验证：它是全局搜索，目标源不在阅读搜索范围时没有结果不代表失败；也不要拿日志帧冒充搜索到的书（非 JSON 数组帧会被 `INCOMPATIBLE_FRAME` 拒绝）。
 - 不要猜端口、不要为了「换端口再试」改地址或扫描端口：HTTP 只访问用户保存的 origin，WS 只连该 origin 端口 +1 的固定路径；也不要向其它私网地址发请求。

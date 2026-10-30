@@ -58,7 +58,7 @@ class McpToolContextPolicyTest {
         listOf("fetch_page", "read_page", "read_result", "inspect_rule", "analyze_html",
             "eval_js", "debug_source", "check_source", "create_context", "get_context",
             "update_context", "clear_context", "fetch_font", "get_font_map", "webview_render",
-            "webview_eval").forEach {
+            "webview_eval", "reader_web_sync_source").forEach {
             assertTrue("$it 应在 CONTEXT_TOOLS", it in tools)
         }
         // 抓包/日志工具绝不在名单内（否则 cap: 会被拦）

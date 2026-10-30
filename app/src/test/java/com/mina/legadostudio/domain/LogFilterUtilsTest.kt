@@ -21,6 +21,8 @@ class LogFilterUtilsTest {
         assertEquals("biquge.tv", LogFilterUtils.extractRawHost("http://biquge.tv:8080/book/123"))
         assertEquals("hetushu.com", LogFilterUtils.extractRawHost("hetushu.com/txt/1"))
         assertEquals("127.0.0.1", LogFilterUtils.extractRawHost("http://127.0.0.1:58823/mcp"))
+        assertEquals("2606:4700:3031::ac43:d3a3", LogFilterUtils.extractRawHost("2606:4700:3031::ac43:d3a3"))
+        assertEquals("2606:4700:3031::ac43:d3a3", LogFilterUtils.extractRawHost("https://[2606:4700:3031::ac43:d3a3]:443/"))
         assertEquals("", LogFilterUtils.extractRawHost(""))
         assertEquals("", LogFilterUtils.extractRawHost("   "))
     }

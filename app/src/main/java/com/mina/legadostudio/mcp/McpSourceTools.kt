@@ -32,9 +32,11 @@ object McpSourceTools {
     // ---- export_checked_sources 输入上限（同 analyze；导出原文按条数+总字节把关） ----
     const val MAX_EXPORT_IDS = 200
 
-    // ---- list_sources 分页 ----
+    // ---- list_sources 分页 / 有界 query ----
     const val DEFAULT_LIST_LIMIT = 200
     const val MAX_LIST_LIMIT = 1000
+    /** 与 PagedText.query 同口径：字面子串，超长明确报错，不静默截断、不全量回包。 */
+    const val MAX_LIST_QUERY_CHARS = 256
     const val SNIPPET_LIMIT = 80
 
     // ---- 工具结果内联保护：导出的对象/数组 JSON 超过该长度时必须报「过大用 read_result」，不得硬截断 ----
@@ -267,6 +269,43 @@ object McpSourceTools {
             .sortedByDescending { it.updatedAt }
 
     /**
+     * list_sources 的 query 入参（纯函数）：
+     * 未传/去空白后为空 → 不过滤；去空白后 1..[MAX_LIST_QUERY_CHARS] → 原样保留（含内部空格）；
+     * 超长明确报错，不截断。返回 (appliedQuery, error)。
+     */
+    fun parseListQuery(raw: String?): Pair<String?, String?> {
+        if (raw == null) return null to null
+        val q = raw.trim()
+        if (q.isEmpty()) return null to null
+        if (q.length > MAX_LIST_QUERY_CHARS) {
+            return null to "query 长度必须为 1..$MAX_LIST_QUERY_CHARS（收到 ${q.length}）"
+        }
+        return q to null
+    }
+
+    /**
+     * 按 bookSourceName（[ProjectEntity.name]）与 bookSourceUrl（[ProjectEntity.siteUrl]）子串过滤。
+     * 拉丁 ignoreCase；中文等无大小写字符按字面包含。不搜 sourceJson 正文，避免规则里的域名误命中。
+     * query=null 原样返回（不过滤）。分页必须在本函数之后：total/hasMore 相对过滤结果。
+     */
+    fun filterByListQuery(projects: List<ProjectEntity>, query: String?): List<ProjectEntity> {
+        if (query == null) return projects
+        return projects.filter { it.name.contains(query, ignoreCase = true) || it.siteUrl.contains(query, ignoreCase = true) }
+    }
+
+    data class SourceListPage(
+        val items: List<ProjectEntity>,
+        val total: Int,
+        val hasMore: Boolean,
+    )
+
+    /** 在已过滤集合上做 offset/limit：total/hasMore 相对该集合，空页不把 total 改成 0。 */
+    fun pageList(items: List<ProjectEntity>, offset: Int, limit: Int): SourceListPage {
+        val page = items.drop(offset).take(limit)
+        return SourceListPage(items = page, total = items.size, hasMore = offset + page.size < items.size)
+    }
+
+    /**
      * archive_source_versions 的删除决策（纯函数，可测）：
      * 输入 = 全库项目 + 精确 bookSourceUrl + keepLatest（≥1）。
      * 输出 = 该 URL 组内按 updatedAt 倒序保留前 keepLatest 条，其余为待删。
@@ -444,9 +483,10 @@ object McpSourceTools {
     private val JSON_STRING_VALUED_FIELDS = setOf("header", "loginUi", "loginCheckJs", "jsLib")
     private val GSON = Gson()
 
-    fun mergeFieldsInto(obj: JsonObject, fields: JsonObject) {
+    fun mergeFieldsInto(obj: JsonObject, fields: JsonObject, normalizedFields: MutableList<String>? = null) {
         for ((key, value) in fields.entrySet()) {
             val normalized = if (key in JSON_STRING_VALUED_FIELDS && value != null && !value.isJsonNull && !value.isJsonPrimitive) {
+                normalizedFields?.add(key)
                 com.google.gson.JsonPrimitive(GSON.toJson(value))
             } else value
             if (normalized == null || normalized.isJsonNull) obj.remove(key) else obj.add(key, normalized)

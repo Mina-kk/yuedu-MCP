@@ -37,6 +37,10 @@ private fun isResetError(error: String?): Boolean {
 
 private fun hostOf(url: String?): String = url.orEmpty().substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
 
+/** query 按 url / finalUrl 不区分大小写子串匹配；空 query 视为不过滤。 */
+internal fun httpLogUrlMatchesQuery(url: String, finalUrl: String, query: String): Boolean =
+    query.isBlank() || url.contains(query, ignoreCase = true) || finalUrl.contains(query, ignoreCase = true)
+
 internal fun StudioMcpServer.registerLogTools(server: Server) {
     server.tool("export_diagnostic", "创建诊断快照（仅含版本、MCP 状态与前置条件，不含 HTTP/崩溃正文）", ToolSchema(properties = buildJsonObject {}, required = emptyList()), toolAnnotations = readOnly) {
         val snap = app.snapshots.create()
@@ -62,13 +66,13 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
     server.tool("get_log", "按 ID 读取单条操作日志详情", ToolSchema(properties = buildJsonObject { putJsonObject("id") { put("type", "integer") } }, required = listOf("id")), toolAnnotations = readOnly) { req ->
         app.database.dao().operationLog((req.arguments.int("id") ?: return@tool err("id 不能为空")).toLong())?.let { ok(app.gson.toJson(it)) } ?: err("日志不存在")
     }
-    server.tool("get_http_logs", "列出 HTTP 事务摘要。排查请求失败、重定向或状态码时使用；支持按日期/锚点/contextId 筛选与分页（全日>200条用 offset 续取）。传 contextId（如 cap:xxx）时只列该上下文的全部事务，按发生顺序排序，不受最近500条窗口限制。默认排除逐次抓包（cap:）事务——抓包有独立页面与 get_capture/list_captures；需要时传 includeCapture=true 一并列出。", ToolSchema(properties = buildJsonObject {
+    server.tool("get_http_logs", "列出 HTTP 事务摘要。排查请求失败、重定向或状态码时使用；支持按日期/锚点/contextId 筛选与分页（全日>200条用 offset 续取）。传 contextId（如 cap:xxx）时只列该上下文的事务，按发生顺序排序，不受最近500条窗口限制；query 仍按 url/finalUrl 不区分大小写先过滤再 offset/limit，total 为筛选后总数。默认排除逐次抓包（cap:）事务——抓包有独立页面与 get_capture/list_captures；需要时传 includeCapture=true 一并列出。", ToolSchema(properties = buildJsonObject {
         putJsonObject("limit") { put("type", "integer"); put("description", "默认 50，最大 200；超过用 offset 翻页") }
         putJsonObject("offset") { put("type", "integer"); put("description", "可选，分页偏移（与 limit 配合）") }
         putJsonObject("date") { put("type", "string"); put("description", "可选，按日期过滤 YYYY-MM-DD（默认最近，不限制）") }
         putJsonObject("anchor") { put("type", "string"); put("description", "可选，书源锚点域名（注册域如 example.com），只列该锚点归属的事务") }
         putJsonObject("contextId") { put("type", "string"); put("description", "可选，精确匹配事务上下文（cap:xxx 抓包会话或任务 contextId）") }
-        putJsonObject("query") { put("type", "string"); put("description", "可选，匹配 URL") }
+        putJsonObject("query") { put("type", "string"); put("description", "可选，按 url/finalUrl 不区分大小写子串过滤；与 contextId 同时传时先过滤再分页") }
         putJsonObject("includeCapture") { put("type", "boolean"); put("description", "可选，默认 false：排除 cap: 逐次抓包事务（抓包高频记录不占结果、不污染锚点分桶）；true 时含抓包记录") }
     }, required = emptyList()), toolAnnotations = readOnly) { req ->
         val query = req.arguments.str("query").orEmpty()
@@ -104,10 +108,27 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
         val dao = app.database.dao()
 
         // contextId 精确过滤是轻量捷径：该上下文就是归属本身，不再跑归属器，也不受日期/锚点筛选影响。
-        // 同一 contextId 行数少（一次抓包最多几十条），DAO 分页+总数即可，无需全表扫描。
+        // 同一 contextId 行数少（一次抓包最多几十条）；有 query 时必须先按 url/finalUrl 过滤再 offset/limit，
+        // total 取筛选后总数——不能把 DAO 分页当最终页，否则 query 被静默忽略。
         if (contextIdParam.isNotBlank()) {
-            val page = dao.httpLogSummariesByContextIdPage(contextIdParam, limit, offset)
-            val total = dao.countHttpLogsByContextId(contextIdParam)
+            val page: List<com.mina.legadostudio.data.db.HttpLogSummary>
+            val total: Int
+            if (query.isBlank()) {
+                page = dao.httpLogSummariesByContextIdPage(contextIdParam, limit, offset)
+                total = dao.countHttpLogsByContextId(contextIdParam)
+            } else {
+                val all = mutableListOf<com.mina.legadostudio.data.db.HttpLogSummary>()
+                var off = 0
+                while (true) {
+                    val chunk = dao.httpLogSummariesByContextIdPage(contextIdParam, 200, off)
+                    if (chunk.isEmpty()) break
+                    all += chunk
+                    off += chunk.size
+                }
+                val filtered = all.filter { httpLogUrlMatchesQuery(it.url, it.finalUrl, query) }
+                total = filtered.size
+                page = filtered.drop(offset).take(limit)
+            }
             // 同 host reset 计数：跨本页全部事务统计，命中 ≥2 即标 suspectedRateLimit
             val resetHosts = page.filter { isResetError(it.error) }
                 .groupingBy { hostOf(it.finalUrl.ifBlank { it.url }) }.eachCount()
@@ -123,13 +144,17 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
                     "sourceAnchor" to s.sourceAnchor, "contextId" to s.contextId, "originKind" to s.originKind,
                 )
             }
-            return@tool ok(app.gson.toJson(mapOf(
+            return@tool ok(app.gson.toJson(linkedMapOf<String, Any?>(
                 "count" to mapped.size, "total" to total, "offset" to offset, "limit" to limit,
                 "contextId" to contextIdParam, "items" to mapped,
-                "rateLimitedHosts" to resetHosts.takeIf { it.isNotEmpty() }?.toList(),
-                "hint" to ("已按 contextId 精确过滤（含中间跳 capture_hop）；要逐跳回看/历史会话用 get_capture/list_captures" +
-                    if (resetHosts.isNotEmpty()) "；同一 host 连续 Connection reset（握手期 RST）疑似源站 IP 风控，停止联网改用 read_page 快照" else ""),
-            )))
+            ).apply {
+                if (query.isNotBlank()) put("query", query)
+                resetHosts.takeIf { it.isNotEmpty() }?.toList()?.let { put("rateLimitedHosts", it) }
+                put("hint", "已按 contextId 精确过滤（含中间跳 capture_hop）" +
+                    (if (query.isNotBlank()) "，query 已按 url/finalUrl 不区分大小写筛选后再分页，total 为筛选后总数" else "") +
+                    "；要逐跳回看/历史会话用 get_capture/list_captures" +
+                    if (resetHosts.isNotEmpty()) "；同一 host 连续 Connection reset（握手期 RST）疑似源站 IP 风控，停止联网改用 read_page 快照" else "")
+            }))
         }
 
         // 锚点筛选统一走归属器（显式 sourceAnchor + contextId 映射 + URL/重定向/Referer 证据同一套规则），
@@ -147,7 +172,7 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
             else -> d.anchor == normalizedAnchor
         }
         fun matchesQuery(log: com.mina.legadostudio.data.db.HttpLogEntity): Boolean =
-            query.isBlank() || log.url.contains(query, ignoreCase = true) || log.finalUrl.contains(query, ignoreCase = true)
+            httpLogUrlMatchesQuery(log.url, log.finalUrl, query)
         if (dayWindow != null) {
             // 全日游标分页取轻量投影（含归属证据列，无 responseBody），归属判定与全量实体同口径；
             // includeCapture=false（默认）走 SQL 排除 cap:% 的过滤版，抓包记录不进候选、不污染锚点分桶
@@ -226,7 +251,11 @@ internal fun StudioMcpServer.registerCrashDiagnosticTools(server: Server) {
         val items = app.crashLogs.list().take((req.arguments.int("limit") ?: 10).coerceIn(1, 20)).map {
             mapOf("name" to it.name, "createdAt" to it.createdAt, "size" to it.size)
         }
-        ok(app.gson.toJson(mapOf("count" to items.size, "items" to items)))
+        ok(app.gson.toJson(mapOf(
+            "count" to items.size,
+            "items" to items,
+            "firstComponentFault" to com.mina.legadostudio.diagnostic.RuntimeFaultStore.firstOrNull()?.toPayload(),
+        )))
     }
     server.tool("get_crash_log", "按文件名读取崩溃记录正文", schema(mapOf("name" to "崩溃文件名"), listOf("name")), toolAnnotations = readOnly) { req ->
         runCatching { ok(app.crashLogs.read(req.arguments.str("name") ?: error("name 不能为空"))) }.getOrElse { err(it.message.orEmpty()) }

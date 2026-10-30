@@ -587,6 +587,52 @@ class ReaderWebClientTest {
         }
     }
 
+    @Test fun sentinelProbeDoesNotDownloadFullSourceLibrary() = kotlinx.coroutines.test.runTest {
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.path!!.startsWith("/getJsSourceApiTokenRequired") -> MockResponse().setResponseCode(404)
+                    request.path!!.startsWith("/getBookSource?") -> failJson("未找到对应书源")
+                    request.path!!.substringBefore('?') == "/getBookSources" ->
+                        MockResponse().setResponseCode(500).setBody("should-not-fetch-full-library")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val error = runCatching { client(server.url("/").toString()).probe() }
+                .exceptionOrNull() as ReaderWebClient.ReaderWebException
+            assertEquals("LEGACY_READER", error.code)
+            val paths = generateSequence { server.takeRequest(1, TimeUnit.MILLISECONDS) }.map { it.path!! }.toList()
+            assertTrue(paths.any { it.startsWith("/getBookSource?") && it.contains("legadostudio.invalid") })
+            assertTrue("哨兵成功时不得再拉 /getBookSources 全库", paths.none { it.substringBefore('?') == "/getBookSources" })
+        }
+    }
+
+    @Test fun truncatedDataFirstLibraryPrefixStillCountsAsReturnData() = kotlinx.coroutines.test.runTest {
+        MockWebServer().use { server ->
+            val pad = "x".repeat(20_000)
+            val huge = """{"data":[{"bookSourceName":"$pad","bookSourceUrl":"https://s.test"}],"isSuccess":true,"errorMsg":""}"""
+            assertTrue("isSuccess 必须落在 16KB 截断之后", huge.indexOf("isSuccess") > 16 * 1024)
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.path!!.startsWith("/getJsSourceApiTokenRequired") -> MockResponse().setResponseCode(404)
+                    request.path!!.startsWith("/getBookSource?") -> MockResponse().setResponseCode(404)
+                    request.path!!.substringBefore('?') == "/getBookSources" -> MockResponse()
+                        .setHeader("Content-Type", "application/json; charset=utf-8")
+                        .setBody(huge)
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val error = runCatching { client(server.url("/").toString()).probe() }
+                .exceptionOrNull() as ReaderWebClient.ReaderWebException
+            assertEquals("data 在前的截断前缀仍应识别为阅读", "LEGACY_READER", error.code)
+            val paths = generateSequence { server.takeRequest(1, TimeUnit.MILLISECONDS) }.map { it.path!! }.toList()
+            assertTrue(paths.any { it.startsWith("/getBookSource?") })
+            assertTrue(paths.any { it.substringBefore('?') == "/getBookSources" })
+        }
+    }
+
     @Test fun newTokenEndpointOkButManagementHtmlMeansCheckUnsupported() = kotlinx.coroutines.test.runTest {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {

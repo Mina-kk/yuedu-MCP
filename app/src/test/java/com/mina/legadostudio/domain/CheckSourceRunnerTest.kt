@@ -10,6 +10,8 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -126,5 +128,36 @@ class CheckSourceRunnerTest {
         }.exceptionOrNull()
         assertTrue(error != null)
         assertTrue(error!!.message.orEmpty().contains("JSON"))
+    }
+
+    @Test fun jsTimeoutExceptionIsSandboxNotSuccess() = runBlocking {
+        val runtime = object : LegadoRuntime {
+            override suspend fun inspect(request: LegadoRuntime.InspectRequest) = error("unused")
+            override suspend fun debug(sourceJson: String, entry: String): LegadoRuntime.DebugReport {
+                throw RuntimeException("js执行超时")
+            }
+            override suspend fun evaluate(js: String, baseUrl: String, previous: Any?) = error("unused")
+            override fun validate(sourceJson: String) = BookSourceValidator().validate(sourceJson)
+        }
+        val result = CheckSourceRunner.run(
+            CheckSourceRunner.Request(
+                """{"bookSourceName":"x","bookSourceUrl":"https://a.com","searchUrl":"s{{key}}","ruleSearch":{"bookList":".b"},"ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}""",
+                searchKey = "南北鸣",
+            ),
+            runtime, null,
+        )
+        @Suppress("UNCHECKED_CAST")
+        val search = result["搜索"] as Map<String, Any>
+        assertTrue(search.containsKey("error"))
+        assertEquals("sandbox", search["category"])
+        assertEquals("webjs_timeout", search["sandboxReason"])
+        @Suppress("UNCHECKED_CAST")
+        val evidence = result["evidence"] as Map<String, SourceCheckEvidence.StageEvidence>
+        assertFalse(evidence["搜索"]!!.ok)
+        assertEquals("sandbox", evidence["搜索"]!!.category)
+        val verdict = result["verdict"] as Map<*, *>
+        assertEquals("inconclusive", verdict["summary"])
+        assertNotEquals("full", verdict["summary"])
+        assertTrue(verdict["note"].toString().contains("js执行超时"))
     }
 }

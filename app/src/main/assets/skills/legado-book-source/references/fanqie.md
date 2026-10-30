@@ -87,7 +87,7 @@ function fqLibDecode(text) {
 
 - 书库分类的 `last_chapter_title` 在部分分类（如女频现代言情）为空，属官方返回缺字段，不是规则问题。
 - 书库摘要里可能含裸反斜杠等字符，`eval_js` 在序列化时可能产出非法 JSON，
-  验证发现页请优先用 `debug_source` 的 `分类::URL` 入口（App 内真实运行时，不走 MCP JSON 序列化）。
+  验证发现页请优先用 `reader_web_debug` 的 `分类::URL` 入口，在目标阅读端运行当前书源；沙箱 `debug_source` 仅作辅助，不能替代阅读结果。
 
 ## 三、正文直连链路（签名 + 解密 + 插图）
 

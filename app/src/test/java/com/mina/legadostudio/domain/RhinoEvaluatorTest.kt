@@ -3,10 +3,14 @@ package com.mina.legadostudio.domain
 import com.google.gson.Gson
 import com.mina.legadostudio.network.HttpFetcher
 import com.mina.legadostudio.runtime.RhinoEvaluator
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 class RhinoEvaluatorTest {
     @Test fun executesOfficialRhinoAndCapturesLog() {
@@ -236,5 +240,82 @@ class RhinoEvaluatorTest {
         """.trimIndent()
         val result = evaluator.evaluate(js)
         assertEquals("天命:2:修罗武神:天命之子", result.value)
+    }
+
+    @Test fun bareUrlIsUndefinedLikeOfficialLegadoAndHintsBaseUrl() {
+        val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
+        val error = runCatching { evaluator.evaluate("url", baseUrl = "https://a.com/book/1") }.exceptionOrNull()
+        assertTrue("expected failure, got success", error != null)
+        val message = error!!.message.orEmpty()
+        assertTrue(message, message.contains("【规则错误】"))
+        assertTrue(message, message.contains("baseUrl"))
+        assertEquals("https://a.com/book/1", evaluator.evaluate("baseUrl", baseUrl = "https://a.com/book/1").value)
+    }
+
+    /** 书海阁形态：java.ajax(url + ',{headers/method/body}') 不得把 JSON 原样拼进请求 URL。 */
+    @Test fun ajaxUrlJsonSendsMethodHeadersBodyNotRawSuffix() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("post-ok"))
+            server.start()
+            val endpoint = server.url("/search").toString()
+            val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
+            val result = evaluator.evaluate(
+                """
+                var url = "$endpoint";
+                java.ajax(url + ',{"method":"POST","headers":{"X-Test":"1"},"body":"q=1","charset":"UTF-8"}')
+                """.trimIndent(),
+            )
+            assertEquals("post-ok", result.value)
+            val recorded = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("java.ajax POST 应到达假服务", recorded)
+            checkNotNull(recorded)
+            assertEquals("POST", recorded.method)
+            assertEquals("/search", recorded.path)
+            assertEquals("1", recorded.getHeader("X-Test"))
+            assertEquals("q=1", recorded.body.readUtf8())
+            assertFalse("请求 URL 不得携带 ,{JSON} 后缀", recorded.requestUrl.toString().contains("{"))
+        }
+    }
+
+    @Test fun ajaxPlainAndCommaUrlStayUnparsed() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("plain-ok"))
+            server.enqueue(MockResponse().setBody("comma-ok"))
+            server.start()
+            val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
+            val plain = server.url("/list").toString()
+            assertEquals("plain-ok", evaluator.evaluate("java.ajax('$plain')").value)
+            val plainReq = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull(plainReq)
+            checkNotNull(plainReq)
+            assertEquals("GET", plainReq.method)
+            assertEquals("/list", plainReq.path)
+
+            val comma = server.url("/a,b").toString()
+            assertEquals("comma-ok", evaluator.evaluate("java.ajax('$comma')").value)
+            val commaReq = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull(commaReq)
+            checkNotNull(commaReq)
+            assertEquals("GET", commaReq.method)
+            assertEquals("/a,b", commaReq.path)
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun ajaxUrlJsonWebViewIsRefusedWithoutFetch() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("should-not-fetch"))
+            server.start()
+            val url = server.url("/page").toString()
+            val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
+            val error = runCatching {
+                evaluator.evaluate("""java.ajax('$url,{"webView":true}')""")
+            }.exceptionOrNull()
+            assertTrue("webView 选项应拒绝，不能当成普通 HTTP 成功", error != null)
+            val text = error!!.message.orEmpty() + "\n" + error.stackTraceToString()
+            assertTrue(text, text.contains("webView"))
+            assertTrue(text, text.contains("java.webView") || text.contains("startBrowserAwait"))
+            assertEquals(0, server.requestCount)
+        }
     }
 }

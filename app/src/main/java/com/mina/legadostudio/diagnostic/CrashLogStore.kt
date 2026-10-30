@@ -32,16 +32,26 @@ class CrashLogStore(private val context: Context) {
 
     fun clear() { dir.listFiles().orEmpty().forEach(File::delete) }
 
-    private fun write(thread: Thread, error: Throwable) {
+    /**
+     * 已捕获但仍需留档的 Error（如规则引擎 [ExceptionInInitializerError]）：
+     * 不会走未捕获处理器，不进默认崩溃文件，必须显式写入，否则 get_crash_logs 为空。
+     */
+    fun recordCaught(error: Throwable, tag: String) {
+        write(Thread.currentThread(), error, prefix = tag)
+    }
+
+    private fun write(thread: Thread, error: Throwable, prefix: String? = null) {
         val text = buildString {
             appendLine("time=${Instant.now()}")
             appendLine("version=${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
             appendLine("device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} SDK ${android.os.Build.VERSION.SDK_INT}")
             appendLine("thread=${thread.name}")
+            if (!prefix.isNullOrBlank()) appendLine("tag=$prefix")
             appendLine()
-            append(error.stackTraceToString())
+            append(ExceptionDigest.chain(error, maxChars = 4000))
         }
-        File(dir, "crash-${System.currentTimeMillis()}.txt").writeText(text)
+        val name = if (prefix != null) "fault-${System.currentTimeMillis()}.txt" else "crash-${System.currentTimeMillis()}.txt"
+        File(dir, name).writeText(text)
         dir.listFiles().orEmpty().sortedByDescending(File::lastModified).drop(10).forEach(File::delete)
     }
 }

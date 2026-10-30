@@ -66,6 +66,90 @@ class ReaderWebLegacyDebugClient(
         const val MACHINE_VERDICT = "unverifiable"
         const val EVIDENCE_SCOPE = "reader_web_legacy_debug"
 
+        /** 首行时间戳 ≥ 此值且全程无搜索起始行，才把原记录标成缺开头（不是回包内联裁剪）。 */
+        const val HEAD_INCOMPLETE_OFFSET_MS = 1_000L
+
+        private val LOG_OFFSET = Regex("""^\[(\d{2}):(\d{2})\.(\d{3})\]""")
+        private val SEARCH_START_MARKERS = listOf("开始搜索", "开始解析搜索")
+
+        /**
+         * 阅读调试日志行首 `[mm:ss.SSS]` 转毫秒；无时间戳返回 null。
+         * 只用于判断原记录是否缺开头，不据此改 WS 握手顺序。
+         */
+        fun parseLogOffsetMs(line: String): Long? {
+            val match = LOG_OFFSET.find(line.trim()) ?: return null
+            val minutes = match.groupValues[1].toLong()
+            val seconds = match.groupValues[2].toLong()
+            val millis = match.groupValues[3].toLong()
+            return minutes * 60_000L + seconds * 1_000L + millis
+        }
+
+        /**
+         * 原记录是否缺开头帧：首行已过 [HEAD_INCOMPLETE_OFFSET_MS]，且全程没有搜索起始行。
+         * 回包内联只留尾部时不要用这个字段——那是 `debugLogsTruncated`，原记录仍走 read_result。
+         */
+        fun logsHeadIncomplete(logs: List<String>): Boolean {
+            if (logs.isEmpty()) return false
+            val firstOffset = parseLogOffsetMs(logs.first()) ?: return false
+            if (firstOffset < HEAD_INCOMPLETE_OFFSET_MS) return false
+            return logs.none { line -> SEARCH_START_MARKERS.any(line::contains) }
+        }
+
+        const val TIMEOUT_KIND_TOTAL = "total"
+        const val TIMEOUT_KIND_IDLE = "idle"
+        const val LOST_KIND_SEND_FAILED = "send_failed"
+        const val LOST_KIND_NO_CLOSE_FRAME = "no_close_frame"
+        const val LOST_KIND_IO_FAILURE = "io_failure"
+        const val LOST_KIND_ABNORMAL_END = "abnormal_end"
+
+        const val TOTAL_TIMEOUT_MIN_MS = 200L
+        const val TOTAL_TIMEOUT_MAX_MS = 180_000L
+
+        /**
+         * 总预算钳位：下限 200ms、上限 180s，与 [ReaderWebDirectActions.DEBUG_TIMEOUT_MAX_SEC]
+         * / `sync.debugTimeoutSec=180` 同口径。不得再截成 120s。
+         */
+        fun clampTotalTimeoutMs(totalTimeoutMs: Long): Long =
+            totalTimeoutMs.coerceIn(TOTAL_TIMEOUT_MIN_MS, TOTAL_TIMEOUT_MAX_MS)
+
+        /**
+         * 空闲超时只在已收到至少一帧后生效。
+         * 旧版通道经常握手后长时间无帧、最后才 close 1000；那种稳定无帧会话只受总超时约束。
+         */
+        fun idleTimedOut(framesReceived: Int, lastFrameAgoMs: Long?, idleTimeoutMs: Long): Boolean {
+            if (framesReceived <= 0) return false
+            val ago = lastFrameAgoMs ?: return false
+            return ago >= idleTimeoutMs
+        }
+
+        fun timeoutObservations(
+            timeoutKind: String,
+            elapsedMs: Long,
+            lastFrameAgoMs: Long?,
+            framesReceived: Int,
+        ): Map<String, Any?> = linkedMapOf(
+            "timeoutKind" to timeoutKind,
+            "elapsedMs" to elapsedMs,
+            "lastFrameAgoMs" to lastFrameAgoMs,
+            "framesReceived" to framesReceived,
+        )
+
+        fun lostObservations(
+            lostKind: String,
+            elapsedMs: Long,
+            lastFrameAgoMs: Long?,
+            framesReceived: Int,
+            closeCode: Int?,
+            closeReason: String?,
+        ): Map<String, Any?> = linkedMapOf(
+            "lostKind" to lostKind,
+            "elapsedMs" to elapsedMs,
+            "lastFrameAgoMs" to lastFrameAgoMs,
+            "framesReceived" to framesReceived,
+            "closeCode" to closeCode,
+            "closeReason" to closeReason,
+        )
+
         private const val SUBPROTOCOL_HEADER = "Sec-WebSocket-Protocol"
         private const val CONNECT_TIMEOUT_SEC = 5L
         private const val WRITE_TIMEOUT_SEC = 10L
@@ -73,7 +157,7 @@ class ReaderWebLegacyDebugClient(
         private const val MAX_SOURCE_URL_CHARS = 4_096
         private const val MAX_KEYWORD_CHARS = 512
 
-        private const val DEFAULT_TOTAL_TIMEOUT_MS = 30_000L
+        const val DEFAULT_TOTAL_TIMEOUT_MS = 30_000L
         private const val DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000L
         private const val DEFAULT_IDLE_TIMEOUT_MS = 15_000L
         private const val DEFAULT_MAX_FRAMES = 2_000
@@ -119,13 +203,17 @@ class ReaderWebLegacyDebugClient(
         val code: String,
         message: String,
         val debugLogs: List<String> = emptyList(),
-    ) : Exception(message)
+        val observations: Map<String, Any?> = emptyMap(),
+    ) : Exception(message) {
+        fun toErrorPayload(): Map<String, Any?> = Outcome.errorPayload(this)
+    }
 
     /**
      * 一次调试会话的结果。
      *
      * @property closeCode 服务端关闭码（1000 正常结束）；null 表示没有拿到关闭帧。
      * @property truncated 是否因帧数/字节/单行上限提前停止接收。
+     *   这是原记录采集标志，不是 sync 回包内联裁剪（那是 `debugLogsTruncated`，完整日志走 read_result）。
      * @property completionSignal 日志里出现「完成」类文本；仅为线索，不影响 verdict。
      */
     data class Outcome(
@@ -150,6 +238,8 @@ class ReaderWebLegacyDebugClient(
             "frameCount" to frames,
             "byteCount" to bytes,
             "truncated" to truncated,
+            "debugLogsFirstOffsetMs" to parseLogOffsetMs(debugLogs.firstOrNull().orEmpty()),
+            "debugLogsHeadIncomplete" to logsHeadIncomplete(debugLogs),
             "closeCode" to closeCode,
             "closeReason" to closeReason,
             "completionSignal" to completionSignal,
@@ -167,9 +257,14 @@ class ReaderWebLegacyDebugClient(
         }
 
         companion object {
-            /** 失败回包：保留 errorCode，绝不含 PASSED。 */
-            fun errorPayload(code: String, message: String, debugLogs: List<String> = emptyList()): Map<String, Any?> =
-                linkedMapOf(
+            /** 失败回包：保留 errorCode，绝不含 PASSED。观测字段不得覆盖固定语义。 */
+            fun errorPayload(
+                code: String,
+                message: String,
+                debugLogs: List<String> = emptyList(),
+                observations: Map<String, Any?> = emptyMap(),
+            ): Map<String, Any?> {
+                val payload = linkedMapOf<String, Any?>(
                     "status" to STATUS,
                     "machineVerdict" to MACHINE_VERDICT,
                     "evidenceScope" to EVIDENCE_SCOPE,
@@ -177,6 +272,14 @@ class ReaderWebLegacyDebugClient(
                     "message" to message,
                     "debugLogs" to debugLogs,
                 )
+                for ((key, value) in observations) {
+                    if (key !in payload) payload[key] = value
+                }
+                return payload
+            }
+
+            fun errorPayload(error: LegacyDebugException): Map<String, Any?> =
+                errorPayload(error.code, error.message.orEmpty(), error.debugLogs, error.observations)
         }
     }
 
@@ -194,6 +297,7 @@ class ReaderWebLegacyDebugClient(
             val code: String,
             val message: String,
             val logs: List<String>,
+            val observations: Map<String, Any?> = emptyMap(),
         ) : Settle()
     }
 
@@ -204,9 +308,9 @@ class ReaderWebLegacyDebugClient(
      *
      * @param sourceUrl 必须已在阅读里保存的 bookSourceUrl（只写进 JSON，绝不作为连接目标）
      * @param keyword 搜索关键词（可为空串）
-     * @param totalTimeoutMs 总预算（200..120000）
+     * @param totalTimeoutMs 总预算（200..180000）
      * @param handshakeTimeoutMs 握手预算（<= 总预算）
-     * @param idleTimeoutMs 握手完成后允许的无帧间隔
+     * @param idleTimeoutMs 收到至少一帧后允许的无新帧间隔；无帧时只受总超时约束
      * @param maxFrames 最多接收的帧数
      * @param maxTotalBytes 日志总字节上限
      * @param maxLineChars 单条日志字符上限
@@ -238,6 +342,9 @@ class ReaderWebLegacyDebugClient(
     /**
      * 用调用方固定的配置快照调试（一次工具调用里 HTTP 与 WS 共用同一 origin/令牌）。
      * `config = null` 表示按当前配置读取。
+     *
+     * 空闲超时用 [DEFAULT_IDLE_TIMEOUT_MS]，与总超时分离；空闲计时只在收到至少一帧后生效，
+     * 避免旧版通道握手后长时间无帧、最后才 close 1000 被提前误断。
      */
     @JvmOverloads
     suspend fun debugAt(
@@ -251,7 +358,7 @@ class ReaderWebLegacyDebugClient(
         keyword = keyword,
         totalTimeoutMs = totalTimeoutMs,
         handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
-        idleTimeoutMs = maxOf(DEFAULT_IDLE_TIMEOUT_MS, totalTimeoutMs),
+        idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
         maxFrames = DEFAULT_MAX_FRAMES,
         maxTotalBytes = DEFAULT_MAX_TOTAL_BYTES,
         maxLineChars = DEFAULT_MAX_LINE_CHARS,
@@ -294,7 +401,7 @@ class ReaderWebLegacyDebugClient(
         }
         val token = config.token.trim()
 
-        val totalMs = totalTimeoutMs.coerceIn(200L, 120_000L)
+        val totalMs = clampTotalTimeoutMs(totalTimeoutMs)
         val handshakeMs = handshakeTimeoutMs.coerceIn(50L, totalMs)
         val idleMs = idleTimeoutMs.coerceIn(50L, totalMs)
         val frameLimit = maxFrames.coerceIn(1, 10_000)
@@ -316,13 +423,40 @@ class ReaderWebLegacyDebugClient(
         val logs = Collections.synchronizedList(mutableListOf<String>())
         val closeCode = AtomicInteger(NO_CLOSE_CODE)
         val closeReason = AtomicReference("")
-        val lastActivityNanos = AtomicLong(System.nanoTime())
+        val lastFrameNanos = AtomicLong(0L)
         val startedNanos = System.nanoTime()
 
         fun snapshotLogs(): List<String> = synchronized(logs) { logs.toList() }
 
-        fun settleFailed(code: String, message: String) {
-            settle.complete(Settle.Failed(code, redact.apply(message), snapshotLogs()))
+        fun watchSnapshot(): Triple<Long, Long?, Int> {
+            val now = System.nanoTime()
+            val lastFrame = lastFrameNanos.get()
+            return Triple(
+                (now - startedNanos) / 1_000_000,
+                if (lastFrame == 0L) null else (now - lastFrame) / 1_000_000,
+                frames.get(),
+            )
+        }
+
+        fun timeoutObs(kind: String): Map<String, Any?> {
+            val (elapsed, lastFrameAgo, received) = watchSnapshot()
+            return timeoutObservations(kind, elapsed, lastFrameAgo, received)
+        }
+
+        fun lostObs(kind: String): Map<String, Any?> {
+            val (elapsed, lastFrameAgo, received) = watchSnapshot()
+            return lostObservations(
+                kind,
+                elapsed,
+                lastFrameAgo,
+                received,
+                closeCode.get().takeIf { it != NO_CLOSE_CODE },
+                closeReason.get(),
+            )
+        }
+
+        fun settleFailed(code: String, message: String, observations: Map<String, Any?> = emptyMap()) {
+            settle.complete(Settle.Failed(code, redact.apply(message), snapshotLogs(), observations))
         }
 
         fun settleDone(cut: Boolean = truncated.get()) {
@@ -368,7 +502,6 @@ class ReaderWebLegacyDebugClient(
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (!opened.compareAndSet(false, true)) return
-                lastActivityNanos.set(System.nanoTime())
                 // 服务端选定的子协议必须是我们发过的那个；不接受时立即断开，不把调试数据发过去
                 val selected = response.header(SUBPROTOCOL_HEADER)?.trim().orEmpty()
                 if (selected.isNotEmpty() && selected.split(',').map { it.trim() }
@@ -382,18 +515,22 @@ class ReaderWebLegacyDebugClient(
                     return
                 }
                 if (!webSocket.send(payload)) {
-                    settleFailed("CONNECTION_LOST", "调试请求未能发送：连接已关闭")
+                    settleFailed(
+                        "CONNECTION_LOST",
+                        "调试请求未能发送：连接已关闭",
+                        lostObs(LOST_KIND_SEND_FAILED),
+                    )
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                lastActivityNanos.set(System.nanoTime())
+                lastFrameNanos.set(System.nanoTime())
                 ingest(text)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
                 // 协议只发文本：二进制帧不解析、不保留，但仍计入帧数上限，避免被刷爆
-                lastActivityNanos.set(System.nanoTime())
+                lastFrameNanos.set(System.nanoTime())
                 if (frames.incrementAndGet() > frameLimit) {
                     truncated.set(true)
                     settleDone(cut = true)
@@ -401,7 +538,6 @@ class ReaderWebLegacyDebugClient(
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                lastActivityNanos.set(System.nanoTime())
                 closeCode.compareAndSet(NO_CLOSE_CODE, code)
                 closeReason.set(redact.apply(reason))
                 // 收到对端关闭帧即视为会话终止：不等待可能永不到来的 onClosed，
@@ -419,7 +555,12 @@ class ReaderWebLegacyDebugClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 val (code, message) = classifyFailure(t, response, token.isEmpty(), opened.get())
-                settleFailed(code, message)
+                val extra = if (code == "CONNECTION_LOST") {
+                    lostObs(if (t is IOException) LOST_KIND_IO_FAILURE else LOST_KIND_ABNORMAL_END)
+                } else {
+                    emptyMap()
+                }
+                settleFailed(code, message, extra)
             }
         }
 
@@ -447,12 +588,17 @@ class ReaderWebLegacyDebugClient(
                                 )
                                 return@launch
                             }
-                        } else if ((now - lastActivityNanos.get()) / 1_000_000 >= idleMs) {
-                            settleFailed(
-                                "TIMEOUT",
-                                "本工具等待阅读调试输出超过 ${idleMs}ms（这是 MCP 端等待上限，不是阅读端超时）；书源可能在等待/sleep，请加大 timeoutSec 重跑 reader_web_debug，结论仍以阅读端为准，不得改用沙箱结论",
-                            )
-                            return@launch
+                        } else {
+                            val lastFrame = lastFrameNanos.get()
+                            val lastFrameAgo = if (lastFrame == 0L) null else (now - lastFrame) / 1_000_000
+                            if (idleTimedOut(frames.get(), lastFrameAgo, idleMs)) {
+                                settleFailed(
+                                    "TIMEOUT",
+                                    "本工具等待阅读调试输出空闲超过 ${idleMs}ms（这是 MCP 端无新帧上限，不是阅读端超时）；书源可能在等待/sleep，请加大 timeoutSec 重跑 reader_web_debug，结论仍以阅读端为准，不得改用沙箱结论",
+                                    timeoutObs(TIMEOUT_KIND_IDLE),
+                                )
+                                return@launch
+                            }
                         }
                         delay(tickMs)
                     }
@@ -465,7 +611,9 @@ class ReaderWebLegacyDebugClient(
             }
 
             when (settled) {
-                is Settle.Failed -> throw LegacyDebugException(settled.code, settled.message, settled.logs)
+                is Settle.Failed -> throw LegacyDebugException(
+                    settled.code, settled.message, settled.logs, settled.observations,
+                )
                 is Settle.Done -> {
                     val combined = settled.logs.joinToString("\n")
                     val refusal = if (
@@ -485,6 +633,7 @@ class ReaderWebLegacyDebugClient(
                             "CONNECTION_LOST",
                             "阅读调试连接已断开，但没有收到关闭帧：阅读可能被关闭或调试通道被重置",
                             settled.logs,
+                            lostObs(LOST_KIND_NO_CLOSE_FRAME),
                         )
                     }
                     if (normalizedClose != null) {
@@ -536,6 +685,7 @@ class ReaderWebLegacyDebugClient(
                 "TIMEOUT",
                 "本工具等待阅读调试达到总上限 ${totalMs}ms（这是 MCP 端等待上限，不是阅读端超时）；阅读可能仍在处理，请加大 timeoutSec 重跑 reader_web_debug，结论仍以阅读端为准，不得改用沙箱结论",
                 snapshotLogs(),
+                timeoutObs(TIMEOUT_KIND_TOTAL),
             )
         } finally {
             runCatching { socket.close(1000, "") }

@@ -30,6 +30,11 @@ object TaskContextSnapshot {
         val code: Int? = null,
         val finalUrl: String? = null,
         val elapsedMs: Long? = null,
+        /**
+         * 来自 Entry.page.redirectChain。Entry / FetchResult 没有 requestedUrl、crossHostRedirect，
+         * 不在快照里编造这两项。旧文件缺字段时 Gson 给 null，读取按空列表。
+         */
+        val redirectChain: List<String>? = null,
     )
 
     data class TaskSnapshot(
@@ -94,8 +99,14 @@ object TaskContextSnapshot {
         return files.mapNotNull { file ->
             runCatching {
                 val content = file.readText(Charsets.UTF_8)
-                gson.fromJson(content, TaskSnapshot::class.java)
+                normalize(gson.fromJson(content, TaskSnapshot::class.java))
             }.getOrNull()
         }
     }
+
+    /** 旧快照缺 redirectChain 时当空列表；不补 requestedUrl / crossHostRedirect。 */
+    internal fun normalize(snap: TaskSnapshot): TaskSnapshot =
+        snap.copy(entries = snap.entries.orEmpty().map { e ->
+            e.copy(redirectChain = e.redirectChain ?: emptyList())
+        })
 }

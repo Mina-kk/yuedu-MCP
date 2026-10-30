@@ -86,9 +86,7 @@ class UiSurfaceContractTest {
         assertTrue(guide.contains("overwrite=true"))
     }
 
-    /** 阅读端闭环契约：SKILL.md 必须把「本机 check_source → 保存回读 → status → sync → verify」
-     *  写进完成标准，并写清 overwrite 授权、confirmed 门槛、旧版只出日志不判通过、
-     *  import_reader 只唤起。参考文件必须同步给出分诊，避免 AI 只交本地报告。 */
+    /** 阅读端闭环契约：技能应以阅读端调试及网页为主，沙箱与结构化检验为可选辅助。 */
     @Test
     fun skillDeclaresReaderWebClosureAsDefault() {
         val skillDir = listOf(
@@ -108,7 +106,7 @@ class UiSurfaceContractTest {
 
         val indexMd = File(skillDir, "references/index.md").readText()
         assertTrue("index.md 须把闭环列入基线", indexMd.contains("reader_web_sync_source"))
-        assertTrue(indexMd.contains("reader_web_verify"))
+        assertTrue(indexMd.contains("reader_web_page"))
 
         val verification = File(skillDir, "references/verification.md").readText()
         assertTrue("verification.md 须有阅读端检验口径", verification.contains("阅读端检验口径"))
@@ -180,10 +178,10 @@ class UiSurfaceContractTest {
         assertTrue("须写 apiProfile=mismatch 不代表不是阅读", skillMd.contains("mismatch"))
         // 证据口径
         assertTrue("须写明网页 200 不等于书源通过", skillMd.contains("不等于书源通过"))
-        assertTrue("旧版 WS 日志不判 PASSED", skillMd.contains("旧版 WS 日志不判 `PASSED`") || skillMd.contains("旧版 WS 日志不判"))
+        assertTrue("旧版 WS 日志不判 PASSED", skillMd.contains("日志不是官方结构化 `PASSED`"))
         // 副作用与确认
         assertTrue("须写明 click/fill 有副作用", skillMd.contains("有副作用"))
-        assertTrue("保存/覆盖书源须用户确认", skillMd.contains("必须用户确认") || skillMd.contains("须用户确认"))
+        assertTrue("保存/覆盖书源须用户确认", skillMd.contains("取得明确覆盖授权"))
         // 重连刷新
         assertTrue("须写重新连接才会刷新 tools/list", skillMd.contains("tools/list"))
 
@@ -232,7 +230,8 @@ class UiSurfaceContractTest {
         assertTrue("设置页须按 73 个工具计数（标准）", ui.contains("共 73 个工具"))
         assertFalse("不得残留 71 个工具", ui.contains("共 71 个工具"))
         assertTrue("网页可达/官方 API 不匹配须显示通用网页工具", ui.contains("网页可达"))
-        assertTrue("状态须区分网页可达与接口不匹配", ui.contains("官方接口未匹配"))
+        assertTrue("状态须区分网页可达与待确认能力", ui.contains("网页可达，部分功能待确认"))
+        assertFalse("不能将未识别某版接口当作客户端身份结论", ui.contains("没有识别到官方阅读接口"))
         assertFalse("设置页不得写死示例端口", Regex("\\b1122\\b").containsMatchIn(ui))
         assertTrue("设置页须引导 reader_web_page", ui.contains("reader_web_page(action=open/snapshot/click/press_enter/fill/scroll/back/close)"))
         assertTrue("须保留同机回环提示", ui.contains("http://127.0.0.1:端口"))
@@ -719,6 +718,14 @@ class UiSurfaceContractTest {
         assertTrue(source.contains("httpLogSummariesPageNoCapture"))
         // contextId 精确捷径（cap:xxx 点名抓包会话）不受 includeCapture 影响
         assertTrue(source.contains("httpLogSummariesByContextIdPage(contextIdParam"))
+        // P1-1：contextId 捷径也必须按 url/finalUrl query 先过滤再 offset/limit
+        assertTrue("query 须走 httpLogUrlMatchesQuery", source.contains("httpLogUrlMatchesQuery"))
+        assertTrue("contextId+query 须先过滤再分页", source.contains("all.filter { httpLogUrlMatchesQuery(it.url, it.finalUrl, query) }"))
+        assertTrue("有 query 时须 drop(offset).take(limit)", source.contains("page = filtered.drop(offset).take(limit)"))
+        // P2-1：cap: 查询上下文不能 saveResult，大结果落到本连接任务上下文并回 resultContextId
+        assertTrue("boundedResult 须用 resultStoreContextId", source.contains("resultStoreContextId(args)"))
+        assertTrue("回包须带 resultContextId", source.contains("\"resultContextId\""))
+        assertTrue("cap: 不得作为结果存储上下文", source.contains("usableResultStoreContextId"))
     }
 
     /** 抓包会话 UI 防回归锁：历史入口 + 分页 DAO + 逐跳详情 + 旧版兼容提示 + 脱敏截断提醒。

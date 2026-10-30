@@ -27,6 +27,7 @@ import java.io.File
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -410,6 +411,87 @@ class WebViewCaptureEngine(
         val hint: String,
         val workflow: Map<String, String>,
     )
+
+    /** webview_eval 的取值结果：value 已对 Promise unwrap（fulfilled 原值转 String）。 */
+    data class EvalOutcome(val finalUrl: String, val value: String, val elapsedMs: Long)
+
+    /**
+     * webview_eval：一次性 WebView 打开 [url] 执行 [script]。
+     * Promise/thenable 只跑一次，状态挂唯一 token，之后 300ms 轮询同一 token 不重跑；
+     * 非 Promise 仍按 null 重跑。不建抓包会话、不拦截供给（与 [run] 不同）。
+     * webview_render / [run] 的 webJs 继续走 [WebViewLoadPlan.buildPollScript]，对齐阅读端 null 轮询。
+     */
+    suspend fun eval(
+        url: String,
+        script: String,
+        delayMs: Long = 800,
+        timeoutMs: Long = 60_000,
+        resourceRecorder: ((method: String, requestUrl: String, headers: Map<String, String>) -> Unit)? = null,
+    ): EvalOutcome = withTimeout(timeoutMs) {
+        require(script.isNotBlank()) { "script 不能为空" }
+        val plan = WebViewLoadPlan.plan(url, null)
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        val closed = AtomicBoolean(false)
+        val started = System.currentTimeMillis()
+        val generation = AtomicInteger(0)
+        var view: WebView? = null
+
+        fun teardown() {
+            main.removeCallbacksAndMessages(null)
+            view?.stopLoading()
+            view?.destroy()
+            view = null
+        }
+
+        suspendCancellableCoroutine<EvalOutcome> { continuation ->
+            fun finish(result: kotlin.Result<EvalOutcome>) {
+                if (!closed.compareAndSet(false, true)) return
+                main.post { teardown() }
+                if (continuation.isActive) {
+                    result.onSuccess(continuation::resume).onFailure(continuation::resumeWithException)
+                }
+            }
+            continuation.invokeOnCancellation {
+                closed.set(true)
+                main.post { teardown() }
+            }
+            main.post {
+                if (closed.get()) return@post
+                runCatching {
+                    WebView(context).also { webView ->
+                        view = webView
+                        configure(webView)
+                        webView.webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(v: WebView, finishedUrl: String) {
+                                if (closed.get()) return
+                                val gen = generation.incrementAndGet()
+                                val token = WebViewLoadPlan.newEvalToken()
+                                val js = WebViewLoadPlan.buildEvalPollScript(script, token)
+                                main.postDelayed({
+                                    if (closed.get() || generation.get() != gen) return@postDelayed
+                                    pollEval(v, plan.url, js, gen, generation, started, main, closed, ::finish)
+                                }, delayMs.coerceIn(0, 10_000))
+                            }
+
+                            override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): WebResourceResponse? {
+                                resourceRecorder?.let { rec ->
+                                    runCatching {
+                                        rec(
+                                            request.method ?: "GET",
+                                            request.url?.toString().orEmpty(),
+                                            request.requestHeaders ?: emptyMap(),
+                                        )
+                                    }
+                                }
+                                return null
+                            }
+                        }
+                        webView.loadUrl(plan.url)
+                    }
+                }.onFailure { finish(kotlin.Result.failure(it)) }
+            }
+        }
+    }
 
     /** 无头模式的 WebView 加载流程：onPageFinished + 稳定轮询后取 outerHTML / webJs 值。 */
     private suspend fun load(
@@ -886,9 +968,60 @@ class WebViewCaptureEngine(
     )
 
     /**
-     * onPageFinished 后的轮询（仅无头模式）：与 [WebViewPageLoader.poll] 同协议——
-     * webJs 为 null 时直接取 documentElement.outerHTML，返回 null 重试到外层超时；
-     * __STUDIO_ERROR__ 抛错。finalUrl 校验仍走 [WebViewLoadPlan.requirePublicHttpUrl]。
+     * webview_eval 轮询：脚本由 [WebViewLoadPlan.buildEvalPollScript] 一次构造（token 已烘焙），
+     * 每 300ms 重评同一段 JS，不换 token、不重跑用户脚本（Promise pending 时脚本自己 return null）。
+     * 文档级跳转由 [eval] 的 generation 作废旧链；SPA pushState 由脚本内 href 比对丢弃旧 token。
+     */
+    private fun pollEval(
+        view: WebView,
+        entryUrl: String,
+        js: String,
+        gen: Int,
+        generation: AtomicInteger,
+        started: Long,
+        main: android.os.Handler,
+        closed: AtomicBoolean,
+        finish: (kotlin.Result<EvalOutcome>) -> Unit,
+    ) {
+        if (closed.get() || generation.get() != gen) return
+        view.evaluateJavascript(js) { raw ->
+            if (closed.get() || generation.get() != gen) return@evaluateJavascript
+            val value = decode(raw)
+            when {
+                value == null -> main.postDelayed(
+                    { pollEval(view, entryUrl, js, gen, generation, started, main, closed, finish) },
+                    WebViewLoadPlan.POLL_INTERVAL_MS,
+                )
+                value.startsWith("__STUDIO_ERROR__") -> finish(
+                    kotlin.Result.failure(IllegalStateException(value.removePrefix("__STUDIO_ERROR__"))),
+                )
+                else -> {
+                    val resolved = runCatching {
+                        WebViewLoadPlan.requirePublicHttpUrl(view.url ?: entryUrl, "webview_eval finalUrl")
+                    }.getOrElse { err ->
+                        finish(kotlin.Result.failure(IllegalStateException("webview_eval 重定向落点不合法：${err.message}")))
+                        return@evaluateJavascript
+                    }
+                    CookieManager.getInstance().flush()
+                    finish(
+                        kotlin.Result.success(
+                            EvalOutcome(
+                                finalUrl = resolved,
+                                value = value,
+                                elapsedMs = System.currentTimeMillis() - started,
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * onPageFinished 后的轮询（仅无头 webview_capture）：与 [WebViewPageLoader.poll] 同协议——
+     * 必须走 [WebViewLoadPlan.buildPollScript]，对齐阅读端 webJs「返回 null 重跑」语义，
+     * **不要**换成 eval 的 Promise unwrap。webJs 为 null 时直接取 documentElement.outerHTML，
+     * 返回 null 重试到外层超时；__STUDIO_ERROR__ 抛错。finalUrl 校验仍走 [WebViewLoadPlan.requirePublicHttpUrl]。
      */
     private fun poll(
         view: WebView,

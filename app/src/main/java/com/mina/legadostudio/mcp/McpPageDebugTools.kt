@@ -31,13 +31,19 @@ internal fun StudioMcpServer.registerPageDebugTools(server: Server) {
                 else mapOf("contextId" to ctxId, "pageId" to e.id, "snapshot" to contexts.metadata(e), "output" to output)))
         }.getOrElse { err(it.message.orEmpty()) }
     }
-    server.tool("inspect_rule", "用Legado解析器运行规则。output 为规则解析后的单值拼接字符串（内部 values 仅含该结果），不是逐元素列表；elements 仅作前100项预览，不对应逐项 output。传pageId使用完整快照、不重新抓取、不回传网页正文；只传url也复用快照；refresh=true强制联网；WebView验证模式保持实时。规则内JS仍可主动联网。", schema(mapOf("url" to "实时请求URL（与pageId二选一）", "pageId" to "已存网页ID", "rule" to "Legado规则", "method" to "GET/POST/HEAD", "charset" to "可选编码"), listOf("rule")), toolAnnotations = openWrite) { req ->
+    server.tool("inspect_rule", "用Legado解析器运行规则。output.values 是逐元素提取后再逐元素套 ##正则## 的列表；output.first 是首项。elements 仅作前100项选择器预览，不与 values 逐项对应。countOnly=true 只回 output.count；limit=N 只回 values 前 N 项且 count 仍为全量。传pageId使用完整快照、不重新抓取、不回传网页正文；只传url也复用快照；refresh=true强制联网；WebView验证模式保持实时。规则内JS仍可主动联网。", schema(mapOf("url" to "实时请求URL（与pageId二选一）", "pageId" to "已存网页ID", "rule" to "Legado规则", "method" to "GET/POST/HEAD", "charset" to "可选编码"), listOf("rule")), toolAnnotations = openWrite) { req ->
         runCatching {
             val pageId = req.arguments.str("pageId")
             require(!(pageId != null && req.arguments.str("url") != null)) { "url/pageId不能同时传入" }
             require(!(pageId != null && req.arguments.bool("refresh") == true)) { "refresh需要url，不能刷新pageId" }
+            val countOnly = req.arguments.bool("countOnly") == true
+            val limit = req.arguments.int("limit")
+            require(limit == null || limit in 0..McpPageFetchEvidence.INSPECT_LIMIT_MAX) {
+                "limit 必须是 0..${McpPageFetchEvidence.INSPECT_LIMIT_MAX}"
+            }
             val webViewLive = pageId == null && req.arguments.str("url")?.let { app.domainModes.requiresWebView(it) } == true
-            val hit = if (pageId == null && !webViewLive) contextFetch(req.arguments).second else null
+            val fetched = if (pageId == null && !webViewLive) contextFetch(req.arguments) else null
+            val hit = fetched?.second
             val e = pageId?.let { savedEntry(req.arguments, it) } ?: hit?.entry
             require(e == null || e.kind == "page") { "需要pageId" }
             val inspectCtxId = contextId(req.arguments)
@@ -47,11 +53,38 @@ internal fun StudioMcpServer.registerPageDebugTools(server: Server) {
                 contextId = inspectCtxId, sourceAnchor = inheritedAnchor(req.arguments, inspectCtxId),
             )
             val report = if (e == null) app.runtime.inspect(input) else app.runtime.inspectSnapshot(input, e.page!!)
-            val response = app.gson.toJsonTree(report.response.copy(body = "", headers = emptyMap())).asJsonObject
+            val navPage = fetched?.third ?: e?.page ?: report.response
+            val shaped = McpPageFetchEvidence.shapeInspect(report.output, report.elements, countOnly, limit)
+            val responsePage = report.response.copy(
+                body = "",
+                headers = emptyMap(),
+                redirectChain = navPage.redirectChain,
+                finalUrl = navPage.finalUrl.ifBlank { report.response.finalUrl },
+            )
+            val response = app.gson.toJsonTree(responsePage).asJsonObject
             response.remove("rawBytes")
-            ok(app.gson.toJson(mapOf("response" to response, "output" to report.output,
-                "outputHint" to "output 是整条规则解析后拼接的单值字符串；values 只含该单值，不代表逐元素结果。elements 是最多100项的独立预览，不与 output 逐项对应。",
-                "elements" to report.elements, "elementWarning" to report.elementWarning, "contextId" to contextId(req.arguments), "pageId" to e?.id, "cacheHit" to (hit?.reused ?: (pageId != null)), "snapshot" to (e?.let { contexts.metadata(it) } ?: mapOf("live" to true)))))
+            val payload = mutableMapOf<String, Any?>(
+                "response" to response,
+                "output" to shaped.output,
+                "outputHint" to shaped.outputHint,
+                "perElement" to true,
+                "elementWarning" to report.elementWarning,
+                "contextId" to contextId(req.arguments),
+                "pageId" to e?.id,
+                "cacheHit" to (hit?.reused ?: (pageId != null)),
+                "snapshot" to (e?.let { contexts.metadata(it) } ?: mapOf("live" to true)),
+            )
+            payload.putAll(McpPageFetchEvidence.navigation(req.arguments.str("url"), navPage))
+            if (shaped.elements != null) payload["elements"] = shaped.elements
+            if (shaped.valuesOmitted) payload["valuesOmitted"] = true
+            if (shaped.elementsOmitted) payload["elementsOmitted"] = true
+            if (shaped.valuesTruncated) {
+                payload["valuesTruncated"] = true
+                payload["valuesReturned"] = shaped.valuesReturned
+            }
+            if (countOnly) payload["countOnly"] = true
+            if (limit != null) payload["limit"] = limit
+            ok(app.gson.toJson(payload))
         }.getOrElse { verificationAware(it) }
     }
     server.tool("debug_source", "使用 App 内运行时调试 BookSource JSON；entry 支持关键词、详情 URL、++目录、--正文、分类::URL。默认复用本任务快照，refresh=true 全程实时。注意 searchUrl 的 @js: 最后一行必须以纯表达式返回 http(s) URL 或 \"url,\"+JSON.stringify({method,body,headers})，带 return 或返回裸文本会报「返回的值无效」。", schema(mapOf("source" to "BookSource JSON（JSON 字符串或已解析的对象均可；与 projectId 二选一）", "projectId" to "可选：已保存项目 ID，与 source 二选一（绕过 source 传输，直接调试已存项目）", "entry" to "调试入口", "refresh" to "可选，true=不使用缓存"), listOf("entry")), toolAnnotations = openWrite) { req ->
@@ -99,5 +132,95 @@ internal fun StudioMcpServer.registerPageDebugTools(server: Server) {
             if (message.contains("【API 提示】")) err(message)
             else verificationAware(e)
         }
+    }
+}
+
+/**
+ * fetch_page / inspect_rule 回包里与抓页导航、规则输出截断有关的纯函数。
+ * redirectChain 与 [com.mina.legadostudio.network.HttpFetcher.FetchResult.redirectChain] 一致：
+ * 各跳请求 URL（含起点与最终落点），没有逐跳 HTTP status，不能编造。
+ */
+internal object McpPageFetchEvidence {
+    const val INSPECT_LIMIT_MAX = 10_000
+
+    data class InspectShape(
+        val output: Any?,
+        val elements: List<String>?,
+        val outputHint: String,
+        val valuesOmitted: Boolean,
+        val elementsOmitted: Boolean,
+        val valuesTruncated: Boolean,
+        val valuesReturned: Int,
+    )
+
+    fun hostOf(url: String): String? {
+        if (url.isBlank()) return null
+        return runCatching {
+            val uri = java.net.URI(url)
+            uri.host?.takeIf { it.isNotBlank() }?.lowercase()
+        }.getOrNull()
+    }
+
+    fun navigation(requestedUrl: String?, page: com.mina.legadostudio.network.HttpFetcher.FetchResult): Map<String, Any> {
+        val chain = page.redirectChain
+        val requested = requestedUrl?.takeIf { it.isNotBlank() }
+            ?: chain.firstOrNull()?.takeIf { it.isNotBlank() }
+            ?: page.finalUrl
+        val hosts = LinkedHashSet<String>()
+        listOf(requested, page.finalUrl).plus(chain).forEach { hostOf(it)?.let { h -> hosts += h } }
+        return mapOf(
+            "requestedUrl" to requested,
+            "finalUrl" to page.finalUrl,
+            "redirectChain" to chain,
+            "crossHostRedirect" to (hosts.size > 1),
+        )
+    }
+
+    fun shapeInspect(
+        output: io.legado.app.model.analyzeRule.LegadoRuleEngine.Output?,
+        elements: List<String>,
+        countOnly: Boolean,
+        limit: Int?,
+    ): InspectShape {
+        val values = output?.values.orEmpty()
+        val total = output?.count ?: values.size
+        val passthroughHint = "output.values 是逐元素提取后再逐元素套 ##正则## 的列表；output.first 是首个元素。elements 仍是最多100项的选择器命中预览，不与 values 逐项对应。"
+        if (countOnly) {
+            return InspectShape(
+                output = mapOf("count" to total),
+                elements = null,
+                outputHint = "countOnly=true：只返回 output.count（规则命中条数）。未序列化 values，也未序列化 elements（elements 是选择器预览，不与 values 逐项对应）。",
+                valuesOmitted = true,
+                elementsOmitted = true,
+                valuesTruncated = false,
+                valuesReturned = 0,
+            )
+        }
+        if (limit == null) {
+            return InspectShape(
+                output = output,
+                elements = elements,
+                outputHint = passthroughHint,
+                valuesOmitted = false,
+                elementsOmitted = false,
+                valuesTruncated = false,
+                valuesReturned = values.size,
+            )
+        }
+        val cap = limit.coerceIn(0, INSPECT_LIMIT_MAX)
+        val sliced = values.take(cap)
+        return InspectShape(
+            output = mapOf(
+                "values" to sliced,
+                "first" to output?.first,
+                "count" to total,
+            ),
+            elements = elements,
+            outputHint = passthroughHint,
+            valuesOmitted = false,
+            elementsOmitted = false,
+            valuesTruncated = sliced.size < total,
+            valuesReturned = sliced.size,
+        )
     }
 }

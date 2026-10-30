@@ -1,41 +1,36 @@
-# 书源工坊生成合同
+# 阅读书源生成约定
 
-根据规则和真实 HTML 证据输出一个闭合的 BookSource JSON。不要假设本机有 Python 调试器或 legado 源码树。
+输出符合目标阅读版本的 BookSource JSON。MCP 提供取证、保存、同步和调试工具；沙箱是辅助环境，不是阅读规则标准。
 
-## 零、官方优先铁律（最高优先级；违反任意一条即返工——同类问题已翻车五次）
+## 规则来源
 
-**标准的来源**：① 官方阅读的规则机制（字段语义、JS 扩展 API）；② 当前内置语料库的真实书源写法（重建前 26,861 份底库的历史统计见 `corpus.md`，当前实例可 `get_corpus_source` 直查）。个别站点样例（含书友社、菠萝猫）只是**实战参考**，不是标准本身；与语料共识冲突时，先怀疑样例、再查语料。
+1. 目标阅读版本的字段语义、规则解析器与 JavaScript 扩展行为。
+2. 对应版本的阅读规则文档，以及当前页面和请求的真实证据。
+3. 已有书源和技能案例只能作为候选模板，不代表目标网站、所有阅读分支或当前时间仍然兼容。
 
-1. **静态已取证字段能 CSS 就不 JS，动态难链路段该 JS 就 JS**。目录/详情/搜索/正文的字段提取优先 CSS 选择器。重建前语料证据：26,861 份真实书源中 **23,496 份（87.5%）chapterList 为纯 CSS**，形态如 `#chapters .direList li a` + `chapterName: text` + `chapterUrl: href`（菠萝猫 boluomao1.com 即此形态，官方 App 实测通过）。但遇到 JS 人机挑战、动态签名、依赖 Cookie/跨请求会话、加密接口、动态 POST 参数或 AJAX 分页时，**优先在正确的规则位置用 JS 组织请求与数据**（`searchUrl @js`、URL 的 `js`/`bodyJs` 选项、`loginCheckJs`），不要为回避 JS 而反复硬套静态选择器试错；推荐 JS 不等于强制改写已可用的静态成品。
-2. **目录分页只用官方字段 `nextTocUrl`**（存在目录翻页时指向「下一页」链接，如 `.page2-chapter .page-range-list .cur + a@href`）。**禁止**在 chapterList 写巨型 `@js`，用 `for(page=2..N)` / `cp=1..N` 循环 `java.ajax`/`java.post` 一页页扒 HTML 自建章节数组——这是五次翻车的共同根因。唯一例外：目录本体由加密 API 返回（如书友社 `loadChapterPage`：AES 加密 POST 换 JSON），此时 `@js` 只负责取数据、拼 `<a href>` 片段数组，且仍必须配 `chapterName`/`chapterUrl` 字段解析。
-3. **章节内分页只用 `nextContentUrl`**（文案只含「下一页」「下页」，禁止「下一章」「下一回」）。
-4. **解码混淆数据**：XOR/字节场景的标准转法是 `java.base64DecodeToByteArray(s)` + `new Packages.java.lang.String(bytes, "UTF-8")`（Rhino 官方语法，菠萝猫实测可用）。语料里更主流的是 `java.base64Decode` 直接拿串、`java.createSymmetricCrypto(转换, key, iv).decryptStr(base64)`（AES 流派，70 份真实源在用，沙箱已支持）——**按页面实际混淆机制选**，不要一律套 XOR 模板。禁止：手写 UTF-8 重组、`java.bytesToStr`（重建前语料仅 2/26861 在用，官方 App 未验证）、`new java.lang.String(...)`（不存在）、`String(byte[])` 直转。
-5. **字符串修正**：域名替换等纯文本修正用 `.replace("www.a.com", "www.b.com")`；正则 replace 只能作用于 `String()` 包裹后的 JS 字符串，禁止对 `java.*` 裸返回值直接 `.replace(/正则/, ...)`（Rhino 报「选择不明确」）。
-6. **正文清洗走 `replaceRegex`**（`##正则##`，全章合并后执行）；`content` 规则保持 `@html`/`@text` 短规则，不把整条清洗链塞进 JS。
-7. **官方字段必填齐全**：`bookSourceName` `bookSourceUrl` `bookSourceGroup` `bookSourceType` `customButton` `customOrder` `eventListener` `lastUpdateTime` `respondTime` `weight` `enabledExplore` `enabledCookieJar` `bookSourceComment`（菠萝猫/书友社成品均按此清单出字段）。
-8. **`searchUrl` 的 `@js:`**：以纯表达式返回 URL，或 `"url," + JSON.stringify({method,body,headers})`；不带 `return`；`key` 仅在 searchUrl 作用域注入。**返回值必须是 URL（或 URL+选项），不能返回抓取到的 HTML 正文**——运行时会把这个返回值当作请求地址再抓一次，搜索结果由 `ruleSearch` 从该响应里解析。要在一个 JS 里先发请求取数据再自行解析列表，请放在 `ruleSearch.bookList` 的 `@js:`（`result`/`src` 是响应体，可 `java.ajax`/`java.connect` 追加请求并返回元素数组），而不是把 HTML 塞进 `searchUrl` 返回值。
-9. **不存在的 API 一律不用**：`java.currentTimeMillis`、`java.decodeURI`、`java.utf8ToGbk`、`java.getElement`/`java.getElements`（Studio 沙箱未实现，官方 App 有）、`java.lang.reflect.Array`、`new java.lang.String`、JS `reversed()`（只有 `reverse()`）。沙箱 `java.connect` 实测签名：`connect(url)`、`connect(url, header)`、`connect(url, header, method或timeout)`、`connect(url, header, method, body)`、`connect(url, header, method, body, charset)`。响应对象用 `code()`、`body()`、`headers()`（Map）、`header(name)` 取单头、`bytes()` 取字节、`raw()`/`request()`/`priorResponse()`/`callTime()`；**不要写 `raw.header(name)`**。以 `js-api.md` 沙箱清单为准。
-10. **搜索外包给 rrssk 的站点（主站搜索框跳外站）一律以书友社成品为模板骨架起步**（四步链 @js、会话自管、script 加载伪装头、find 页翻页全部继承），再按 `knowledge/第三方搜索逆向实战-rrssk.md` 第 8 节清单逐项重取证站点差异；禁止在 rrssk 类站点上从零试错。模板是实战参考不是官方标准，规则对错仍以官方规则与语料共识为准。
+沙箱未实现某个 API、改变了输入类型或限制执行，不得据此禁止阅读端合法写法。`java.getElement` / `java.getElements`、Java 类调用、外部 jsLib 等先在目标阅读端核对；不能使用沙箱 API 清单作为生成白名单。反过来，工坊专有辅助函数也不能直接塞进交付书源。
 
-## 必须遵守
+## 编写要求
 
-1. 选择器只能使用证据里出现过的 tag / id / class / meta。禁止编造站点专属结构，禁止把某个小说站的写法当成所有网站的模板。
-2. `nextContentUrl` 只表示**同一章的下一页**（文案是「下一页」「下页」）。禁止写成「下一章」「下一回」。没有分页就留空。
-3. `nextTocUrl` 只表示目录分页，不是下一章。
-4. `chapterList` 必须指向章节列表容器，不要用导航、分类、页脚链接。
-5. `@css:` 只允许写在一条规则的开头一次；`||` 后面不要再写 `@css:`。优先 `id.xxx@tag.a` / `class.xxx@tag.a`。
-6. 搜索规则必须来自「搜索结果页」证据。首页搜索表单只能用来写 `searchUrl`（保留 hidden 字段和 `{{key}}`）。没有结果页证据时，不要猜 `bookList`。**禁止把 ruleExplore/列表页选择器复制进 ruleSearch**——搜索结果页结构与列表页经常是两套 DOM（如列表页 `.post-book-item`、搜索页 `article.search-book-card`），必须 `fetch_page` 搜索页实测。
-7. `replaceRegex` 是全部正文页合并之后的清洗，必须写成 `##正则##`；禁止贪婪 `##...$##` 从第一页吃到章末。
-8. 只输出一个 JSON 对象，不要 Markdown，不要长注释。
-9. 有真实正文容器时必须优先 CSS/XPath（如 `#content@html`、`id.chapterContent@text`），禁止为了“通用兜底”遍历整页最大文本块。
-10. 工坊内嵌 Rhino 已知不兼容 `org.jsoup.Jsoup.parse(...)` 的直接调用；不得生成这种写法。只有证据证明必须用 JS 且 CSS/XPath 无法表达时，才允许显式 `Packages.org.jsoup.Jsoup`，并必须让脚本返回值而不是只 `java.log`。
+- 选择器只能依据真实 HTML、JSON 或阅读日志。静态字段优先使用直接 CSS/XPath/JSONPath；确有动态签名、会话、解码等需求时使用对应阶段 JS，不为避免 JS 或迁就沙箱改写已有效规则。
+- 搜索请求应从真实表单/网络事务取证，保留必要 hidden 字段、方法、编码与请求体；`{{key}}` 是阅读搜索关键词模板，不是自行猜一个请求参数名。搜索结果规则需单独检查，不能仅因发现列表相似就复制。
+- `searchUrl` 的脚本返回可请求的 URL 或 URL 加请求选项，不把 HTML 正文当请求地址。`key`、`result`、`src` 等变量按阅读实际阶段作用域使用，不假设所有阶段都有相同绑定。
+- 目录优先用 `chapterList` / `chapterName` / `chapterUrl`，目录分页使用官方字段 `nextTocUrl`。阅读 `BookChapterList` 对 `nextTocUrl` 调用 `getStringList(isUrl=true)`，得到 URL 列表后按长度分支：0 条结束；恰好 1 条则串行跟随，且每一页继续取 `nextTocUrl`；多于 1 条则视为首页给出的完整页表，按 `AppConfig.threadCount` 并发抓取，二级页 `getNextUrl=false` 不再扩展。页码下拉或多枚页链一次取出（CSS `option@value`、多条 `a@href` 等）是合法语义，不要改成只取「下一页」，也不要在 `chapterList` 里用 `java.ajax` 循环自建章节数组。复杂接口可以合理使用 JS，但不得把某个模板的实现强制套到所有站点；唯一例外是目录由加密 API 返回、官方字段无法覆盖。
+- `nextTocUrl` 以阅读端列表语义为准。工坊 `++` 目录通道同样按 0/1/N 分支（1 条链式跟下一页，N>1 一层展开且二级页不再取 `nextTocUrl`），不再把多条 URL 拼成一个地址。与阅读的差异：工坊串行请求，且总页数（首页 + 链式或一层展开）上限 100 页；阅读无此硬顶，N>1 时并发。达到 100 页上限时 `tocDiagnostics.endReason=page_limit`，`check_source` 标 sandbox/采集不完整，`verdict` 不得为 `full`（有章节也不算规则失败，28 页内完整采集仍可 `full`）。工坊对非空、已 resolve 的章节 URL 做有界去重（近似阅读 `BookChapterList.kt:129` 的 `LinkedHashSet`，不用章名；官方 `BookChapter` equals/hashCode 未核实，目录总数不保证与阅读完全一致）。若某辅助工具仍把多条页链拼成超长 URL 并导致请求失败，属于工具缺陷，应修工具而不是改书源。不要为迁就沙箱把合法的 `option@value` 改成单链或手写翻页。
+- `ruleBookInfo.tocUrl` 不是目录阶段的必填规则。阅读 `BookInfo.analyzeBookInfo` 在 tocUrl 规则取空时把详情页 URL（`baseUrl`）当作目录地址，详情与目录同页的源可以不写该字段。工坊 `debug_source` / `check_source` 只在源未配置 tocUrl 规则、存在 `ruleToc.chapterList`、且详情 HTTP 2xx 时同样回填；显式 tocUrl 规则取空仍判详情失败，404 / 空书名不算详情可用。不要为迁就沙箱伪造独立 tocUrl，也不要把沙箱 `full` 说成阅读通过。
+- 目录 `isVolume` 卷名可以没有 href。阅读官方 `BookChapterList`（约 237–287 行）对卷名空 url 用 `title+index` 占位，对非卷名空 url 退回 `baseUrl`，空标题不加入列表。工坊不必伪装同一套合成 url。目录验收找真正可读章节（有效 `chapterUrl`），不要默认把第一项当正文入口，也不要为沙箱给卷名伪造链接；若所有条目都没有有效章节地址，目录仍失败。
+- `nextContentUrl` 只表示同一章的下一页，不是下一章；需要对分页、末页、下一章边界取证。
+- 正文净化根据阅读规则语义使用 `replaceRegex`，注意合并后清理与单页处理的区别；不要贪婪删除整章，也不要为了“通用兜底”取全页最大文本块。
+- Java 对象与 JavaScript 字符串可能不同。字符串正则处理前按实际返回类型使用 `String(...)`；字节、加密、反射和类名写法以目标阅读支持为准，不能用沙箱的重载签名替代阅读签名。
+- 字段按实际用途填写，保留已有合法字段、类型、分组和身份后缀。可选字段不为了凑模板强制补齐；草稿缺少的阶段如实保留，不能填假规则冒充成品。
+- 规则合法声明的 `url` 不应机械替换；裸 `url` 不是通用内置变量，取当前页地址通常使用 `baseUrl`，须结合 jsLib 与阶段作用域判断。
 
-## 验收闭环（save 前必须完成）
+## 保存、调试与交付
 
-1. 四条链路都要被 `check_source` 实际跑过：搜索（关键词）、详情、目录、正文。书源有 `searchUrl` 时**必须显式传 searchKey** 验证搜索链路有结果；未传时 check_source 只会用「我」做兜底探测并在 warnings 标注，兜底通过不等于验收通过。
-2. 搜索验收标准：「搜索」报告显示列表条数 > 0 且第一条 name/bookUrl 非空；为 0 时回到第 6 条重取证。
-3. `debug_source` 的 entry 传关键词才会走搜索链路；传 URL 只验详情/目录/正文，不能替代搜索验收。
-
-## 建议顺序
-
-详情（书名/作者/封面/简介）→ 目录（章节列表）→ 正文（内容，必要时下一页）→ 搜索（结果列表）。站点没有的能力不要伪造。
+1. **结构合法即可保存开发版本，不要求沙箱通过**。完整结构用 `save_source`，中间稿可用 `save_project`，保存并回读不代表已验证。
+2. `reader_web_sync_source(projectId, keyword=本阶段入口)` 将当前版本按授权同步到阅读并自动调试。阅读已有不同内容时先确认覆盖意图；内容未确认时不能声称调试的是本地修改。
+3. 以 `reader_web_debug` 分阶段运行关键词、详情 URL、`++目录URL`、`--章节URL`、`分类名::发现URL`。先定义预期，用阅读端 `java.log` 检查实际输入输出，再改规则；修改后必须让阅读加载新版本。
+4. 搜索尽量使用站内真实书名（≥2 字）；MCP 缺省词为 `ruleSearch.checkKeyWord`（≥2 字），否则「我的」，兜底词无结果不自动证明规则错误，先换已知样本并检查阅读实际响应。
+5. `check_source` / `debug_source` 是可选辅助，不能作为进入阅读调试或保存草稿的条件。沙箱与阅读冲突时登记兼容差异，以阅读端取证判断。
+6. 检查搜索命中归属、详情、目录、正文和发现的真实输出，分页另测；需要时通过阅读网页和书架核对。不得把日志阶段名称、HTTP 200 或同步确认当作样本成功。正文走 JSON/Ajax 接口时，站点 HTTP 403/520、MCP 等待 `TIMEOUT`、调试连接 `CONNECTION_LOST` 与规则未命中是不同原因；通道超时或盾/源站故障不是改 `content` 的依据。阅读端未跑完的搜索/目录/正文不得写成已通过。
+7. 输出书源 JSON，并说明当前版本在目标阅读上的已覆盖与未覆盖阶段。阅读端未配置/不可达时可以交付草稿，明确“阅读端未覆盖”，不冒充可用成品。

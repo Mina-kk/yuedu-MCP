@@ -18,8 +18,8 @@ android {
         applicationId = "com.mina.legadostudio"
         minSdk = 26
         targetSdk = 36
-        versionCode = 190
-        versionName = "1.2.2"
+        versionCode = 200
+        versionName = "1.3.9"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 构建标识：显式 -PbuildRevision 优先，CI 环境变量 GITHUB_SHA 次之，
         // 普通本地开发缺省 "development"。不在配置阶段执行 git。

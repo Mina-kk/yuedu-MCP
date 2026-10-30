@@ -3,10 +3,11 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.2.2`（versionCode 190，以 `app/build.gradle.kts` 为准）
+- 当前版本：`1.3.9`（versionCode 200，以 `app/build.gradle.kts` 为准）
+- 本版边界：工坊与沙箱侧改动**未在真机或阅读客户端实测**；不以本机构建或沙箱结果声称阅读端通过。交付仍以阅读 Web 单源调试与页面核对为准。
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
-- 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
+- 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（已对外发布版本附带已签名 APK）
 
 ## 界面
 
@@ -64,7 +65,7 @@ MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文�
 - `reader_web_page`：在 App 内**持续的 WebView 会话**里操作用户保存的阅读网页——`open`/`snapshot`/`click`/`fill`/`scroll`/`back`/`close`，每次操作后回同源快照与可交互元素列表。没有 URL、host、请求头或 JS 参数，因此不能把会话引到别的站点。
 - `reader_web_debug`：把**阅读中已保存**的书源交给阅读 App 自己的调试通道 `/bookSourceDebug`（真实运行，不是本机沙箱）。不需要新版 REST；日志恒为 `unverifiable`。
 - `reader_web_search`：在阅读当前搜索范围内**真正执行一次全局搜索**（固定 `/searchBook`），只收录阅读返回的结构化 JSON 数组帧。它是全局搜索，**不能**当作单源验证。
-- `reader_web_sync_source`：把本 App 已保存项目的成品书源写入阅读，写后回读核对；写入或确认已存在后，服务端**强制**在阅读端跑一次 `/bookSourceDebug`（`keyword` 缺省「我的」），回包 `readerExecution` 与 `deliveryStatus`。保存后的默认主路径，但不是网页操作的前提。
+- `reader_web_sync_source`：把本 App 已保存项目的成品书源写入阅读，写后回读核对；写入或确认已存在后，服务端**强制**在阅读端跑一次 `/bookSourceDebug`（`keyword` 优先取至少两个字的 `ruleSearch.checkKeyWord`，否则缺省「我的」），回包 `readerExecution` 与 `deliveryStatus`。保存后的默认主路径，但不是网页操作的前提。
 - `reader_web_verify`：用阅读 App 自己的 Web 服务检验一个**已在阅读中保存**的书源。**可选快捷**；旧版只出调试日志（见下节「阅读端检验」）。
 - `import_reader`：旧式推送兜底——经 `legado://import/bookSource` 唤起本机阅读客户端的**导入勾选页**。回包 `launched=true`/`confirmation=pending_user`/`confirmed=false`（兼容字段 `imported` 已废弃、恒为 false），只表示勾选页已打开，最终是否导入由用户在阅读里确认，**不代表导入成功**，更不能当作阅读端检验通过；确认后仍需 `reader_web_debug`、`reader_web_search`、`reader_web_page` 或 `reader_web_verify` 核实，需要可核对的写入请用 `reader_web_sync_source`。
 
@@ -72,19 +73,18 @@ MCP 页可选择目标书源类型：**自动 / 文本 / 音频 / 图片 / 文�
 
 这六个工具共用 MCP 页「设置」→「阅读 Web 服务」里**用户已保存**的地址与令牌；模型不能指定主机、端口、路径或请求头：HTTP 请求只发往该 origin，两个 WebSocket 工具只连由该 origin **按固定规则派生**的地址（同主机，端口 = 用户保存的端口 + 1，路径固定 `/bookSourceDebug` 或 `/searchBook`，协议随 origin 取 `ws`/`wss`），**不扫描端口、不回落到默认端口、不向任何其它私网主机发请求**。**身份标准是用户填的那个阅读 Web 网页**，不是 Legado 的官方接口：接口匹配与否只决定能不能用结构化快捷方式，不决定「是不是阅读」，也不要求用户升级。
 
-#### 默认闭环：网页优先
+#### 默认闭环：阅读端优先
 
 ```
-reader_web_status()                      只读探测：网页入口能不能开、保存的是哪个端口
-  → reader_web_page(action=open)          在同一 WebView 会话打开用户保存的 origin
-  → snapshot / elements                   拿页面文本 + 可交互元素（selector / 文本 / 链接）
-  → click / fill / scroll / back           AI 按固定 DOM 操作在网页里导航（click 须观察到页面变化才算生效）
-  → 书源管理 / 调试页面                  用户可见的页面就是工作区
-  → reader_web_debug(bookSourceUrl, keyword[, timeoutSec])
-                                          在阅读 App 里真实运行已保存书源的调试通道 /bookSourceDebug
-  → reader_web_search(keyword[, timeoutSec, maxResults])   （可选）
-                                          可选：在阅读当前搜索范围内执行一次全局搜索 /searchBook，代价大
+reader_web_status()                       确认实际地址、配置版本与已知能力
+  → reader_web_sync_source(projectId, keyword=本阶段入口)
+                                           按授权同步当前版本并自动阅读调试
+  → reader_web_debug(bookSourceUrl, keyword) 分阶段定位，修改后重新同步
+  → reader_web_page(action=open)            用快照和元素核对实际搜索、书架、目录、正文与发现
+  → 按本次实际输出与覆盖范围交付
 ```
+
+网页、旧版调试与结构化检验按实际能力选择，不以官方接口画像作为唯一标准。沙箱只作可选辅助，不是保存或调试的前置条件；阅读端未覆盖时可以导出草稿，但必须明确说明。
 
 - 目标永远是**用户保存的 origin**：`reader_web_page` 没有 URL、host、请求头、JS 参数，多传一个 `url` 会直接报错 `INVALID_ARGUMENT`，不存在「换个地址试试」的路径。两个 WS 工具也只能由这份保存配置派生目标，模型同样不能指定主机或端口。
 - 页面是 SPA 也能用：会话在 MCP 调用之间保持，登录态、JS 状态、滚动位置跨调用延续；空闲 120 秒或地址配置变更时销毁，下次 `open` 重开。
@@ -99,7 +99,7 @@ reader_web_status()                      只读探测：网页入口能不能开
 - `reader_web_search` 是**全局搜索**：`byOrigin` 按完整 `origin` 精确键计数，带 `#probeUA` 的探测源与无后缀的正式源不是同一键，不能按同域/同名归并命中；目标源被禁用、不在搜索范围或本轮没有它时，不能据此判定该源失败。它不是单源验证。
 - **网页根路径返回 200、登录页能打开、接口探测有响应，都不等于书源通过**。
 - 阅读端未配置/无法访问或未取得上述执行证据时，明确标注“阅读端未覆盖”，不得以沙箱替代。两侧证据互不替代。
-- **服务端交付门槛 `deliveryStatus`**：`check_source` 回包恒带 `verdictScope=sandbox_only`、`readerSideExecuted`（阅读端执行过）与 `readerSidePassed`（四阶段到达且无失败信号）；沙箱失败全部来自环境限制时 `summary=inconclusive`（附 `failureKind`），不等于规则失败；已配置阅读 Web 时附 `requiredNextActions` 与 `forbiddenClaims`；`reader_web_sync_source`/`reader_web_debug` 回包附 `deliveryStatus`（`reader_not_executed`/`reader_failure_signals`/`reader_debug_incomplete`/`reader_debug_ran`；`reader_debug_incomplete` 表示 TIMEOUT、无终止信号或截断，不能假定日志完整；重跑且不得改用沙箱结论）与日志信号 `logSignals`；`export_checked_sources` 附本进程内阅读端执行记录 `readerExecutions` 与 `deliveryStatus`（只标注、不拒绝导出）。阅读端日志出现失败信号时，沙箱 4/4 也不能交付为可用；任何情况下都不得说「通过/一致/验证成功」。
+- **服务端交付状态 `deliveryStatus`**：沙箱回包 `verdictScope=sandbox_only` 不变。`readerSideExecuted` 仅引用当前内容及配置的执行记录；`readerSidePassed` 仅用于身份匹配、完整且归属本次的结构化检验通过，不再用阶段名称推定成功。阅读调试日志仍可用于核对样本实际输出。导出附 `readerExecutions`、`missingStages` 与状态：`reader_evidence_unmatched`（旧内容/配置或内容未知）、`reader_debug_incomplete`（未完整结束）、`reader_failure_signals`（本次失败）、`reader_partial`（部分覆盖）、`reader_executed`（执行记录）或 `reader_verified`（本次结构化检验）。草稿允许导出，不代表已验证；失败不能被旧成功或沙箱结果覆盖。
 
 **副作用**：`click` / `fill` 会改变页面状态（登录、翻页、提交筛选、切换分组、提交搜索），不是只读操作，工具标注为可写。`read`/`snapshot`/`scroll` 本身不改页面，但页面可能自行加载或提交。**保存、覆盖、删除书源等写操作必须先征得用户确认**，不要仅凭一次点击就替用户落盘。
 
@@ -191,20 +191,17 @@ reader_web_page(action="back") / (action="close")
 2. 不存在才 `saveBookSource`；已存在且实质内容相同 → `already_present`，不写；内容不同 → 默认 `conflict` 拒写（只回两侧哈希与不同的顶层字段名），`overwrite=true` 才覆盖；
 3. 写完必回读核对全部非元数据顶层字段与嵌套规则；仅本地省略而阅读补 `enabledCookieJar=true` 视为阅读默认规范化（回包 `normalizedFields`），显式 `false` 与其它差异仍须拦截；一致才 `written`，否则 `written_unconfirmed` 并列出 `mismatchedFields`。
 
-请求顺序固定为 `GET /getBookSource`（精确预检）→ `POST /saveBookSource`（写入）→ `GET /getBookSource`（回读）；预检无法明确证明不存在时不写，已存在但不同且未明确授权覆盖时也不写，**绝不以 `GET /saveBookSource` 写入**。地址与端口全部取自用户保存的配置快照。GET 遇到连接被重置、提前断流或协议数据不完整时，会在新连接上补发一次（与首发共用同一总超时）；**POST 永不自动重发**。回包增加：
+需要写入时，请求顺序为 `GET /getBookSource`（精确预检）→ `POST /saveBookSource`（写入）→ `GET /getBookSource`（回读）；`already_present` 的同步预检已确认内容一致，不重复保存和回读；预检无法明确证明不存在时不写，已存在但不同且未明确授权覆盖时也不写，**绝不以 `GET /saveBookSource` 写入**。地址与端口全部取自用户保存的配置快照。GET 遇到连接被重置、提前断流或协议数据不完整时，会在新连接上补发一次（与首发共用同一总超时）；**POST 永不自动重发**。回包增加：
 
 - `writeAttempted`：是否走到了写入这一步。
 - `writeOutcome`：`not_attempted`（预检失败、已存在或冲突拒写，没走到写入）/ `not_sent`（连接都没建立，可确认阅读没收到）/ `unknown`（连接建立后断开或超时，POST **可能已到达**；不重发，请先在阅读的书源列表确认是否已写入）/ `rejected`（阅读明确拒绝）/ `accepted`（阅读接受了写入；是否生效仍看回读）。写入被接受但回读失败时报 `READBACK_FAILED`，`writeOutcome=accepted`。
 - `requests` / `trace`：本次实际发出的请求列表（方法、固定路径、阶段、状态码或异常类别），成功也列出；`diagnostic`：失败那次请求的脱敏诊断（字段同 `webPageProbeDiagnostic`）。
 
-`already_present`/`written` 才会给出 `nextAction=reader_web_verify`。`presentInReader` 只表示精确预检或回读实际存在，不等于 `confirmed`；存在但 `conflict`/`written_unconfirmed` 时仍自动调试阅读当前版本，回包 `readerDebugDeliveryStatus` 与 `deliveryStatus=reader_fields_unconfirmed`、排查用 `nextAction`，绝不能宣称本地字段已生效。确实未回读到源才报 `not_in_reader`。阅读自己维护的顶层元数据不参与实质比较；原始哈希可能因默认规范化不同而不同，须看 `normalizedFields` 与实质差异。同步结果不是阅读端检验结论。
+`already_present` 表示预检内容一致，`confirmed=true` 但 `written=false`、`writeAttempted=false`，同步本身无需再次保存和回读；`written` 表示本次写入并回读确认。两种情况均自动调试一次。最终 `nextAction` 为工具名或 `null`，人类可读步骤见 `nextActionHint`，参数见 `nextActionArguments`；阶段到达不代表字段正确；按实际入口核对日志和网页样本，需要定位未覆盖阶段时才追加调试。内联日志被裁剪时，使用 `readerExecutionContextId` 和 `readerExecutionResultId` 调 `read_result(contextId, resultId, offset, limit)` 读取本次完整记录；这不触发第二次站点请求。`debugLogsTruncated` 只表示内联裁剪，与原始采集的 `truncated` 不同。`presentInReader` 只表示精确预检或回读实际存在，不等于 `confirmed`；存在但 `conflict`/`written_unconfirmed` 时仍自动调试阅读当前版本，回包 `readerDebugDeliveryStatus` 与 `deliveryStatus=reader_fields_unconfirmed`、排查用 `nextAction`，绝不能宣称本地字段已生效。确实未回读到源才报 `not_in_reader`。阅读自己维护的顶层元数据不参与实质比较；原始哈希可能因默认规范化不同而不同，须看 `normalizedFields` 与实质差异。同步结果不是阅读端检验结论。
 
 **保存/覆盖书源必须用户确认**：`overwrite=true` 只在用户明确同意覆盖阅读里的同 URL 书源后才可传；`written_unconfirmed` 不算生效。同理，在 `reader_web_page` 里点「保存」「覆盖」「删除」等按钮等同于改动阅读数据，也要先得到用户确认。
 
-**默认闭环**：`check_source` 本机初筛（**只是初筛**）→ `save_source`/`get_source` →（用户在 MCP 页填好阅读 Web）`reader_web_status` →
-- **阅读端真实执行**：`reader_web_debug(bookSourceUrl, keyword=实际关键词)` 单源在阅读里真跑调试（日志 `unverifiable`，证明执行不证明通过）、`reader_web_search(keyword)` 真跑全局搜索（全局范围，不冒充单源）；没有新版 REST 也可以走；
-- **页面观察**：`reader_web_page` 打开阅读网页，导航书源管理/调试页看真实反馈；
-- **可选快捷**：官方接口匹配时 `reader_web_sync_source(projectId)` → `reader_web_verify(bookSourceUrl, keyword=实际关键词)`。
+**默认闭环：网页优先核对实际结果**：`save_source`/`get_source` 保存当前版本 → `reader_web_status` 读取已配置地址 → 按授权 `reader_web_sync_source(projectId, keyword=实际关键词)` 写入或确认已存在并自动调试 → `reader_web_debug(bookSourceUrl, keyword=阶段入口)` 定位尚未覆盖的阶段 → `reader_web_page` 在阅读网页核对真实搜索、书架、目录和正文。调试日志 `unverifiable` 证明执行但不是结构化通过；`reader_web_search` 只能补充全局搜索观察，不能当成单源验证。`reader_web_verify` 仅在版本支持时提供结构化快捷。`check_source` 为可选沙箱初筛，不是同步或交付前置条件。
 
 `check_source` 的沙箱结果不可代替阅读端执行证据。探测为 `auth_required` 时先请用户补令牌或让用户在网页里登录；同步返回 `conflict` 时默认**不写**。阅读 Web 未配置、不可达、鉴权未通过或用户未填地址时，这一步如实标为未覆盖，**不**改用 `import_reader` 的唤起回执冒充导入成功。
 
@@ -252,17 +249,18 @@ MCP 页「设置」→「阅读 Web 服务」填写阅读的 Web 服务地址（
 match_sources 语料命中（同域/同模板族现成书源）
   → create_context 建任务，全程显式传 contextId
   → fetch_page 抓页存快照；read_page / inspect_rule / analyze_html / eval_js 在快照上作业
-  → 编写 BookSource JSON → debug_source 逐阶段调试（正文→目录→详情→搜索→发现）
-  → check_source(auto=true, refresh=true, searchKey="实际关键词") 按搜索结果贯通详情/目录/正文取证
-  → save_source 保存，get_source 按保存结果的项目 ID 回读确认
-  → reader_web_status 探测（网页能否打开、真实端口）
-  → reader_web_debug(bookSourceUrl, keyword) 在阅读里真实运行单源调试（日志 unverifiable）
-  → （可选）reader_web_search(keyword) 全局搜索补充（不是单源验证）
-  → reader_web_page(action=open) 打开阅读网页，在书源管理/调试页核对实际反馈
-  → 接口匹配时可选 sync_source → verify
+  → 按目标阅读规则编写 BookSource JSON
+  → save_source 保存开发版本，get_source 回读；中间稿可用 save_project
+  → reader_web_status 确认实际地址与能力，不猜端口
+  → reader_web_sync_source(projectId, keyword=本阶段入口) 按授权同步并自动阅读调试
+  → reader_web_debug(bookSourceUrl, keyword) 阅读端分阶段定位；改规则后重新同步
+  → reader_web_page 核对实际搜索、书架、目录、正文和发现反馈
+  → 按当前内容版本、阅读配置和本次执行记录覆盖范围，再导出
+  → 可选：reader_web_search 全局搜索补充；reader_web_verify 结构化检验
+  → 沙箱 debug_source / check_source 只作可选分析，不是上述步骤的前置条件
 ```
 
-阅读端这一段是默认闭环：只要用户在 MCP 页「设置」→「阅读 Web 服务」填了地址，AI 保存书源后就应在**阅读端真实执行**——用 `reader_web_debug` 跑该书源的真实调试（看 `structuredResult`），并在 `reader_web_page` 里核对书源管理/调试页面的实际反馈，而不是只交本机 `check_source` 沙箱报告。沙箱只做初筛，阅读端执行与页面证据才是交付依据。两个 WS 工具都不依赖新版 REST；官方接口匹配时可再加 `reader_web_sync_source`/`reader_web_verify` 抄近路。阅读 Web 未配置/不可达时如实标注该段未覆盖，**不**拿 `import_reader` 的唤起回执冒充导入成功。
+阅读端这一段是默认闭环：只要用户在 MCP 页「设置」→「阅读 Web 服务」填了地址，AI 保存书源后就应在**阅读端真实执行**——用 `reader_web_debug` 跑该书源的真实调试（核对完整日志与实际结果），并在 `reader_web_page` 里核对书源管理/调试页面的实际反馈，而不是只交本机 `check_source` 沙箱报告。沙箱只做初筛，阅读端执行与页面证据才是交付依据。两个 WS 工具都不依赖新版结构化检验接口；`reader_web_sync_source` 是已知读写接口可用时的默认同步入口，`reader_web_verify` 仅在该版本支持结构化检验时作为可选快捷。阅读 Web 未配置/不可达时如实标注该段未覆盖，**不**拿 `import_reader` 的唤起回执冒充导入成功。
 
 **客户端下载新 APK 后必须重新连接 MCP**：工具目录在会话建立时读取，旧会话里不会有 `reader_web_debug` / `reader_web_search`。请在客户端断开重连（或重启客户端），让 `tools/list` 刷新到 73 个工具；精简连接里描述被截断时，按名读 `studio://tools/reader_web_page`（或 `studio://tools/reader_web_debug`、`studio://tools/reader_web_search`）取完整定义。如果客户端里的某个别名指向的是别的服务，本 App 无法控制，也不该据此改阅读 Web 地址。
 
@@ -278,9 +276,9 @@ CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUr
 
 ### 校验闭环
 
-`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时自动用「我」探测并在 `warnings` 标注。
+`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时优先用 `ruleSearch.checkKeyWord`（去空白后 ≥2 字），否则用「我的」探测并在 `warnings` 标注。实际验证应选择站内真实书名。静态关键词提示不阻止动态规则保存；沙箱分析不是阅读调试的前置条件。
 
-正文报告的 `data.contentDiagnostics` 记录逐页可观测状态、执行路径及分页停止原因，不含 URL、请求头或正文。`httpStatus` 只记录可确认的原始 HTTP 状态；WebView 或缓存回调路径无法确认时保持未知。缓存回调的 `reportedStatus` 只表示其返回状态，不能等同于实时 HTTP 观测；是否真正命中快照应查看 MCP 顶层 `cache` 统计。已知非成功状态、分页循环／达到页数上限，以及明确的加载／失败占位输出不能仅因非空而判为正文通过；兜底、整页 HTML 和分页不完整等有限模式标记为 `content_unverified`。正常短正文不受最小字数门槛限制。`full` 只表示本次静态校验及四阶段样本检查通过，不证明章节全文完整、解密语义正确、目标阅读版本兼容或站点长期可用。诊断细节见内置 Skill 的 `troubleshoot.md`。
+正文报告的 `data.contentDiagnostics` 记录逐页可观测状态、执行路径及分页停止原因，不含 URL、请求头或正文。`httpStatus` 只记录可确认的原始 HTTP 状态；WebView 或缓存回调路径无法确认时保持未知。缓存回调的 `reportedStatus` 只表示其返回状态，不能等同于实时 HTTP 观测；是否真正命中快照应查看 MCP 顶层 `cache` 统计。已知非成功状态、分页循环以及明确的加载／失败占位输出不能仅因非空而判为正文通过；兜底、整页 HTML 和分页不完整等有限模式标记为 `content_unverified`。仅达到沙箱翻页上限标记 `page_limit` 差异，不据此否定有效样本，也不证明全文完整。整段转码/解码失败提示或纯问号、替代字符占位标为 `content_unavailable`、`failureKind=content`，需核对原页和阅读端，不直接判定规则错误。正常短正文不受最小字数门槛限制。`full` 只表示本次静态校验及四阶段样本检查通过，不证明章节全文完整、解密语义正确、目标阅读版本兼容或站点长期可用。诊断细节见内置 Skill 的 `troubleshoot.md`。
 
 `analyze_sources` 只读分析本地书源（可传 `ids`）或外部 JSON 数组 `sources`：同 URL 但规则不同是冲突；`list_sources` 逐条列出各版本，同 URL 多版本用项目 ID `get_source` 取回。`export_checked_sources(ids=[…])` 仅导出显式选中的本地项目，排除开关 `exclude.excludeLogin`、`excludeCaptcha`、`excludeFailed`、`excludeUnverified` 默认全部关闭；`collapseIdentical=true` 只折叠 JSON 完全一致且无冲突的副本。过滤只采信本 App `check_source` 最近 30 分钟的证据；MCP 单次结果超过 11,500 字符会报错，请缩小 `ids` 或分批导出。书源页「分析/过滤」提供同样的静态预览、逐条检测和不受该回包上限约束的本地导出/分享/导入；外部数组静态分析**不会执行陌生书源的 JS 或批量探测网络**。
 

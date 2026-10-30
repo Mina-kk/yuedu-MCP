@@ -42,5 +42,7 @@ object McpToolContextPolicy {
         "fetch_page", "read_page", "read_result", "inspect_rule", "analyze_html", "eval_js",
         "debug_source", "check_source", "create_context", "get_context", "update_context", "clear_context",
         "fetch_font", "get_font_map", "webview_render", "webview_eval",
+        // sync 自动调试的完整执行结果存任务上下文（read_result 分页取回，避免重跑调试再打站点）
+        "reader_web_sync_source",
     )
 }

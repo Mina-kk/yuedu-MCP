@@ -85,16 +85,16 @@ internal object McpResponsePayloads {
         return text.take(MAX_RESPONSE_CHARS) + "\n…[" + note + "]"
     }
 
-    /** 大结果保存成功后的引用 payload：metadata + contextId/resultId + 3000 预览 + 原中文 hint。 */
+    /** 大结果保存成功后的引用 payload：metadata + contextId/resultId/resultContextId + 3000 预览 + 中文 hint。 */
     fun resultReferencePayload(
         metadata: Map<String, Any>,
         contextId: String,
         resultId: String,
         text: String,
     ): Map<String, Any> = metadata + mapOf(
-        "contextId" to contextId, "resultId" to resultId,
+        "contextId" to contextId, "resultId" to resultId, "resultContextId" to contextId,
         "preview" to text.take(RESULT_PREVIEW_CHARS), "previewIsRawString" to true, "resultChars" to text.length,
         "nextOffset" to RESULT_PREVIEW_CHARS, "hasMore" to true,
-        "hint" to "结果已完整保存，调用 read_result，不要重复执行原工具。preview 是原始文本的硬截断片段，不是有效JSON，不要对它做 JSON 解析。",
+        "hint" to "结果已完整保存，调用 read_result(resultId, contextId=resultContextId)，不要重复执行原工具。resultContextId 是本连接任务上下文，不是 cap: 抓包会话 id。preview 是原始文本的硬截断片段，不是有效JSON，不要对它做 JSON 解析。",
     )
 }

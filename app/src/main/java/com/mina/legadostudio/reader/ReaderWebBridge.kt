@@ -13,7 +13,8 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  * - `apiProfile`：官方接口能力画像（`structured` / `legacy_read` / `mismatch` / `unknown`），
  *   是可选的增强能力，**不影响**网页能否操作。
  * - 旧版/分支接口不匹配时 status 为 `web_page_available`，`allowedNextActions` 优先
- *   `reader_web_page`，不断言「不是阅读」，也不要求升级。
+ *   `reader_web_page`；`unknown` 不代表不支持，同步/检验/调试/搜索在用户授权意图下
+ *   可实际尝试（工具会如实回报结果），不以官方 REST 画像一刀切，不断言「不是阅读」，也不要求升级。
  *
  * 其它约束：
  * - `reachable`：网络/HTTP 层有响应（401/403 也算，不判离线）；
@@ -161,7 +162,7 @@ class ReaderWebBridge(private val client: ReaderWebClient) {
             "allowedNextActions" to allowedNextActions,
             "message" to message,
             "evidenceScope" to "reader_web_probe",
-            "evidenceNote" to "根路径 GET 只证明网页入口在线，不等于结构化接口检验通过；根路径 200 的任意第三方 HTML 模板不代表阅读身份，也不据此猜模板；api_only_available 只说明官方接口可达，网页入口/书源未证实；webPageProbeFailureKind 区分 http_status（有 HTTP 状态）与 network（无响应）；webPageProbeDiagnostic 只描述根路径这一条 GET 的方法/固定路径/阶段/失败相位/异常类别/尝试次数/连接复用，不含 host/端口/查询串/令牌，也不能用来证明其它接口或书源检验通过；官方接口画像只作可选能力提示，不决定网页能否操作；unknown 表示该能力无法在不产生副作用的情况下判定，不代表不支持",
+            "evidenceNote" to "根路径 GET 只证明网页入口在线，不等于结构化接口检验通过；根路径 200 的任意第三方 HTML 模板不代表阅读身份，也不据此猜模板；api_only_available 只说明官方接口可达，网页入口/书源未证实；webPageProbeFailureKind 区分 http_status（有 HTTP 状态）与 network（无响应）；webPageProbeDiagnostic 只描述根路径这一条 GET 的方法/固定路径/阶段/失败相位/异常类别/尝试次数/连接复用，不含 host/端口/查询串/令牌，也不能用来证明其它接口或书源检验通过；官方接口画像只作可选能力提示，不决定网页能否操作，也不决定同步/检验/调试/搜索能否尝试；unknown 表示该能力无法在不产生副作用的情况下判定，不代表不支持：已配置服务时对应工具可在用户授权意图下实际尝试并如实回报，而不是被画像挡在调用之前",
         )
     }
 
@@ -257,7 +258,7 @@ class ReaderWebBridge(private val client: ReaderWebClient) {
                 }
                 "NOT_READER" -> {
                     apiResponded = true
-                    tokenProbeDetail = "未识别到官方接口（不影响网页操作）"
+                    tokenProbeDetail = "官方接口画像待确认（不影响网页操作与工具尝试）"
                 }
                 else -> {
                     // 未声明 Bearer 的 401/403 仍然是鉴权响应，不能当成「不是阅读」
@@ -276,7 +277,7 @@ class ReaderWebBridge(private val client: ReaderWebClient) {
             }
         }
 
-        // 3) 旧版公开读路由（有界前缀）：只回答「有没有旧接口」，不读全库
+        // 3) 旧版公开读：先哨兵 /getBookSource，失败再有界前缀 /getBookSources；只回答「有没有旧接口」，不读全库
         var legacyReadOk = false
         if (apiResponded) {
             legacyReadOk = runCatching { pinned.legacyReadAvailable() }.getOrDefault(false)
@@ -345,8 +346,8 @@ class ReaderWebBridge(private val client: ReaderWebClient) {
             } else {
                 "新版接口可读；书源管理/检验另有状态"
             }
-            ApiProfile.LEGACY_READ -> "只有旧版公开读书源接口，没有新版结构化检验"
-            ApiProfile.MISMATCH -> "未识别到官方阅读 Web 接口（可能与阅读分支/版本不同）"
+            ApiProfile.LEGACY_READ -> "已知旧版公开读书源接口；新版结构化检验能力待实际调用确认"
+            ApiProfile.MISMATCH -> "官方接口画像待确认（可能只是分支/版本不同）：判定走哨兵 /getBookSource 与有界前缀 /getBookSources（不下载全库）；写入/检验/调试/搜索可实际尝试，工具会如实回报结果"
             ApiProfile.UNKNOWN -> if (authBlocked) "鉴权未通过，无法判定接口画像" else tokenProbeDetail.ifBlank { "接口探测未完成" }
             else -> "服务不可达，未探测接口"
         }
@@ -377,39 +378,46 @@ class ReaderWebBridge(private val client: ReaderWebClient) {
                 else -> Capability(Capability.UNKNOWN, "服务不可达，未探测")
             },
             "read" to when {
-                legacyReadOk -> Capability(Capability.SUPPORTED, "旧版公开读接口可用")
+                legacyReadOk -> Capability(Capability.SUPPORTED, "旧版公开读接口可用（哨兵 /getBookSource 或有界前缀 /getBookSources，不拉全库）")
                 // 鉴权未过时不能断言旧版公开读「不是阅读数据」
                 authBlocked && !authReady -> Capability(
                     Capability.UNKNOWN,
                     "鉴权未通过，未确认旧版公开读接口；可先在 Web 页面登录或补令牌",
                 )
                 online && tokenProbeOk -> Capability(Capability.UNSUPPORTED, "旧版公开读接口返回的不是阅读数据（不影响新版接口与网页操作）")
-                online -> Capability(Capability.UNKNOWN, "旧版公开读接口未确认")
+                online -> Capability(
+                    Capability.UNKNOWN,
+                    "旧版公开读未确认：已用哨兵 /getBookSource 与有界前缀 /getBookSources 探测（不下载全库），可在用户授权下由同步/读回工具实际尝试",
+                )
                 else -> Capability(Capability.UNKNOWN, "服务不可达，未探测")
             },
             "check" to checkState,
             "write" to Capability(
                 Capability.UNKNOWN,
-                "写入路由 /saveBookSource 只能在真正提交书源时确认；reader_web_sync_source 会实际尝试并如实回报结果",
+                "写入路由 /saveBookSource 未确认（unknown 不是不支持）：只能在真正提交书源时确定；reader_web_sync_source 在用户授权下实际尝试并如实回报结果，不存在时返回 ENDPOINT_MISSING",
             ),
             "legacyDebug" to Capability(
                 Capability.UNKNOWN,
-                "旧版 WebSocket 调试通道（Web 端口 +1）只有 reader_web_debug 实际执行后才能确认",
+                "旧版 WebSocket 调试通道（Web 端口 +1）未确认（unknown 不是不支持）：reader_web_debug 实际执行后才能确认",
             ),
             "search" to Capability(
                 Capability.UNKNOWN,
-                "根路径 200 和书源读接口均不证明 /searchBook 可用；需用 reader_web_search 实际握手与收取数组帧",
+                "搜索路由未确认（unknown 不是不支持）：根路径 200 和书源读接口均不证明 /searchBook 可用；需用 reader_web_search 实际握手与收取数组帧",
             ),
         )
 
+        // unknown ≠ unsupported：在线且鉴权未被拦时，同步/检验/调试/搜索都可以实际尝试，
+        // 工具自己会按真实响应如实回报（ENDPOINT_MISSING/TOKEN_REQUIRED 等），而不是按官方
+        // REST 画像在调用前就判死刑。只有鉴权受阻与完全离线才收紧到只读探测。
+        val attemptTools = listOf(
+            "reader_web_sync_source", "reader_web_verify", "reader_web_debug", "reader_web_search",
+        )
         val allowed = when {
             !online -> listOf("reader_web_status")
             authBlocked -> if (webPageReachable || pageAuthWall) listOf("reader_web_page", "reader_web_status")
                 else listOf("reader_web_status")
-            webPageReachable && !readerDetected -> listOf("reader_web_page", "reader_web_status")
-            webPageReachable -> listOf("reader_web_page", "reader_web_sync_source", "reader_web_verify", "reader_web_debug", "reader_web_search")
-            readerDetected -> listOf("reader_web_sync_source", "reader_web_verify", "reader_web_debug", "reader_web_search", "reader_web_status")
-            else -> listOf("reader_web_status")
+            webPageReachable -> listOf("reader_web_page") + attemptTools
+            else -> attemptTools + "reader_web_status"
         }
         val message = when {
             !online -> "已保存的阅读 Web 服务地址没有响应：请确认阅读已开启 Web 服务、地址端口正确（同机可改用回环地址，端口保持不变）"
@@ -428,8 +436,14 @@ class ReaderWebBridge(private val client: ReaderWebClient) {
                     append("已保存的令牌被拒绝时，请确认令牌与当前地址绑定且未在阅读端变更。")
                 }
             }
-            webPageReachable && !readerDetected ->
-                "网页在线，官方接口不匹配；可用阅读 Web 页面工具继续，不断言不是阅读，也不强制升级"
+            webPageReachable && !readerDetected -> buildString {
+                append("网页在线；官方接口画像待确认（可能只是分支/版本不同）：")
+                append("判定走哨兵 /getBookSource 与有界前缀 /getBookSources（不下载全库）；")
+                append("能力表里的 unknown 是「未确认」而不是「不支持」，")
+                append("reader_web_sync_source / reader_web_verify / reader_web_debug / reader_web_search ")
+                append("都可在用户授权意图下实际尝试，工具会按真实响应如实回报（例如接口缺失返回 ENDPOINT_MISSING）；")
+                append("不断言不是阅读，也不强制升级")
+            }
             webPageReachable -> "阅读 Web 页面可操作；需要写入/检验时再用 reader_web_sync_source / reader_web_verify"
             readerDetected -> buildString {
                 append("接口可达（只说明官方接口有响应，不代表网页入口或书源可用），但根路径")
@@ -450,7 +464,8 @@ class ReaderWebBridge(private val client: ReaderWebClient) {
                     pageFailureKind == "redirect_refused" -> append("：根路径重定向到其它地址，已拒绝跟随")
                     webPageStatusCode != null -> append("（HTTP $webPageStatusCode）")
                 }
-                append("；请核对端口是否指向阅读的 Web 服务入口，这不代表接口不可达")
+                append("；请核对端口是否指向阅读的 Web 服务入口，这不代表接口不可达；")
+                append("同步/检验/调试/搜索仍可按需实际尝试，工具会如实回报接口是否缺失或鉴权未过")
             }
         }
 

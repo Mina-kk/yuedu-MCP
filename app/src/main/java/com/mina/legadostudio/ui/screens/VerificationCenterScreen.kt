@@ -247,6 +247,6 @@ fun VerificationCenterScreen(onBack: (() -> Unit)? = null) {
                 Text("外部浏览器会话可能与应用内会话不一致，默认请在上方 WebView 完成验证。", Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
             }
         }
-        GlassTopBar("内部验证中心", onBack = onBack, modifier = Modifier.align(Alignment.TopCenter))
+        GlassTopBar("验证中心", onBack = onBack, modifier = Modifier.align(Alignment.TopCenter))
     }
 }

@@ -33,7 +33,7 @@
 1. GitHub 找高星适配/刮削仓（下载器优先：WebToEpub、FanFicFare、mloader、ComicKhan、kisskh-dl、novel-scraper-toolkit 等）。
 2. 读适配器源码，提炼四要素：搜索端点/返回格式、目录来源（页面 JSON / API 分页 / DOM）、正文容器、反爬防护（CF、token、签名、protobuf）。**源码只说明适配器怎么写，不说明站点此刻是否可访问、返回结构是否还一致。**
 3. 迁移成 Legado 规则串：纯 API 用 `@js:`/json 流；DOM 清晰用 css 流；需要浏览器态的先评估 WebView + webJs 能否过。
-4. 当日闭环：`fetch_page` 抓活页 → `analyze_html` 在选择器快照上验证 → `debug_source` 调试 → `save_source` → `check_source(refresh=true)` 验收。**未经当日活页验证的规则必须标注待实测。**
+4. 当日闭环：真实页面取证 → 保存开发版本 → 按授权 `reader_web_sync_source` 同步并阅读调试 → `reader_web_debug` 分阶段定位与 `reader_web_page` 实际核对。沙箱仅可选辅助，不要求先通过。**未经目标阅读端验证的阶段必须标注未覆盖。**
 
 ## 第四步：接口画像（反推材料，不代替实测）
 

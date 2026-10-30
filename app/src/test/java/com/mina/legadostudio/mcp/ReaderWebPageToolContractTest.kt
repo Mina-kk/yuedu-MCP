@@ -100,6 +100,12 @@ class ReaderWebPageToolContractTest {
         assertTrue(instructions.contains("reader_web_page"))
         assertTrue("必须说明 fetch_page 不用于阅读网页操作", instructions.contains("fetch_page"))
         assertTrue("必须说明官方 API 只是可选", instructions.contains("可选"))
+        assertTrue(instructions.contains("check_source/debug_source 只是可选沙箱辅助"))
+        assertTrue(instructions.contains("阶段已到达都不等于书源通过"))
+        assertTrue(instructions.contains("logVerdict=all_stages_reached_no_failure 也只说明阶段到达"))
+        assertFalse(instructions.contains("交付流程固定为 check_source"))
+        assertTrue(source.contains("check_source(refresh=true) 仅为可选沙箱取证"))
+        assertFalse(source.contains("最终验收传refresh=true"))
     }
 
     @Test fun readerWebPageNeverProbesOfficialApiFirst() {
@@ -357,11 +363,35 @@ class ReaderWebPageToolContractTest {
         assertEquals(30, (payload["elements"] as List<*>).size)
         assertEquals(30, payload["nextElementOffset"])
         assertEquals(true, payload["hasMoreElements"])
+        assertEquals(true, payload["elementReturnLimitReached"])
+        assertEquals(30, payload["elementReturnLimit"])
+        assertEquals(false, payload["elementScanLimitReached"])
+        assertEquals(false, payload["elementLimitReached"])
         assertEquals(3_000, payload["nextTextOffset"])
         assertEquals(true, payload["hasMoreText"])
         assertEquals("正文总长以原文计", snap.text.length, payload["textTotalChars"])
         assertFalse(payload.containsKey("url"))
         assertFalse(payload.containsKey("href") && payload["href"] != null)
+    }
+
+    @Test fun fiveVisibleElementsDoNotClaimScanOrReturnLimit() {
+        val snap = snapshot(
+            text = "书架",
+            elements = (0 until 5).map { element(it, "项$it") },
+        )
+        val payload = ReaderWebPagePayload.build(
+            gson, "open", snap, "http://127.0.0.1:1162", 1L,
+            ReaderWebPageRequest.parse(args("action" to "open", "limit" to "8")),
+        )
+        assertEquals(5, (payload["elements"] as List<*>).size)
+        assertEquals(5, payload["elementCount"])
+        assertEquals(5, payload["returnedElementCount"])
+        assertEquals(false, payload["hasMoreElements"])
+        assertEquals(false, payload["elementLimitReached"])
+        assertEquals(false, payload["elementScanLimitReached"])
+        assertEquals(false, payload["elementReturnLimitReached"])
+        assertEquals(8, payload["elementReturnLimit"])
+        assertEquals(ReaderWebUiPolicy.MAX_SNAPSHOT_ELEMENTS, payload["elementScanLimit"])
     }
 
     @Test fun pagingOffsetsSliceTextAndElements() {

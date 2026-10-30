@@ -117,11 +117,15 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
                 asArray = req.arguments.bool("asArray") == true,
             )
             require(exportErr == null) { exportErr!! }
+            val readerConfig = withContext(Dispatchers.IO) { app.readerWebConfig.load() }
             val readerRows = keptRows.map { row ->
-                val url = runCatching {
-                    JsonParser.parseString(row.sourceJson).asJsonObject.get("bookSourceUrl")?.asString?.trim()
-                }.getOrNull().orEmpty()
-                ReaderDeliveryRow(row.projectId, url, url.takeIf { it.isNotEmpty() }?.let { ReaderExecutionRegistry.summary(it, now) })
+                val sourceObj = runCatching { JsonParser.parseString(row.sourceJson).asJsonObject }.getOrNull()
+                val url = sourceObj?.get("bookSourceUrl")?.asString?.trim().orEmpty()
+                ReaderDeliveryRow(row.projectId, url, url.takeIf { it.isNotEmpty() }?.let {
+                    ReaderExecutionRegistry.summary(it, now,
+                        sourceHash = sourceObj?.let(ReaderExecutionRegistry::sourceHashOf),
+                        configFingerprint = ReaderExecutionRegistry.configFingerprintOf(readerConfig))
+                })
             }
             ok(app.gson.toJson(linkedMapOf<String, Any?>(
                 "export" to exportText,
@@ -193,7 +197,7 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
             ok(app.gson.toJson(receipt))
         }.getOrElse { err(it.message.orEmpty()) }
     }
-    server.tool("check_source", "工坊沙箱初筛，不代表阅读端通过；已配置阅读 Web 时还须用 reader_web_page 导航书源管理/调试并确认实际反馈，或以 reader_web_verify 本次结构化结果验证；旧 WS 日志不可判通过。按提供的搜索/详情/目录/正文入口批量运行；书源含 searchUrl 而未传 searchKey 时自动用「我」探测并在 warnings 标注；默认复用任务快照，refresh=true 全程实时；auto=true 自动链路推进；verdict.summary=full 仅表示沙箱静态及文本源四阶段样本通过，不保证阅读客户端可用；无法访问阅读时须标注阅读端未覆盖。返回 timingsMs 含缓存、JS 求值与联网。", checkSourceSchema(), toolAnnotations = openWrite) { req ->
+    server.tool("check_source", "工坊沙箱初筛，不代表阅读端通过；已配置阅读 Web 时还须用 reader_web_page 导航书源管理/调试并确认实际反馈，或以 reader_web_verify 本次结构化结果验证；旧 WS 日志不可判通过。按提供的搜索/详情/目录/正文入口批量运行；书源含 searchUrl 而未传 searchKey 时自动用 ruleSearch.checkKeyWord（≥2 字）或「我的」探测并在 warnings 标注，搜索 0 条按规则问题计；默认复用任务快照，refresh=true 全程实时；auto=true 自动链路推进；verdict.summary=full 仅表示沙箱静态及文本源四阶段样本通过，不保证阅读客户端可用；无法访问阅读时须标注阅读端未覆盖。返回 timingsMs 含缓存、JS 求值与联网。", checkSourceSchema(), toolAnnotations = openWrite) { req ->
         runCatching {
             val source = resolveSourceArg(req.arguments) ?: return@tool err("source/projectId 至少传一个")
             // 与 save_source/debug_source 同一套 JSON 错误提示：语法错直接回行列定位片段，不进后续 debug
@@ -240,17 +244,21 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
             val sourceUrl = runCatching {
                 JsonParser.parseString(source).asJsonObject.get("bookSourceUrl")?.asString?.trim()
             }.getOrNull().orEmpty()
-            val readerConfigured = readerWebConfigured()
+            val readerConfig = withContext(Dispatchers.IO) { app.readerWebConfig.load() }
+            val readerConfigured = readerConfig != null
+            val readerEvidence = ReaderExecutionRegistry.summary(sourceUrl,
+                sourceHash = ReaderExecutionRegistry.sourceHashOf(JsonParser.parseString(source).asJsonObject),
+                configFingerprint = ReaderExecutionRegistry.configFingerprintOf(readerConfig))
             ok(app.gson.toJson(hinted + mapOf(
                 "cache" to summary,
                 "fromCache" to fromCache,
                 "snapshotAgeSeconds" to ageSec,
                 "readerWebVerification" to "not_performed",
                 "readerWebNote" to "此结果仅为工坊沙箱样本初筛；已配置阅读 Web 时需用 reader_web_page 导航书源管理/调试确认实际反馈，或用 reader_web_verify 的本次结构化结果。网页入口可开和旧版 WS 日志均不等于书源通过；无法访问阅读则明确标记阅读端未覆盖。",
-            ) + sandboxVerdictFields(
+            ) + sandboxDivergenceFields(source, results) + sandboxVerdictFields(
                 readerConfigured,
-                sourceUrl.isNotEmpty() && ReaderExecutionRegistry.hasExecuted(sourceUrl),
-                sourceUrl.isNotEmpty() && readerSidePassed(ReaderExecutionRegistry.summary(sourceUrl)),
+                readerEvidence?.get("identityMatches") == true && readerEvidence["executed"] == true,
+                readerSidePassed(readerEvidence),
             ) + if (fromCache) mapOf(
                 "warning" to "⚠ 复用缓存快照（${(ageSec ?: 0) / 60} 分钟前抓取），最终验收请传 refresh=true 实时校验",
             ) else emptyMap()))
@@ -260,6 +268,63 @@ internal fun StudioMcpServer.registerLibraryTools(server: Server) {
 
 private suspend fun StudioMcpServer.readerWebConfigured(): Boolean =
     withContext(Dispatchers.IO) { runCatching { app.readerWebConfig.load() }.getOrNull() } != null
+
+internal fun sandboxDivergenceFields(source: String, results: Map<String, Any>): Map<String, Any?> {
+    val divergences = mutableListOf<Map<String, String>>()
+    val evidence = results["evidence"] as? Map<*, *>
+    val stages = listOf("搜索", "详情", "目录", "正文", "发现")
+    val behaviors = mapOf(
+        "external_jslib_skipped" to "阅读端会加载外部 jsLib",
+        "content_too_large" to "阅读端不限制正文大小",
+        "binary_skipped" to "阅读端会按书源类型处理二进制资源",
+        "page_limit" to "阅读端会继续翻页",
+        "missing_java_api" to "阅读端提供该 Java/扩展接口",
+        "signature_unsupported" to "阅读端支持该方法签名",
+        "default_user_agent" to "阅读端使用自身默认 UA，沙箱 UA 可能不同",
+        "content_unavailable" to "样本只有转码失败或乱码占位，不是有效正文；核对原页和阅读端，不能只凭这个样本认定规则错误",
+        "site_rate_limited" to "站点疑似按 IP 限流（仅沙箱侧观测，不能据此推断阅读端也被限流，阅读端是否受限以 reader_web_debug 日志为准）；等待站点提示的间隔后重测，不是规则错误",
+    )
+    fun add(stage: String, reason: String?) {
+        if (reason != null && reason in behaviors && divergences.none { it["stage"] == stage && it["reason"] == reason }) {
+            divergences += linkedMapOf("stage" to stage, "reason" to reason, "readerBehavior" to behaviors.getValue(reason))
+        }
+    }
+    stages.forEach { stage ->
+        val ev = evidence?.get(stage) as? com.mina.legadostudio.domain.SourceCheckEvidence.StageEvidence
+        add(stage, ev?.sandboxReason)
+        val raw = results[stage]
+        if (raw is com.mina.legadostudio.runtime.LegadoRuntime.DebugReport) {
+            val lines = raw.lines.joinToString("\\n")
+            if (lines.contains("jsLib 为外部 URL")) add(stage, "external_jslib_skipped")
+            if (lines.contains("二进制资源") && (lines.contains("跳过") || lines.contains("未下载正文"))) add(stage, "binary_skipped")
+            if (lines.contains("page_limit")) add(stage, "page_limit")
+        }
+        val error = (raw as? Map<*, *>)?.get("error")?.toString().orEmpty()
+        add(stage, com.mina.legadostudio.domain.SourceCheckEvidence.sandboxReason(error))
+        if (ev?.category == "rate_limited") add(stage, "site_rate_limited")
+        if (ev?.category == "content_unavailable") add(stage, "content_unavailable")
+    }
+    val declaredUa = runCatching {
+        val root = JsonParser.parseString(source).asJsonObject
+        val header = root.get("header") ?: return@runCatching false
+        val headerObject = when {
+            header.isJsonObject -> header.asJsonObject
+            header.isJsonPrimitive -> JsonParser.parseString(header.asString).asJsonObject
+            else -> null
+        }
+        headerObject?.keySet()?.any { it.equals("User-Agent", ignoreCase = true) } == true
+    }.getOrDefault(false)
+    if (!declaredUa) add("全部", "default_user_agent")
+    val reasons = divergences.mapNotNull { it["reason"] }.distinct()
+    return mapOf(
+        "sandboxDivergence" to divergences,
+        "ruleEditPolicy" to mapOf(
+            "doNotEditFor" to reasons,
+            "reason" to if (reasons.isEmpty()) "未发现沙箱与阅读端行为差异；规则修改仍应以阅读端证据为准" else
+                "以上差异来自验收环境，不是书源错误；在阅读端 reader_web_debug 复现前不要为此修改规则",
+        ),
+    )
+}
 
 /**
  * check_source 回包的口径字段（纯函数，JVM 可测）：沙箱结论永远只是 sandbox_only，
@@ -283,59 +348,55 @@ internal fun sandboxVerdictFields(
     base["forbiddenClaims"] = listOf("阅读端通过", "与阅读端一致", "4/4 通过即可用")
     base["deliveryRule"] = when {
         readerSidePassed ->
-            "阅读端最近一次调试四阶段均已到达且无失败行；交付以阅读端 reader_web_debug 回包的 structuredResult 为准，沙箱结果只作参考"
+            "当前内容与配置取得归属本次的阅读结构化检验结果；按该次范围报告，沙箱不覆盖阅读结论"
         readerSideExecuted ->
-            "阅读端已执行过本源，但最近一次未走通四阶段或有失败行；按 reader_web_debug 的 structuredResult 修规则后重新同步"
+            "当前版本已有阅读执行记录；请核对完整终止、实际字段与覆盖范围，不因沙箱失败或缺少结构化PASSED而改规则"
         else ->
             "已配置阅读 Web 但本源还没有任何阅读端执行记录：沙箱 4/4 不能作为交付结论。" +
-                "必须 save_source → reader_web_sync_source（服务端会自动跑阅读端调试）→ 读 structuredResult.logVerdict 后再交付"
+                "必须 save_source → reader_web_sync_source（服务端会自动跑阅读端调试）→ 读顶层 logVerdict 后再交付"
     }
     return base
 }
 
-internal fun readerSidePassed(summary: Map<String, Any?>?): Boolean {
-    if (summary == null || summary["executed"] != true) return false
-    if ((summary["failureSignals"] as? List<*>).orEmpty().isNotEmpty()) return false
-    val stages = (summary["stagesReached"] as? List<*>).orEmpty().map { it.toString() }.toSet()
-    return stages.containsAll(listOf("search", "detail", "toc", "content"))
-}
+internal fun readerSidePassed(summary: Map<String, Any?>?): Boolean = ReaderExecutionRegistry.passed(summary)
 
 internal data class ReaderDeliveryRow(val projectId: String, val bookSourceUrl: String, val execution: Map<String, Any?>?)
 
-/** export_checked_sources 的交付门槛（只标注，不拒绝导出）。 */
 internal fun exportDeliveryFields(readerConfigured: Boolean, rows: List<ReaderDeliveryRow>): Map<String, Any?> {
-    val perSource = rows.map { r ->
-        linkedMapOf<String, Any?>(
-            "projectId" to r.projectId,
-            "bookSourceUrl" to r.bookSourceUrl,
-            "readerExecution" to (r.execution ?: mapOf("executed" to false)),
-        )
-    }
-    fun failed(e: Map<String, Any?>?): Boolean {
-        if (e == null) return false
-        val signals = (e["failureSignals"] as? List<*>).orEmpty()
-        val hits = e["searchHits"] as? Int
-        val kinds = (e["kinds"] as? List<*>).orEmpty()
-        return signals.isNotEmpty() || ("search" in kinds && hits == 0 && e["latestDebugAtEpochMs"] == null)
-    }
-    val status = when {
-        !readerConfigured -> "reader_web_not_configured"
-        rows.any { it.execution?.get("latestDebugStatus") in setOf("TIMEOUT", "CONNECTION_LOST", "truncated") } -> "reader_debug_incomplete"
-        rows.any { failed(it.execution) } -> "reader_failure_signals"
-        rows.isEmpty() || rows.any { it.execution?.get("executed") != true } -> "sandbox_only_not_reader_verified"
+    fun rowStatus(e: Map<String, Any?>?): String = when {
+        e == null -> "sandbox_only_not_reader_verified"
+        e["identityMatches"] != true -> "reader_evidence_unmatched"
+        e["complete"] != true -> "reader_debug_incomplete"
+        (e["failureSignals"] as? List<*>).orEmpty().isNotEmpty() -> "reader_failure_signals"
+        e["executed"] != true -> "sandbox_only_not_reader_verified"
+        ReaderExecutionRegistry.passed(e) -> "reader_verified"
+        (e["missingStages"] as? List<*>)?.isNotEmpty() != false -> "reader_partial"
         else -> "reader_executed"
     }
-    val out = linkedMapOf<String, Any?>("deliveryStatus" to status, "readerExecutions" to perSource)
-    when (status) {
-        "reader_web_not_configured" -> out["blockingReason"] =
-            "未配置阅读 Web，导出的书源只有工坊沙箱结果；交付时必须告诉用户「阅读端未覆盖」"
-        "reader_debug_incomplete" -> out["blockingReason"] =
-            "最近一次阅读调试没有完整终止证据；历史失败仍在 historicalFailureSignals，仅供排查；请重跑 reader_web_debug"
-        "reader_failure_signals" -> out["blockingReason"] =
-            "阅读端调试/搜索报告了失败（见 readerExecutions）；不得宣称可用，按阅读端日志修规则后重新同步"
-        "sandbox_only_not_reader_verified" -> out["blockingReason"] =
-            "有书源没有阅读端执行记录：先 reader_web_sync_source（会自动跑阅读端调试）并读 structuredResult，再交付；" +
-                "沙箱 4/4 不能当作阅读端可用"
+    val states = rows.map { rowStatus(it.execution) }
+    val status = if (!readerConfigured) "reader_web_not_configured" else listOf(
+        "reader_evidence_unmatched", "reader_debug_incomplete", "reader_failure_signals",
+        "sandbox_only_not_reader_verified", "reader_partial", "reader_executed",
+    ).firstOrNull { it in states } ?: if (rows.isEmpty()) "sandbox_only_not_reader_verified" else "reader_verified"
+    val reason = when (status) {
+        "reader_web_not_configured" -> "阅读端未覆盖：未配置阅读 Web，可导出草稿，不能声称已验证"
+        "reader_evidence_unmatched" -> "现有记录未确认属于当前书源内容与阅读配置；请按当前版本重新同步调试，不沿用历史成功"
+        "reader_debug_incomplete" -> "当前阅读尝试缺少完整终止证据；历史失败仍在 historicalFailureSignals，仅供排查"
+        "reader_failure_signals" -> "当前阅读结果有失败信号；先区分环境与规则问题，沙箱成功不能覆盖失败"
+        "sandbox_only_not_reader_verified" -> "缺少当前阅读端执行记录；先 reader_web_sync_source 再核对实际输出，沙箱 4/4 不能当作阅读端可用"
+        "reader_partial" -> "阅读端仅有部分阶段记录；按 missingStages 补充入口，未覆盖不等于规则失败"
+        "reader_executed" -> "当前阅读调试已完整结束并记录四阶段；阶段到达不是输出正确，需对照日志字段和页面描述样本结果"
+        else -> "当前版本取得归属本次的阅读结构化检验结果；只代表该次检验范围，不保证全站可用"
     }
-    return out
+    return linkedMapOf(
+        "deliveryStatus" to status,
+        "blockingReason" to reason,
+        "draftExportAllowed" to true,
+        "readerExecutions" to rows.map { row -> mapOf(
+            "projectId" to row.projectId, "bookSourceUrl" to row.bookSourceUrl,
+            "deliveryStatus" to rowStatus(row.execution),
+            "readerExecution" to (row.execution ?: mapOf("executed" to false)),
+            "missingStages" to (row.execution?.get("missingStages") ?: ReaderExecutionRegistry.REQUIRED_STAGES),
+        ) },
+    )
 }

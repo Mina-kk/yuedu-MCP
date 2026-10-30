@@ -492,16 +492,15 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
                                                 readerWebStatus = result.fold(
                                                     onSuccess = { connection ->
                                                         when {
-                                                            // 网页优先：页面能开就先用网页工具，官方接口不匹配不是「不是阅读」
-                                                            connection.webPageReachable && !connection.readerDetected ->
-                                                                "网页可达，官方接口未匹配：页面仍可照常操作。用 reader_web_page(action=open) 打开同一个网页，按快照的元素列表浏览或操作。"
-                                                            !connection.reachable && !connection.webPageReachable -> connection.message
                                                             connection.authRequired && !connection.authReady -> connection.message
+                                                            !connection.webPageReachable -> connection.message
+                                                            !connection.readerDetected ->
+                                                                "网页可达，部分功能待确认。可继续使用网页，并按需检测书源同步、调试与搜索能力。"
                                                             connection.capabilities["check"]?.state == "supported" ->
-                                                                "网页可达，且结构化检验接口可用；可用 reader_web_page 操作网页，也可选 reader_web_verify 作为快捷方式。"
+                                                                "网页可达，结构化检验接口可用。书源实际表现以本次调试结果为准。"
                                                             connection.capabilities["check"]?.state == "unsupported" ->
-                                                                "网页可达，使用通用网页工具：结构化检验接口不可用，WebSocket 调试只返回日志，不代表已完成检验。"
-                                                            else -> "网页可达，使用通用网页工具；结构化检验接口状态未知，可按实际接口尝试 reader_web_verify。"
+                                                                "网页可达，此版本未提供结构化检验接口。可继续使用网页或阅读调试功能。"
+                                                            else -> "网页可达，检验能力待确认。可按需继续检测。"
                                                         }
                                                     },
                                                     onFailure = { error ->
@@ -530,7 +529,7 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit
                                 if (readerWebStatus.isNotBlank()) Text(readerWebStatus, color = cs.primary, style = MaterialTheme.typography.bodySmall)
                                 if (readerWebMessage.isNotBlank()) Text(readerWebMessage, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
                                 Text(
-                                    "前提：阅读里打开「Web 服务」。同机（阅读与本 App 同一台设备）用 http://127.0.0.1:端口，不要求 Wi-Fi；不同设备用阅读显示的 Wi-Fi 地址，并连同一 Wi-Fi 或可达 VPN；蜂窝网络下私网地址通常不能跨设备互访，但同机回环仍可用。阅读开启「访问令牌保护」时必须填同一令牌。地址只接受 http(s)://主机:端口（不要带路径）。令牌只用于已保存的那个地址，改地址后需重新填写；探测期间改配置只影响下一次调用。默认用 reader_web_page 在网页里操作：读快照与元素列表不改变页面，click/press_enter/fill 会登录、翻页或提交筛选，保存/覆盖/删除书源前请先确认；动作没有效果不能视为成功。接口不匹配时网页照常可用；reader_web_debug 真实运行但只有日志，reader_web_search 是阅读端全局搜索，都不代表单源检验通过。",
+                                    "前提：阅读里打开「Web 服务」。同机（阅读与本 App 同一台设备）用 http://127.0.0.1:端口，不要求 Wi-Fi；不同设备用阅读显示的 Wi-Fi 地址，并连同一 Wi-Fi 或可达 VPN；蜂窝网络下私网地址通常不能跨设备互访，但同机回环仍可用。阅读开启「访问令牌保护」时必须填同一令牌。地址只接受 http(s)://主机:端口（不要带路径）。令牌只用于已保存的那个地址，改地址后需重新填写；探测期间改配置只影响下一次调用。默认用 reader_web_page 在网页里操作：读快照与元素列表不改变页面，click/press_enter/fill 会登录、翻页或提交筛选，保存/覆盖/删除书源前请先确认；动作没有效果不能视为成功。能力表里的 unknown 表示未确认而非不支持：同步/检验/调试/搜索均可在用户授权下按已保存地址实际尝试（含官方接口未匹配时），工具会如实回报；reader_web_debug 真实运行但只有日志，reader_web_search 是阅读端全局搜索，都不代表单源检验通过。",
                                     style = MaterialTheme.typography.bodySmall, color = cs.outline,
                                 )
                             } }

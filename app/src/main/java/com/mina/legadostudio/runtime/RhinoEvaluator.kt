@@ -159,6 +159,14 @@ class RhinoEvaluator(
         }.orEmpty()
         val message = error.message.orEmpty()
         val firstLine = message.substringBefore('\n')
+        UNDEFINED_NAME.find(firstLine)?.groupValues?.get(1)?.let { LEGADO_ABSENT_NAMES[it] }?.let { hint ->
+            return com.script.ScriptException(
+                message + scriptContext + hint,
+                scriptError?.fileName,
+                scriptError?.lineNumber ?: -1,
+                scriptError?.columnNumber ?: -1,
+            ).also { it.initCause(error.cause ?: error) }
+        }
         val sureMissingApi = MISSING_API_PATTERNS.any { it.containsMatchIn(firstLine) }
         if (!sureMissingApi) {
             if (scriptContext.isEmpty()) return error
@@ -177,7 +185,7 @@ class RhinoEvaluator(
             else {
                 val argTypes = call.substringAfter('(').substringBeforeLast(')')
                     .split(',').joinToString(",") { it.trim().substringAfterLast('.') }
-                "\n【签名提示】沙箱不支持该签名：java.$method($argTypes)；属验收环境限制，非书源错误。真机有对应重载的话请改写调用或改用 connect/ajax。（原始：$call）"
+                "\n【签名提示】沙箱不支持该签名：java.$method($argTypes)；属验收环境限制，非书源错误。阅读端可按原写法执行：请保留原写法、以阅读端日志为准，不要为让沙箱通过而改写。（原始：$call）"
             }
         }.orEmpty()
         return com.script.ScriptException(
@@ -274,6 +282,16 @@ class RhinoEvaluator(
             Regex("Java 方法 .* 的选择不明确"),
             Regex("未找到 “\\S+” 的构造函数"),
         )
+        /** ReferenceError 未定义名：en `"url" is not defined` / zh_CN `“url” 未定义` */
+        private val UNDEFINED_NAME = Regex("[\"“]?([A-Za-z_$][\\w$]*)[\"”]?\\s*(?:is not defined|未定义)")
+        /**
+         * 沙箱曾注入、但官方阅读(Legado) 规则 JS 里不存在的变量名 → 修正提示。
+         * 规则问题而非沙箱差异：阅读端同样会报 ReferenceError。
+         */
+        private val LEGADO_ABSENT_NAMES = mapOf(
+            "url" to "\n【规则错误】阅读(Legado) 规则 JS 中没有 `url` 变量，阅读端同样会报「url 未定义」；取当前页地址请改用 `baseUrl`（如 `@js:baseUrl`）。",
+            "isFromBookInfo" to "\n【规则错误】阅读(Legado) 规则 JS 中没有 `isFromBookInfo` 变量，阅读端同样会报未定义；请改用 `fromBookInfo`。",
+        )
         /** Rhino「找不到方法」消息里完整方法引用，如 “com.mina...StudioJsApi.get(...)”（zh_CN 带引号）/ Can't find method io.x.Y.z(...).（en 不带引号） */
         private val MISSING_API_METHOD = Regex("(?:[\"“]|Can't find method )([\\w.$]+\\([^\"”)]*\\))")
         /**
@@ -293,7 +311,7 @@ class RhinoEvaluator(
         )
         // 与 evaluateRaw 实际注入的对象/方法保持一致；新增 API 时同步更新本清单与
         // references/js-api.md「Studio 沙箱可用 API 清单」一节。
-        private const val API_HINT = "\n【API 提示】以上是确凿的「方法不存在/签名不匹配」错误。沙箱实际可用 API：\n" +
+        private const val API_HINT = "\n【API 提示】以上是确凿的「方法不存在/签名不匹配」错误。以下清单为沙箱已实现范围；清单外接口在阅读端通常可用，禁止为让沙箱通过而改写规则。沙箱实际可用 API：\n" +
             "java.*：log(msg) logType(obj) toast(msg) longToast(msg)；ajax(url) ajaxAll(urls) connect(url[,header][,methodOrTimeout][,body][,charset]) " +
             "get(url[,headers][,timeout毫秒]) post(url,body[,headers][,timeout毫秒]) head(url[,headers][,timeout毫秒]) webView(url|html,url,js) startBrowserAwait(url,title?,refetch?) fetchFont(url) " +
             "decodeWoff2(data) queryTTF(data) replaceFont(text,errFont,correctFont[,filter])；" +
@@ -320,7 +338,7 @@ class RhinoEvaluator(
             "官方有但沙箱未实现（写了必报错）：java.getElement/getElements java.importScript java.cacheFile java.toNumChapter java.t2s/s2t " +
             "java.androidId java.openUrl java.searchBook java.startBrowser java.getReadBookConfig/getThemeConfig " +
             "java.downloadFile/readTxtFile 等文件读写 java.getZip*/getRar*/get7z* java.createAsymmetricCrypto/createSign；" +
-            "java.lang.* 除 Thread.sleep 外全部不可用，标准库类请走 Packages.*（如 new Packages.java.lang.String(b,\"UTF-8\")）；部分阅读分支没有 java.lang（jl=undefined），跨分支书源睡眠写 Packages.java.lang.Thread.sleep(ms)。\n" +
+            "java.lang.* 仅注入 Thread.sleep，其它标准库类经 Packages.* 调用（如 new Packages.java.lang.String(b,\"UTF-8\")）；部分阅读分支没有 java.lang（jl=undefined），跨分支书源睡眠写 Packages.java.lang.Thread.sleep(ms)。\n" +
             "完整说明见 references/js-api.md「Studio 沙箱可用 API 清单」。"
     }
 
@@ -402,7 +420,8 @@ class StudioJsApi(
         return answer.orEmpty()
     }
 
-    fun ajax(url: String): String = fetcher.fetch(HttpFetcher.FetchRequest(url, origin = withKind("js_ajax"), useCookieJar = useCookieJar)).body
+    fun ajax(url: String): String =
+        connectInternal(url, emptyMap<String, String>(), null, null, null, originKind = "js_ajax").body()
     fun connect(url: CharSequence): StudioJsResponse = connectInternal(url.toString(), null, null, null, null)
 
     fun connect(url: CharSequence, header: Any?): StudioJsResponse = connectInternal(url.toString(), header, null, null, null)
@@ -423,14 +442,28 @@ class StudioJsApi(
         return connectInternal(url.toString(), header, method?.toString(), body?.toString(), charset?.toString())
     }
 
-    private fun connectInternal(url: String, header: Any?, explicitMethod: String?, explicitBody: String?, explicitCharset: String?): StudioJsResponse {
+    private fun connectInternal(
+        url: String,
+        header: Any?,
+        explicitMethod: String?,
+        explicitBody: String?,
+        explicitCharset: String?,
+        originKind: String = "js_connect",
+    ): StudioJsResponse {
         val parsed = LegadoUrlOptions.parse(url)
-        val extra = headerMap(header, "connect")
+        if (parsed.webView) {
+            val api = if (originKind == "js_ajax") "java.ajax" else "java.connect"
+            error(
+                "$api 的 url,JSON 含 webView:true，沙箱不会用 WebView 发这次请求；" +
+                    "请改用 java.webView(url) 或 java.startBrowserAwait，以免把普通 HTTP 结果当成渲染页",
+            )
+        }
+        val extra = headerMap(header, if (originKind == "js_ajax") "ajax" else "connect")
         val absolute = parsed.url.ifBlank { url }
         val finalMethod = explicitMethod ?: parsed.method
         val finalBody = explicitBody ?: parsed.body
         val finalCharset = explicitCharset ?: parsed.charset
-        val result = fetcher.fetch(HttpFetcher.FetchRequest(absolute, finalMethod, parsed.headers + extra, finalBody, finalCharset, origin = withKind("js_connect"), useCookieJar = useCookieJar))
+        val result = fetcher.fetch(HttpFetcher.FetchRequest(absolute, finalMethod, parsed.headers + extra, finalBody, finalCharset, origin = withKind(originKind), useCookieJar = useCookieJar))
         return StudioJsResponse(result.code, result.finalUrl, result.body, result.headers, result.elapsedMs, result.rawBytes)
     }
     /**

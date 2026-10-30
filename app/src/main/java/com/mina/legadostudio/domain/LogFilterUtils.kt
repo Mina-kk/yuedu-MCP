@@ -125,10 +125,10 @@ object LogFilterUtils {
         val hostPart = withoutScheme.substringBefore('/').substringBefore('?').substringBefore('#').trim()
         // 剥离 userinfo（http://user@host/ 或 http://user:pass@host/），防「域名@私网IP」绕过
         val hostOnly = hostPart.substringAfterLast('@')
-        val hostWithoutPort = if (hostOnly.startsWith("[")) {
-            hostOnly.substringBefore(']').trimStart('[')
-        } else {
-            hostOnly.substringBefore(':')
+        val hostWithoutPort = when {
+            hostOnly.startsWith("[") -> hostOnly.substringBefore(']').trimStart('[')
+            hostOnly.count { it == ':' } >= 2 -> hostOnly
+            else -> hostOnly.substringBefore(':')
         }
         return hostWithoutPort.trim('.').lowercase(Locale.getDefault())
     }

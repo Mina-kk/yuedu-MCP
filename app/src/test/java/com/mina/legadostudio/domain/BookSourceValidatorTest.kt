@@ -126,4 +126,161 @@ class BookSourceValidatorTest {
         val ok = validator.validate("""{$base,"exploreUrl":"https://example.com/list","ruleExplore":{"bookList":".item"}}""")
         assertTrue(ok.issues.toString(), ok.isValid)
     }
+
+    private fun withTocUrl(tocUrl: String) = com.google.gson.Gson().toJson(mapOf(
+        "bookSourceName" to "示例", "bookSourceUrl" to "https://example.com",
+        "ruleBookInfo" to mapOf("tocUrl" to tocUrl),
+        "ruleToc" to mapOf("chapterList" to ".list a"), "ruleContent" to mapOf("content" to "#content"),
+    ))
+
+    private fun withJsLib(jsLib: String) = com.google.gson.Gson().toJson(mapOf(
+        "bookSourceName" to "示例", "bookSourceUrl" to "https://example.com",
+        "jsLib" to jsLib,
+        "ruleToc" to mapOf("chapterList" to ".list a"), "ruleContent" to mapOf("content" to "#content"),
+    ))
+
+    @Test fun warnsOnBareUrlInRuleJs() {
+        val report = validator.validate(withTocUrl("@js:url"))
+        assertTrue(report.issues.toString(), report.isValid)
+        assertTrue(report.warnings.toString(), report.warnings.any { it.path == "ruleBookInfo.tocUrl" && it.message.contains("baseUrl") })
+        assertTrue(validator.validate(withTocUrl("<js>result = url + '/toc'</js>")).warnings.any { it.path == "ruleBookInfo.tocUrl" })
+    }
+
+    @Test fun doesNotWarnWhenUrlIsDeclaredOrNotAVariable() {
+        listOf(
+            "@js:baseUrl", "<js>var url = baseUrl; url</js>", "@js:java.get(\"url\")",
+            "@js:({url: 1}).url", "@js:book.url", "@js:// url\nbaseUrl", ".toc a@href",
+            "<js>[1].map(url => url + 1)</js>", "<js>function f(a, url) { return url } f(1, baseUrl)</js>",
+        ).forEach { rule ->
+            val warnings = validator.validate(withTocUrl(rule)).warnings
+            assertFalse("rule=$rule warnings=$warnings", warnings.any { it.path == "ruleBookInfo.tocUrl" })
+        }
+    }
+
+    @Test fun inspectsTemplatesWithoutExecutingThem() {
+        assertTrue(validator.validate(withTocUrl("{{url}}/toc")).warnings.any { it.path == "ruleBookInfo.tocUrl" })
+        assertTrue(validator.validate(withTocUrl("@JS:isFromBookInfo ? baseUrl : result")).warnings.any { it.message.contains("isFromBookInfo") })
+        assertTrue(validator.validate(withTocUrl("<JS>url</JS>")).warnings.any { it.path == "ruleBookInfo.tocUrl" })
+        assertFalse(validator.validate(withTocUrl("@js:throw new Error('must not run')")).warnings.any { it.path == "ruleBookInfo.tocUrl" })
+    }
+
+    @Test fun respectsDeclarationsAndFunctionScope() {
+        listOf(
+            "@js:function url() { return baseUrl; } url()",
+            "@js:var {url} = book; url",
+            "@js:var {url: link} = book; link",
+            "@js:try { throw 1; } catch (url) { String(url); }",
+            "@js:url = baseUrl; url",
+            "@js:/url/.test(result)",
+        ).forEach { rule ->
+            assertFalse(rule, validator.validate(withTocUrl(rule)).warnings.any { it.path == "ruleBookInfo.tocUrl" })
+        }
+        assertTrue(validator.validate(withTocUrl("@js:function f(url) { return url; } url")).warnings.any { it.path == "ruleBookInfo.tocUrl" })
+        assertTrue(validator.validate(withTocUrl("@js:url = url + '/toc'; url")).warnings.any { it.path == "ruleBookInfo.tocUrl" })
+    }
+
+    @Test fun inspectsAdditionalScriptFieldsAsWarnings() {
+        listOf("loginCheckJs", "jsLib", "loginUrl", "header", "loginUi").forEach { field ->
+            val obj = com.google.gson.JsonParser.parseString(withTocUrl("@js:baseUrl")).asJsonObject
+            obj.addProperty(field, if (field in listOf("loginCheckJs", "jsLib")) "url" else "@JS:url")
+            val report = validator.validate(obj.toString())
+            assertTrue("$field: $report", report.isValid)
+            assertTrue("$field: $report", report.warnings.any { it.path == field })
+        }
+    }
+
+    @Test fun keywordInspectionDoesNotBlockDynamicSearchOrMatchMonkey() {
+        fun report(search: String): BookSourceValidator.Report {
+            val obj = com.google.gson.JsonParser.parseString(withTocUrl("@js:baseUrl")).asJsonObject
+            obj.addProperty("searchUrl", search)
+            obj.add("ruleSearch", com.google.gson.JsonObject().apply { addProperty("bookList", ".book") })
+            return validator.validate(obj.toString())
+        }
+        listOf("/monkey", "/search?key=literal", "@JS:java.get('searchRequest')").forEach {
+            assertTrue(it, report(it).isValid)
+            assertTrue(it, report(it).warnings.any { warning -> warning.path == "searchUrl" })
+        }
+        listOf("/search?q={{ key }}", "@JS:baseUrl + '/?q=' + key", "/search,{'method':'POST','body':'q={{encodeURIComponent(key)}}'}").forEach {
+            assertFalse(it, report(it).warnings.any { warning -> warning.path == "searchUrl" })
+        }
+    }
+
+    @Test fun warnsOnSingleCharacterCheckKeyWord() {
+        fun src(k: String) = com.google.gson.Gson().toJson(mapOf(
+            "bookSourceName" to "示例", "bookSourceUrl" to "https://example.com",
+            "ruleSearch" to mapOf("checkKeyWord" to k),
+            "ruleToc" to mapOf("chapterList" to ".list a"), "ruleContent" to mapOf("content" to "#content"),
+        ))
+        assertTrue(validator.validate(src(" 我 ")).warnings.any { it.path == "ruleSearch.checkKeyWord" })
+        assertFalse(validator.validate(src("捞尸人")).warnings.any { it.path == "ruleSearch.checkKeyWord" })
+    }
+
+    @Test fun classInitAndKeyTemplateDoNotThrow() {
+        val report = validator.validate(
+            """{"bookSourceName":"t","bookSourceUrl":"https://example.com","searchUrl":"/s?q={{key}}","ruleSearch":{"bookList":".b"},"ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c"}}""",
+        )
+        assertTrue(report.isValid)
+    }
+
+    @Test fun warnsOnJsLibTopLevelReaderBindingsWithoutBlockingSave() {
+        listOf(
+            "source.get('browserToken')",
+            "java.ajax(baseUrl)",
+            "cookie.getCookie(baseUrl)",
+            "cache.get('token')",
+        ).forEach { jsLib ->
+            val report = validator.validate(withJsLib(jsLib))
+            assertTrue("jsLib=$jsLib issues=${report.issues}", report.isValid)
+            assertFalse(report.issues.any { it.path == "jsLib" })
+            val warning = report.warnings.firstOrNull { it.path == "jsLib" && it.message.contains("顶层疑似引用") }
+            assertTrue("jsLib=$jsLib warnings=${report.warnings}", warning != null)
+            assertTrue(warning!!.message.contains("不自动改写"))
+        }
+        val combined = validator.validate(withJsLib("source.get('t'); cookie.getCookie(baseUrl); cache.put('t','1')"))
+        assertTrue(combined.isValid)
+        val warning = combined.warnings.first { it.path == "jsLib" && it.message.contains("顶层疑似引用") }
+        assertTrue(warning.message.contains("cache") && warning.message.contains("cookie") && warning.message.contains("source"))
+    }
+
+    @Test fun warnsOnJsLibTopLevelWebViewCall() {
+        val report = validator.validate(withJsLib("""java.webView(null, baseUrl, "document.cookie")"""))
+        assertTrue(report.issues.toString(), report.isValid)
+        assertTrue(report.warnings.toString(), report.warnings.any {
+            it.path == "jsLib" && it.message.contains("java.webView") && it.message.contains("object") && it.message.contains("不自动改写")
+        })
+        assertTrue(report.warnings.any { it.path == "jsLib" && it.message.contains("顶层疑似引用") && it.message.contains("java") })
+    }
+
+    @Test fun doesNotWarnJsLibStringsCommentsOrOfficialThisDestructure() {
+        listOf(
+            """var s = "source.get('t'); java.webView(null,u,js)"; function f(){ return s; }""",
+            """// source.get("browserToken")
+               /* java.webView(null, url, js) cookie.getCookie(x) cache.get('t') */
+               function f(){ return 1; }""",
+            """function getToken(){ const {java, source} = this; return source.get('t') || java.webView(null, baseUrl, "document.cookie"); }""",
+            """function source(){ return 1; } function java(){ return 2; }""",
+            """function f(){ return book.source + ({source:1}).source; }""",
+            """function mkKey(k){ return 'q_'+k; }""",
+        ).forEach { jsLib ->
+            val warnings = validator.validate(withJsLib(jsLib)).warnings.filter { it.path == "jsLib" }
+            assertTrue("jsLib=$jsLib warnings=$warnings", warnings.none { it.message.contains("顶层疑似引用") || it.message.contains("顶层疑似调用") })
+            assertTrue("jsLib=$jsLib warnings=$warnings", warnings.none { it.message.contains("不视为必错") })
+        }
+    }
+
+    @Test fun jsLibInFunctionBareBindingsAreCautiousNotBlocking() {
+        val report = validator.validate(withJsLib("function ping(){ return source.get('t') + java.webView(null, baseUrl, '1'); }"))
+        assertTrue(report.issues.toString(), report.isValid)
+        assertFalse(report.warnings.any { it.path == "jsLib" && it.message.contains("顶层") })
+        val cautious = report.warnings.firstOrNull { it.path == "jsLib" && it.message.contains("不视为必错") }
+        assertTrue(report.warnings.toString(), cautious != null)
+        assertTrue(cautious!!.message.contains("source") && cautious.message.contains("java"))
+        assertTrue(cautious.message.contains("java.webView") || cautious.message.contains("裸引用"))
+    }
+
+    @Test fun jsLibHttpUrlIsNotInspectedAsScript() {
+        val report = validator.validate(withJsLib("https://example.com/lib.js"))
+        assertTrue(report.isValid)
+        assertFalse(report.warnings.any { it.path == "jsLib" && (it.message.contains("顶层") || it.message.contains("不视为必错")) })
+    }
 }

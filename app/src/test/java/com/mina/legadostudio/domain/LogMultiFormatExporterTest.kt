@@ -91,7 +91,8 @@ class LogMultiFormatExporterTest {
         assertFalse(safe.contains("sk-secret"))
         assertFalse(safe.contains("abc123"))
         assertTrue(safe.contains("authorization=***"))
-        assertTrue(safe.contains("https://a.test/s?token=***"))
+        assertFalse("脱敏后不得泄漏 URL 主机", safe.contains("a.test"))
+        assertTrue(safe.contains("[URL已隐藏]"))
     }
 
     @Test fun textFormatReusesExistingFormatter() {

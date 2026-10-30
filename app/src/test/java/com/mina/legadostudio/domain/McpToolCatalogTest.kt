@@ -1,5 +1,7 @@
 package com.mina.legadostudio.domain
 
+import com.mina.legadostudio.mcp.AppInfoFacts
+import com.mina.legadostudio.mcp.buildAppInfoPayload
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -108,11 +110,26 @@ class McpToolCatalogTest {
 
     @Test
     fun getAppInfoDeclaresNoAi() {
-        val source = mcpServerSources()
-        assertTrue(source.contains("\"ai\" to false"))
-        assertTrue(source.contains("\"role\" to \"mcp-runtime\""))
-        assertTrue(source.contains("\"ui\" to listOf(\"mcp\", \"sources\", \"skills\", \"verification\", \"logs\")"))
+        val facts = AppInfoFacts(
+            versionName = "1.3.5",
+            versionCode = 196,
+            packageName = "com.mina.legadostudio",
+            mcpPath = "/mcp",
+            corpusSourceCount = 0,
+            bookSourceType = 0,
+            bookSourceTypeName = "文本",
+            buildRevision = "development",
+            buildType = "debug",
+        )
+        val expectedUi = listOf("mcp", "sources", "skills", "verification", "logs")
+        for (detail in listOf(true, false)) {
+            val payload = buildAppInfoPayload(detail = detail, facts = facts)
+            assertEquals("ai must be false (detail=$detail)", false, payload["ai"])
+            assertEquals("role must be mcp-runtime (detail=$detail)", "mcp-runtime", payload["role"])
+            assertEquals("ui tabs (detail=$detail)", expectedUi, payload["ui"])
+        }
         // save_source 契约已改：同 URL 不同 JSON 保留为新版本（不再 trimEnd('/') 归并、不静默覆盖）
+        val source = mcpServerSources()
         assertTrue(source.contains("同 URL 不同 JSON"))
         assertTrue(source.contains("newVersion"))
     }

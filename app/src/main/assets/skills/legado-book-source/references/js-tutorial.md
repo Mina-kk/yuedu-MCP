@@ -38,7 +38,7 @@ chapterUrl: href
 字段值本身就是一段 JS（多行脚本场景），同样以返回值/最后一行为结果。
 
 > 记住一条：**块里最后一行就是返回值；不要写顶层 `return`（会直接报语法错误）**。
-> 目录分页只用官方字段 `nextTocUrl`（指向「下一页」目录链接）；禁止 `for(page=2..N)` / `cp=1..N` 循环发请求自建章节数组（详见 `generation-contract.md` 第 2 条）。
+> 目录分页只用官方字段 `nextTocUrl`。阅读对它走 `getStringList(isUrl=true)`：返回 0 条结束；恰好 1 条当「下一页」串行跟随，且后续页继续取 `nextTocUrl`；多于 1 条当完整页表并发抓取，二级页不再扩展。页码 `<select>` 写 `option@value`、或一次取出全部页链，都是合法规则，不要改成只跟一条「下一页」。禁止 `for(page=2..N)` / `cp=1..N` 循环 `java.ajax` 自建章节数组（合同见 `generation-contract.md`）。唯一例外是目录由加密 API 返回、官方字段无法覆盖。工坊 `++` 目录通道同样按 0/1/N 列表展开（N>1 串行一层、总页上限 100），与阅读并发/无硬顶不同；触顶记 `page_limit`、`verdict` 不为 `full`，不为沙箱改规则。若工具把多条页链拼成超长 URL，那是工具缺陷。
 
 ---
 
@@ -113,7 +113,7 @@ result.filter(function(item) {
 | `connect(url)` | `java.connect(url)` | 返回 StrResponse 对象，可拿状态码 |
 | `webView(html, url, js)` | `java.webView(html, url, js)` | 需要浏览器渲染的页面用它 |
 
-网络类只用于取**单页数据**（如重定向 URL、签名接口）。目录/正文的翻页一律走官方字段 `nextTocUrl` / `nextContentUrl`，不要用循环请求自建列表。
+网络类只用于取**单页数据**（如重定向 URL、签名接口）。目录/正文的翻页一律走官方字段 `nextTocUrl` / `nextContentUrl`：`nextTocUrl` 返回 1 条则串行跟下一页，返回多条（如 `option@value`）则阅读当完整页表并发抓，不要用循环请求自建列表。
 
 示例：配合 searchUrl 拦截重定向（page 来自搜索分页）
 
@@ -234,6 +234,7 @@ list
 5. **java.* 返回值当 JS 字符串用**：先 `String(result)` 再 `.match`/`.replace`（Rhino 对 java 对象直接调 JS 字符串方法会报「选择不明确」）
 6. **拿不到数据先怀疑要登录/要 Referer**：加 headers 再试
 7. **改完规则不生效**：书源详情页点"调试"，从搜索一路跑一遍看日志
+8. **目录只有第一页就改规则**：先看阅读日志 `nextTocUrl` 打出几条 URL。1 条应能继续翻；N>1 是完整页表（`option@value` 合法）。工坊串行且 100 页封顶（触顶 sandbox/`page_limit`，`verdict` 不为 `full`），与阅读并发/无硬顶不同，不为沙箱改书源；多链被拼成超长 URL 是工具缺陷
 
 ---
 

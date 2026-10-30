@@ -22,5 +22,5 @@
 
 - Repository: https://github.com/morluto/rea
 - License: MIT
-- Used for: `reverse-engineer-anything` and `rea-tool-design` agent skills, embedded verbatim under `app/src/main/assets/skills/reverse-engineering/references/` (synced from upstream `4aa51bf`, skill metadata version 41).
+- Used for: `reverse-engineer-anything` and `rea-tool-design` agent skills, embedded verbatim under `app/src/main/assets/skills/reverse-engineering/references/` (synced from upstream `b8ce3c7`, skill metadata version 49; `rea-analysis-optimization` is not included).
 - The upstream MIT license is included as `REA_LICENSE_MIT`.

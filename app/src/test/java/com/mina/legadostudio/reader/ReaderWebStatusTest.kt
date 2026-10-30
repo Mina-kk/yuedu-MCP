@@ -183,14 +183,111 @@ class ReaderWebStatusTest {
                 ReaderWebBridge.Capability.SUPPORTED,
                 status.capabilities.getValue("webPage").state,
             )
+            // 主结论是「待确认」而不是「没有识别到官方接口」
+            assertTrue(status.apiProfileDetail.contains("待确认"))
             assertTrue(status.message.contains("网页在线"))
-            assertTrue(status.message.contains("官方接口不匹配"))
+            assertTrue("主结论须说待确认而非未识别", status.message.contains("待确认"))
+            assertFalse("不得把「没有识别到官方阅读接口」当主结论", status.message.contains("没有识别到"))
             assertTrue("明确不断言不是阅读", status.message.contains("不断言不是阅读"))
             assertTrue("明确不强制升级", status.message.contains("不强制升级"))
             assertFalse("不得要求升级", status.message.contains("请升级"))
             assertFalse("不得要求先升级再试", status.message.contains("需升级"))
             // 网页 200 不等于结构化检验：check 不能被报成 supported
             assertFalse(status.capabilities.getValue("check").state == ReaderWebBridge.Capability.SUPPORTED)
+            // unknown ≠ unsupported：mismatch 时同步/检验/调试/搜索都允许实际尝试，
+            // 不能让 AI 在 apiProfile=mismatch 时就放弃这些工具
+            assertTrue(status.allowedNextActions.contains("reader_web_sync_source"))
+            assertTrue(status.allowedNextActions.contains("reader_web_verify"))
+            assertTrue(status.allowedNextActions.contains("reader_web_debug"))
+            assertTrue(status.allowedNextActions.contains("reader_web_search"))
+        }
+    }
+
+    /** mismatch 时页面工具仍排首位，但实际尝试类工具紧随其后——不是只给 page/status。 */
+    @Test fun mismatchKeepsPageFirstAndOffersAttemptTools() = kotlinx.coroutines.test.runTest {
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                    "/" -> html()
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val status = bridge(server.url("/").toString()).status()
+            assertEquals(ReaderWebBridge.ApiProfile.MISMATCH, status.apiProfile)
+            assertEquals("reader_web_page", status.allowedNextActions.first())
+            assertEquals(
+                "页面优先 + 全部可尝试工具",
+                listOf(
+                    "reader_web_page",
+                    "reader_web_sync_source",
+                    "reader_web_verify",
+                    "reader_web_debug",
+                    "reader_web_search",
+                ),
+                status.allowedNextActions,
+            )
+            // 待确认能力的详情必须说明「可实际尝试并如实回报」，不得写成「不支持」
+            listOf("write", "legacyDebug", "search").forEach { key ->
+                val capability = status.capabilities.getValue(key)
+                assertEquals("$key 只能是 unknown 而不是 unsupported", ReaderWebBridge.Capability.UNKNOWN, capability.state)
+                assertTrue("$key 详情须说明尝试方式", capability.detail.contains("reader_web_"))
+            }
+        }
+    }
+
+    /** 在线但既无页面也无接口证据（mismatch）：仍允许实际尝试工具，不是只剩 status。 */
+    @Test fun onlineMismatchWithoutPageStillAllowsAttemptTools() = kotlinx.coroutines.test.runTest {
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse =
+                    MockResponse().setResponseCode(404)
+            }
+            server.start()
+            val status = bridge(server.url("/").toString()).status()
+            assertTrue("404 也是响应，服务在线", status.reachable)
+            assertFalse(status.webPageReachable)
+            assertFalse(status.readerDetected)
+            assertEquals(ReaderWebBridge.ApiProfile.MISMATCH, status.apiProfile)
+            assertTrue(status.allowedNextActions.contains("reader_web_sync_source"))
+            assertTrue(status.allowedNextActions.contains("reader_web_verify"))
+            assertTrue(status.allowedNextActions.contains("reader_web_debug"))
+            assertTrue(status.allowedNextActions.contains("reader_web_search"))
+            assertTrue(status.allowedNextActions.contains("reader_web_status"))
+        }
+    }
+
+    /** status 探测固定调用开始时的配置：中途改配置只影响下一次调用，不会漂移到新地址。 */
+    @Test fun statusPinsConfigSoMidProbeChangesCannotHitAnotherOrigin() = kotlinx.coroutines.test.runTest {
+        MockWebServer().use { first ->
+            MockWebServer().use { second ->
+                var current = ReaderWebConfigStore.Config(first.url("/").toString().removeSuffix("/"), "old-token", 3L)
+                first.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        // 根路径响应后，「用户」在界面上把配置改到另一个服务
+                        if (request.path == "/") {
+                            current = ReaderWebConfigStore.Config(second.url("/").toString().removeSuffix("/"), "new-token", 4L)
+                            return html()
+                        }
+                        return if (request.path!!.startsWith("/getJsSourceApiTokenRequired")) okJson("false")
+                        else MockResponse().setResponseCode(404)
+                    }
+                }
+                second.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse = html()
+                }
+                first.start()
+                second.start()
+                val status = ReaderWebBridge(
+                    ReaderWebClient(configProvider = { current }, clientFactory = {
+                        OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
+                            .callTimeout(5, TimeUnit.SECONDS).build()
+                    }),
+                ).status()
+                assertEquals("回包里的 revision 是调用开始时的那次", 3L, status.configRevision)
+                assertEquals("新地址一个请求都不应收到", 0, second.requestCount)
+                assertTrue(first.requestCount >= 2)
+            }
         }
     }
 
@@ -730,6 +827,31 @@ class ReaderWebStatusTest {
             assertTrue(
                 ReaderWebConfigRevision.changed("http://127.0.0.1:1162", "old", "http://127.0.0.1:1162", "new"),
             )
+            // revision 单调不回绕：到顶后即使值再变也不再 +1
+            assertEquals(Long.MAX_VALUE, ReaderWebConfigRevision.next(Long.MAX_VALUE, changed = true))
+            // 同地址换令牌算一次变化（隔离测试依据这一点判断「用户改了配置」）
+            assertTrue(ReaderWebConfigRevision.changed("http://127.0.0.1:1162", null, "http://127.0.0.1:1162", "t1"))
+            assertFalse(ReaderWebConfigRevision.changed("http://127.0.0.1:1162", "t1", "http://127.0.0.1:1162", "t1"))
+        }
+    }
+
+    /** 非默认端口：归一化/originEcho/loopbackFor 全程保留用户填的端口，不回退到任何默认端口。 */
+    @Test fun nonDefaultPortSurvivesNormalizeEchoAndLoopbackSuggestion() = kotlinx.coroutines.test.runTest {
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse =
+                    if (request.path == "/") html() else MockResponse().setResponseCode(404)
+            }
+            server.start()
+            val status = bridge(server.url("/").toString()).status()
+            // MockWebServer 的端口天然是高位非默认端口：回显必须如实带上
+            assertTrue("非默认端口(${server.port})必须保留", server.port !in setOf(80, 443, 1122))
+            assertEquals("http://127.0.0.1:${server.port}", status.originEcho)
+            // 一键回环建议只改主机：私网地址的端口原样保留，不回退默认端口
+            assertEquals("http://127.0.0.1:1162", ReaderWebOrigin.loopbackFor("http://192.168.1.8:1162"))
+            assertEquals("https://127.0.0.1:8443", ReaderWebOrigin.loopbackFor("https://10.0.0.2:8443"))
+            // normalize 不吸收/改写非默认端口
+            assertEquals("http://127.0.0.1:8443", ReaderWebOrigin.normalize("http://127.0.0.1:8443"))
         }
     }
 

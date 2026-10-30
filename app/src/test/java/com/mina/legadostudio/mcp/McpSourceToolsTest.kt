@@ -22,8 +22,8 @@ import org.junit.Test
  */
 class McpSourceToolsTest {
 
-    private fun project(id: String, siteUrl: String, sourceJson: String, updatedAt: Long = 0L) =
-        ProjectEntity(id = id, name = "n-$id", siteUrl = siteUrl, sourceJson = sourceJson,
+    private fun project(id: String, siteUrl: String, sourceJson: String, updatedAt: Long = 0L, name: String = "n-$id") =
+        ProjectEntity(id = id, name = name, siteUrl = siteUrl, sourceJson = sourceJson,
             stage = "VALIDATED", notes = "", createdAt = 0L, updatedAt = updatedAt)
 
     private fun source(url: String, name: String = "示例", type: Int = 0, extra: String = "") =
@@ -430,5 +430,92 @@ class McpSourceToolsTest {
         assertEquals(1, group.size); assertEquals(1, keep.size); assertTrue(toDelete.isEmpty())
         // keepLatest=0 被调用方兜底成 1
         assertEquals(1, McpSourceTools.decideArchive(projects, "https://h.com/x", 0).second.size)
+    }
+
+    // ---------- list_sources query：有界子串、中文/大小写、过滤后再分页 ----------
+
+    @Test fun `parseListQuery blank is no filter and overlong is rejected`() {
+        assertEquals(null to null, McpSourceTools.parseListQuery(null))
+        assertEquals(null to null, McpSourceTools.parseListQuery(""))
+        assertEquals(null to null, McpSourceTools.parseListQuery("  \t"))
+        val (applied, errOk) = McpSourceTools.parseListQuery("  DdSk.org  ")
+        assertEquals("DdSk.org", applied)
+        assertNull(errOk)
+        val (_, err) = McpSourceTools.parseListQuery("x".repeat(McpSourceTools.MAX_LIST_QUERY_CHARS + 1))
+        assertTrue(err!!.contains("1..${McpSourceTools.MAX_LIST_QUERY_CHARS}"))
+        assertTrue(err.contains("${McpSourceTools.MAX_LIST_QUERY_CHARS + 1}"))
+        val (maxOk, maxErr) = McpSourceTools.parseListQuery("x".repeat(McpSourceTools.MAX_LIST_QUERY_CHARS))
+        assertEquals(McpSourceTools.MAX_LIST_QUERY_CHARS, maxOk!!.length)
+        assertNull(maxErr)
+    }
+
+    @Test fun `list query matches chinese name and url case-insensitively`() {
+        val projects = listOf(
+            project("p1", "https://WAP.Example.TEST/x", source("https://WAP.Example.TEST/x", name = "顶点小说"), updatedAt = 30, name = "顶点小说"),
+            project("p2", "https://other.test/y", source("https://other.test/y", name = "笔趣阁"), updatedAt = 20, name = "笔趣阁"),
+            project("p3", "http://wap.ddsk.org/", source("http://wap.ddsk.org/", name = "顶点"), updatedAt = 10, name = "顶点"),
+        )
+        assertEquals(listOf("p1"), McpSourceTools.filterByListQuery(projects, "顶点小说").map { it.id })
+        assertEquals(listOf("p1", "p3"), McpSourceTools.filterByListQuery(projects, "顶点").map { it.id })
+        assertEquals(listOf("p1"), McpSourceTools.filterByListQuery(projects, "wap.example.test").map { it.id })
+        assertEquals(listOf("p3"), McpSourceTools.filterByListQuery(projects, "DDSK").map { it.id })
+        assertEquals(listOf("p2"), McpSourceTools.filterByListQuery(projects, "笔趣").map { it.id })
+        assertTrue(McpSourceTools.filterByListQuery(projects, "不存在").isEmpty())
+        assertEquals(projects, McpSourceTools.filterByListQuery(projects, null))
+    }
+
+    @Test fun `list query does not search sourceJson body`() {
+        val p = project(
+            "p1", "https://h.com/x",
+            source("https://h.com/x", extra = ",\"ruleContent\":{\"content\":\"ddsk-secret\"}"),
+            updatedAt = 1,
+        )
+        assertTrue(McpSourceTools.filterByListQuery(listOf(p), "ddsk").isEmpty())
+        assertEquals(listOf("p1"), McpSourceTools.filterByListQuery(listOf(p), "h.com").map { it.id })
+    }
+
+    @Test fun `list query pagination uses filtered total and hasMore`() {
+        val projects = (1..5).map { i ->
+            val display = if (i <= 3) "目标$i" else "其他$i"
+            project(
+                "p$i", "https://h.com/$i",
+                source("https://h.com/$i", name = display),
+                updatedAt = i.toLong(),
+                name = display,
+            )
+        }
+        val filtered = McpSourceTools.filterByListQuery(projects, "目标")
+        assertEquals(3, filtered.size)
+        val page = McpSourceTools.pageList(filtered, offset = 0, limit = 2)
+        assertEquals(listOf("p1", "p2"), page.items.map { it.id })
+        assertEquals(3, page.total)
+        assertTrue(page.hasMore)
+        val page2 = McpSourceTools.pageList(filtered, offset = 2, limit = 2)
+        assertEquals(listOf("p3"), page2.items.map { it.id })
+        assertEquals(3, page2.total)
+        assertFalse(page2.hasMore)
+        val empty = McpSourceTools.pageList(filtered, offset = 10, limit = 2)
+        assertTrue(empty.items.isEmpty())
+        assertEquals(3, empty.total)
+        assertFalse(empty.hasMore)
+        val none = McpSourceTools.pageList(McpSourceTools.filterByListQuery(projects, "没有"), 0, 200)
+        assertEquals(0, none.total)
+        assertFalse(none.hasMore)
+        assertTrue(none.items.isEmpty())
+    }
+
+    @Test fun `list query after latestOnly paginates the filtered representatives`() {
+        val projects = listOf(
+            project("old", "https://h.com/x", source("https://h.com/x", name = "顶点旧"), updatedAt = 1, name = "顶点旧"),
+            project("new", "https://h.com/x", source("https://h.com/x", name = "顶点新"), updatedAt = 3, name = "顶点新"),
+            project("y", "https://h.com/y", source("https://h.com/y", name = "别的"), updatedAt = 2, name = "别的"),
+        )
+        val latest = McpSourceTools.latestOnly(projects)
+        val filtered = McpSourceTools.filterByListQuery(latest, "顶点")
+        assertEquals(listOf("new"), filtered.map { it.id })
+        val page = McpSourceTools.pageList(filtered, 0, 200)
+        assertEquals(1, page.total)
+        assertFalse(page.hasMore)
+        assertEquals("new", page.items.single().id)
     }
 }

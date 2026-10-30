@@ -1,9 +1,8 @@
 package com.mina.legadostudio.reader
 
-/**
- * 进程内记录“阅读端是否真的跑过这个书源”。与沙箱的 CheckEvidenceRegistry 完全分开：
- * 沙箱结果永远不会写进这里，只有阅读 Web 的 debug / search / verify 才会。
- */
+import com.google.gson.JsonObject
+import java.security.MessageDigest
+
 object ReaderExecutionRegistry {
     data class Record(
         val kind: String,
@@ -16,31 +15,56 @@ object ReaderExecutionRegistry {
         val failureSignals: List<String> = emptyList(),
         val searchHits: Int? = null,
         val verifyStatus: String? = null,
+        val sourceHash: String? = null,
+        val configFingerprint: String? = null,
+        val complete: Boolean = false,
+        val keyword: String? = null,
     )
 
     const val TTL_MS = 2 * 60 * 60 * 1000L
     const val CAPACITY = 200
-
+    val REQUIRED_STAGES = listOf("search", "detail", "toc", "content")
     private val records = LinkedHashMap<String, MutableList<Record>>()
 
-    private fun key(url: String) = url.trim()
+    fun sourceHashOf(source: JsonObject): String = ReaderWebSourceSync.hashOf(source.deepCopy().apply {
+        if (!has("enabledCookieJar")) addProperty("enabledCookieJar", true)
+    })
+
+    fun configFingerprintOf(config: ReaderWebConfigStore.Config?): String? {
+        config ?: return null
+        val origin = ReaderWebOrigin.normalizeOrNull(config.baseUrl) ?: return null
+        val token = ReaderWebUiPolicy.SessionIdentity.tokenFingerprint(config.token)
+        return MessageDigest.getInstance("SHA-256")
+            .digest("$origin|${config.revision}|$token".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    fun debugComplete(payload: Map<String, Any?>): Boolean {
+        val logs = (payload["debugLogs"] as? List<*>).orEmpty().map { it.toString() }
+        val terminal = payload["completionSignal"] == true || logs.any { line ->
+            listOf("书籍总数:", "未获取到书籍", "没有正文章节", "调试完成", "调试结束").any(line::contains)
+        }
+        return payload["errorCode"] == null && payload["truncated"] != true &&
+            payload["closeCode"] in setOf(1000, 1001) && terminal
+    }
 
     fun record(url: String, rec: Record, now: Long = System.currentTimeMillis()) {
-        val k = key(url)
-        if (k.isEmpty()) return
+        val key = url.trim()
+        if (key.isEmpty()) return
         synchronized(records) {
             prune(now)
-            val list = records.remove(k) ?: mutableListOf()
+            val list = records.remove(key) ?: mutableListOf()
             list += rec
+            list.sortBy { it.at }
             while (list.size > 10) list.removeAt(0)
-            records[k] = list
+            records[key] = list
             while (records.size > CAPACITY) records.remove(records.keys.first())
         }
     }
 
     fun all(url: String, now: Long = System.currentTimeMillis()): List<Record> = synchronized(records) {
         prune(now)
-        records[key(url)]?.toList().orEmpty()
+        records[url.trim()]?.toList().orEmpty()
     }
 
     fun latest(url: String, now: Long = System.currentTimeMillis()): Record? = all(url, now).lastOrNull()
@@ -48,50 +72,61 @@ object ReaderExecutionRegistry {
     fun hasExecuted(url: String, now: Long = System.currentTimeMillis()): Boolean = all(url, now).any { it.executed }
 
     fun hasFailure(url: String, now: Long = System.currentTimeMillis()): Boolean =
-        summary(url, now)?.get("failureSignals")?.let { (it as List<*>).isNotEmpty() } == true
+        (summary(url, now)?.get("failureSignals") as? List<*>)?.isNotEmpty() == true
 
-    fun summary(url: String, now: Long = System.currentTimeMillis()): Map<String, Any?>? {
+    fun summary(
+        url: String,
+        now: Long = System.currentTimeMillis(),
+        sourceHash: String? = null,
+        configFingerprint: String? = null,
+    ): Map<String, Any?>? {
         val list = all(url, now)
         if (list.isEmpty()) return null
-        val latestDebug = list.lastOrNull { it.kind == "debug" && it.executed }
-        val latestVerify = list.lastOrNull { it.kind == "verify" && it.executed }
-        val current = latestDebug ?: latestVerify ?: list.lastOrNull { it.executed }
-        val historicalFailures = list.flatMap { it.failureSignals }.distinct().take(6)
-        val currentFailures = current?.failureSignals.orEmpty() +
-            if (current?.kind == "search" && current.searchHits == 0) listOf("搜索无命中")
-            else if (current?.kind == "verify" && current.verifyStatus != null &&
-                current.verifyStatus !in setOf("passed", "legacy_debug_only")) listOf(current.verifyStatus)
-            else emptyList()
-        return mapOf(
-            "executed" to list.any { it.executed },
+        val current = list.last()
+        val failures = current.failureSignals + if (current.kind == "verify" && current.verifyStatus == "failed") listOf("failed") else emptyList()
+        val matches = sourceHash != null && configFingerprint != null &&
+            current.sourceHash == sourceHash && current.configFingerprint == configFingerprint
+        return linkedMapOf<String, Any?>(
+            "executed" to current.executed,
             "kinds" to list.filter { it.executed }.map { it.kind }.distinct(),
-            "failureSignals" to currentFailures.distinct().take(6),
-            "historicalFailureSignals" to historicalFailures,
-            "latestDebugStatus" to latestDebug?.status,
-            "latestDebugAtEpochMs" to latestDebug?.at,
+            "currentKind" to current.kind,
+            "currentStatus" to current.status,
+            "failureSignals" to failures.distinct().take(6),
+            "historicalFailureSignals" to list.flatMap { it.failureSignals }.distinct().take(6),
+            "latestDebugStatus" to list.lastOrNull { it.kind == "debug" }?.status,
+            "latestDebugAtEpochMs" to list.lastOrNull { it.kind == "debug" }?.at,
             "searchHits" to list.lastOrNull { it.kind == "search" }?.searchHits,
-            "verifyStatus" to latestVerify?.verifyStatus,
-            "stagesReached" to current?.stagesReached.orEmpty(),
-            "lastAtEpochMs" to list.last().at,
+            "verifyStatus" to current.verifyStatus,
+            "stagesReached" to current.stagesReached,
+            "missingStages" to REQUIRED_STAGES.filter { it !in current.stagesReached },
+            "complete" to current.complete,
+            "sourceHash" to current.sourceHash,
+            "identityMatches" to matches,
+            "observedContent" to (current.sourceHash != null),
+            "keyword" to current.keyword,
+            "lastAtEpochMs" to current.at,
         ).filterValues { it != null }
     }
 
-    /**
-     * 登记一次 reader_web_verify 的回包。结构化检验看 status；旧版降级看 debugLogs。
-     * 未真正连到阅读（NOT_CONFIGURED / 不可达等、且无日志）的不登记为已执行。
-     */
+    fun passed(summary: Map<String, Any?>?): Boolean = summary != null &&
+        summary["identityMatches"] == true && summary["executed"] == true && summary["complete"] == true &&
+        (summary["failureSignals"] as? List<*>).orEmpty().isEmpty() &&
+        summary["currentKind"] == "verify" && summary["verifyStatus"] == "passed"
+
     fun recordVerifyPayload(url: String, payload: Map<String, Any?>, now: Long = System.currentTimeMillis()) {
         val status = payload["status"]?.toString()
         val logs = (payload["debugLogs"] as? List<*>)?.map { it.toString() }.orEmpty()
-        val hasError = payload["errorCode"] != null
-        val executed = logs.isNotEmpty() || (!hasError && status != null)
-        if (!executed) return
+        val executed = logs.isNotEmpty() || (payload["errorCode"] == null && status != null)
+        if (!executed && payload["evidenceSourceHash"] == null) return
         val signals = ReaderDebugLogSignals.parse(logs)
         record(url, Record(
-            kind = "verify", at = now, executed = true, status = status,
-            stagesReached = signals.stagesReached,
-            failureSignals = signals.failureSignals,
-            verifyStatus = status,
+            kind = "verify", at = (payload["executionStartedAtEpochMs"] as? Number)?.toLong() ?: now,
+            executed = executed, status = status, stagesReached = signals.stagesReached,
+            failureSignals = signals.failureSignals, verifyStatus = status,
+            sourceHash = payload["evidenceSourceHash"] as? String,
+            configFingerprint = payload["evidenceConfigFingerprint"] as? String,
+            complete = payload["executionComplete"] == true,
+            keyword = payload["keyword"] as? String,
         ), now)
     }
 
@@ -100,9 +135,9 @@ object ReaderExecutionRegistry {
     private fun prune(now: Long) {
         val iter = records.entries.iterator()
         while (iter.hasNext()) {
-            val e = iter.next()
-            e.value.removeAll { r -> now - r.at > TTL_MS }
-            if (e.value.isEmpty()) iter.remove()
+            val entry = iter.next()
+            entry.value.removeAll { now - it.at > TTL_MS }
+            if (entry.value.isEmpty()) iter.remove()
         }
     }
 }

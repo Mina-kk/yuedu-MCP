@@ -196,6 +196,8 @@ class ReaderWebClient private constructor(
         // 旧版公开读路由：只用于「到底是不是阅读」的核实与同步前的精确预检
         const val PATH_LEGACY_SOURCES = "/getBookSources"
         const val PATH_LEGACY_SOURCE = "/getBookSource"
+        /** 有界探测用的哨兵 URL：走单条查询，不拉 900+ 源的全库 JSON。 */
+        const val LEGACY_PROBE_SENTINEL = "https://legadostudio.invalid/probe"
         // 旧版/叉版通用的书源写入路由：只在同步工具里、且预检确认不存在或被显式允许覆盖后调用
         const val PATH_SAVE_SOURCE = "/saveBookSource"
 
@@ -436,7 +438,8 @@ class ReaderWebClient private constructor(
      * - 新版接口正常 → 返回令牌开关（业务失败照实报，不降级成「不可达」）。
      *
      * @param knownSourceUrl 已知的 bookSourceUrl：旧版核实用体积更小的 `/getBookSource?url=`；
-     *   null 时退化为有界读取 `/getBookSources` 前缀。
+     *   null 时先打哨兵 `/getBookSource?url=`（小响应、必含 isSuccess），失败再有界读取 `/getBookSources` 前缀。
+     *   不扫端口、不拉全库。
      */
     @JvmOverloads
     suspend fun probe(knownSourceUrl: String? = null): Probe = withContext(Dispatchers.IO) {
@@ -708,8 +711,9 @@ class ReaderWebClient private constructor(
     fun configSnapshot(): ReaderWebConfigStore.Config? = pinnedConfig ?: configProvider()
 
     /**
-     * 用固定旧版公开读路由做一次**有界只读**探测：只读 `/getBookSources` 开头 16 KB，
-     * 确认返回是否是 Legado ReturnData。不回传任何书源内容。
+     * 用固定旧版公开读路由做一次**有界只读**探测：先哨兵 `/getBookSource`，
+     * 失败再读 `/getBookSources` 开头 16 KB。确认返回是否是 Legado ReturnData。
+     * 不回传任何书源内容，不拉全库。
      */
     suspend fun legacyReadAvailable(): Boolean = withContext(Dispatchers.IO) {
         legacyReadLikely(contextOrThrow(), null)
@@ -1142,13 +1146,19 @@ class ReaderWebClient private constructor(
 
     /**
      * 用固定旧版公开读路由核实「这个地址是不是阅读」。
-     * 已知书源 URL 时用小体积的 `/getBookSource?url=`；否则只读 `/getBookSources` 的开头若干 KB。
+     * 已知书源 URL 时用小体积的 `/getBookSource?url=`；否则先打哨兵
+     * `/getBookSource?url=LEGACY_PROBE_SENTINEL`（小响应、必含 isSuccess），
+     * 失败再有界读取 `/getBookSources` 前 16 KB。不扫端口、不拉全库。
      * 只认 Legado ReturnData 的形状；任何 HTTP 错误、HTML、JSON 解析失败都返回 false。
      */
     private fun legacyReadLikely(ctx: Ctx, knownSourceUrl: String?): Boolean {
         val url = knownSourceUrl?.trim()?.takeIf { it.isNotEmpty() }
-        val path = if (url == null) PATH_LEGACY_SOURCES else PATH_LEGACY_SOURCE
-        val query = if (url == null) emptyMap() else mapOf("url" to url)
+        if (url != null) return probeReturnData(ctx, PATH_LEGACY_SOURCE, mapOf("url" to url))
+        if (probeReturnData(ctx, PATH_LEGACY_SOURCE, mapOf("url" to LEGACY_PROBE_SENTINEL))) return true
+        return probeReturnData(ctx, PATH_LEGACY_SOURCES, emptyMap())
+    }
+
+    private fun probeReturnData(ctx: Ctx, path: String, query: Map<String, String>): Boolean {
         return try {
             val reply = execute(
                 ctx,
@@ -1164,7 +1174,7 @@ class ReaderWebClient private constructor(
                 ),
             )
             isReturnDataShape(reply)
-        } catch (error: ReaderWebException) {
+        } catch (_: ReaderWebException) {
             false
         }
     }
@@ -1177,8 +1187,9 @@ class ReaderWebClient private constructor(
             val root = runCatching { JsonParser.parseString(text) }.getOrNull() as? JsonObject ?: return false
             return root.get("isSuccess")?.isJsonPrimitive == true && (root.has("data") || root.has("errorMsg"))
         }
-        // 截断时只核对开头是否具备 ReturnData 的关键字段，不把整包读进内存
-        return text.contains("\"isSuccess\"") && (text.contains("\"data\"") || text.contains("\"errorMsg\""))
+        // 截断时不把整包读进内存：isSuccess 在开头，或 data 数组在前（909 源的 7MB 包常把 isSuccess 放末尾）
+        if (text.contains("\"isSuccess\"") && (text.contains("\"data\"") || text.contains("\"errorMsg\""))) return true
+        return Regex("\"data\"\\s*:\\s*\\[").containsMatchIn(text)
     }
 
     /**

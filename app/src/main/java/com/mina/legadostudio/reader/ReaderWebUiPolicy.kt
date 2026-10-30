@@ -27,12 +27,15 @@ object ReaderWebUiPolicy {
     /** 单次填充的文本上限。 */
     const val MAX_FILL_TEXT_CHARS = 20_000
 
+    /** 快照扫描可导出的元素上限（与回包 `limit` 不是同一层）。 */
+    const val MAX_SNAPSHOT_ELEMENTS = 80
+
     /** 快照体积上限。JS 侧先截断，解析侧再按同一组上限兜底，避免自定义页面绕过注入脚本。 */
     data class Limits(
         val maxTitleChars: Int = 200,
         val maxPathChars: Int = 400,
         val maxTextChars: Int = 12_000,
-        val maxElements: Int = 80,
+        val maxElements: Int = MAX_SNAPSHOT_ELEMENTS,
         val maxElementTextChars: Int = 160,
         val maxSelectorChars: Int = 400,
         val maxHrefChars: Int = 512,
@@ -305,9 +308,9 @@ node=parent;guard++;
 return parts.join(" > ");
 }
 function idxWithin(el,sel){try{var list=document.querySelectorAll(sel);for(var i=0;i<list.length;i++){if(list[i]===el)return i;}}catch(e){}return 0;}
-var nodes=document.querySelectorAll(Q),out=[];
+var nodes=document.querySelectorAll(Q),out=[],capped=false;
 for(var i=0;i<nodes.length;i++){
-if(out.length>=L.e)break;
+if(out.length>=L.e){capped=true;break;}
 var el=nodes[i];
 try{
 var st=window.getComputedStyle?window.getComputedStyle(el):null;
@@ -342,7 +345,7 @@ if(title.length>L.k)title=title.substring(0,L.k);
 var path="";try{path=(location.pathname||"")+(location.search||"")+(location.hash||"");}catch(e4){}
 if(path.length>L.p)path=path.substring(0,L.p);
 var href="";try{href=String(location.href||"");}catch(e5){}
-return JSON.stringify({ok:true,href:href,title:title,path:path,text:text,candidates:nodes.length,elements:out});
+return JSON.stringify({ok:true,href:href,title:title,path:path,text:text,candidates:nodes.length,capped:capped,elements:out});
 }catch(e){return JSON.stringify({ok:false,code:"SNAPSHOT_ERROR"});}})()
 """.trimIndent()
 
@@ -544,6 +547,7 @@ return JSON.stringify({ok:true});
             "elements" to elements.map { it.toPayload() },
             "elementCount" to elements.size,
             "elementLimitReached" to elementLimitReached,
+            "elementScanLimitReached" to elementLimitReached,
         )
     }
 
@@ -567,9 +571,12 @@ return JSON.stringify({ok:true});
         val href = root.stringOrNull("href")
         if (href == null || Origin.fromUrl(href) != origin) return SnapshotParse.OffOrigin
 
-        val elements = parseElements(root.get("elements") as? JsonArray, origin, limits)
+        val array = root.get("elements") as? JsonArray
+        val elements = parseElements(array, origin, limits)
         val candidates = root.get("candidates")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }
             ?.let { runCatching { it.asInt }.getOrNull() }
+        val capped = root.get("capped")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }
+            ?.let { runCatching { it.asBoolean }.getOrNull() }
         val normalizedText = normalizeBody(root.stringOrNull("text").orEmpty())
         return SnapshotParse.Ok(
             Snapshot(
@@ -578,9 +585,32 @@ return JSON.stringify({ok:true});
                 text = takeChars(normalizedText, limits.maxTextChars),
                 textTruncated = normalizedText.length > limits.maxTextChars,
                 elements = elements,
-                elementLimitReached = (candidates ?: elements.size) > elements.size,
+                elementLimitReached = scanLimitReached(
+                    candidates = candidates,
+                    exportedCount = array?.size() ?: 0,
+                    parsedCount = elements.size,
+                    maxElements = limits.maxElements,
+                    capped = capped,
+                ),
             ),
         )
+    }
+
+    /**
+     * 快照扫描上限是否触顶。隐藏/零尺寸节点被过滤、候选数大于导出数，都不算触顶。
+     * 与回包 `limit`/`hasMoreElements` 不是同一层。
+     */
+    fun scanLimitReached(
+        candidates: Int?,
+        exportedCount: Int,
+        parsedCount: Int,
+        maxElements: Int,
+        capped: Boolean?,
+    ): Boolean {
+        if (capped == true) return true
+        if (parsedCount >= maxElements && exportedCount > parsedCount) return true
+        if (capped == false) return false
+        return parsedCount >= maxElements && (candidates ?: parsedCount) > parsedCount
     }
 
     private fun parseElements(array: JsonArray?, origin: Origin, limits: Limits): List<Element> {

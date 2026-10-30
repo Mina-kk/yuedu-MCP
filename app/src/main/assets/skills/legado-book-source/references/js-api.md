@@ -40,40 +40,54 @@
 | nextChapterUrl | 下一章节 url |
 | fromBookInfo | 是否为详情页刷新（官方绑定名，无 is 前缀） |
 
+> **规则 JS 里没有 `url` 变量。** 取当前页地址用 `baseUrl`；`@js:url`、`<js>url</js>` 在阅读端会报 `ReferenceError: “url” 未定义`（沙箱同样报错）。`url` 只作为局部变量（如 `var url = ...`）或对象字段（如 `chapter.url`）出现。
+>
+> **`getString` vs `getStringList`：链式 `@js` 的 `result` 类型不同。** `content` 等字段走 `getString()`，`result` 是 **String**（多元素已 join）；`nextContentUrl` / `nextTocUrl` 走 `getStringList(..., isUrl=true)`，`result` 是 **Java List**。list 型规则第一句先 `var s = '' + result`。
+>
+> **`isUrl=true` 时空串。** 阅读会把空串解析成当前页 URL，分页可能停在本页或打穿后续章节。工坊 `--` 正文通道没有 `mNextChapterUrl` 哨兵，空串会 **skip** 并在日志打 `nextContentUrl <empty> (skipped)`，避免跟成当前页。这是通道保护，与阅读差异见 [`content-rules.md`](content-rules.md)。
+
 ## java 对象方法
 
 函数带有默认值的函数会自动重载，可以不填。
 
 ### Studio 沙箱可用 API 清单（与原版阅读的差异）
 
-> 本节针对 Studio 沙箱（MCP 工具 `eval_js` / `debug_source` / `save_source`）内的 JS 环境。沙箱的 `java` 对象由 `StudioJsApi` 提供，与原版阅读并不完全一致：**清单之外的方法缺一个都报错**，写书源前先对照本节，不要按上文原版阅读的清单想当然。
+> 本节清单描述的是 Studio 沙箱（MCP 工具 `eval_js` / `debug_source` / `save_source`）已实现的 JS 范围，不代表目标阅读端的完整能力。清单之外的 `java.*`、`Packages`、`org.jsoup` 等在真实阅读端通常可用；沙箱报缺失或签名不支持时属于沙箱限制。保留原写法，以阅读端日志为准，禁止为让沙箱通过而改写规则。
 >
 > **每次 `eval_js` 都是全新作用域**：上一次调用里 `var` 声明的变量、对原型的改动都不会带到下一次；要跨调用存取走 `cache.put`/`cache.get`。报错信息若命中「方法/属性不存在」会自带【API 提示】指回本清单，按提示核对方法名与参数个数即可。
 >
-> **jsLib（书源级 JS 库）**：`debug_source` / `check_source` 会把 BookSource JSON 的 `jsLib` 字段装载进 Rhino 作用域，之后 searchUrl `{{}}`/`@js:`、bookList、目录、正文等所有规则 JS 都能直接调用其中声明的函数与顶层 `var`。隔离语义：jsLib 在独立的父层作用域求值——规则表达式里同名 `var`/赋值只遮蔽当次求值，下一次求值 jsLib 函数仍然干净；jsLib 顶层 `var` 每次求值重新初始化，不跨调用累积。jsLib 里 `const {java, source} = this` 的惯用法可用（`this` 在调用点解析到当次作用域，`java`/`source`/`cache`/`cookie` 绑定照常生效）。**沙箱不加载外部 jsLib**：`jsLib` 值是 `http(s)://...` 时不会发起网络请求，只在 debug 报告的 `lines` 里留一条诊断；外链库请把需要的函数内联进 `jsLib`。`eval_js` 不传 source，不会装载任何 jsLib。
+> **jsLib（书源级 JS 库）**：`debug_source` / `check_source` 会把 BookSource JSON 的 `jsLib` 字段装载进 Rhino 作用域，之后 searchUrl `{{}}`/`@js:`、bookList、目录、正文等所有规则 JS 都能直接调用其中声明的函数与顶层 `var`。隔离语义：jsLib 在独立的父层作用域求值——规则表达式里同名 `var`/赋值只遮蔽当次求值，下一次求值 jsLib 函数仍然干净；jsLib 顶层 `var` 每次求值重新初始化，不跨调用累积。
+>
+> **jsLib 顶层没有规则绑定。** 函数外不要使用 `java` / `source` / `cookie` / `cache` / `baseUrl` / `result`。函数被规则 JS 调用时，绑定依目标阅读分支：部分分支的 `this` 指向当次规则作用域，函数开头 `const {java, source, cookie, cache} = this` 可用；部分分支 `this` 不是规则作用域，应在规则侧把 `java`/`source` 等作为参数传入（`myFn(java, source, key)`）。沙箱里 `this` 解构能跑，不代表目标阅读端同样绑定；以阅读端日志为准，不要为迁就沙箱改绑定方式。
+>
+> **沙箱不加载外部 jsLib**：`jsLib` 值是 `http(s)://...` 时不会发起网络请求，只在 debug 报告的 `lines` 里留一条诊断；这是沙箱限制，不要仅为沙箱而把外链库内联，保留原写法并用阅读端实测。`eval_js` 不传 source，不会装载任何 jsLib。沙箱能执行 jsLib 不等于阅读端通过。
 
 沙箱内 `java` 对象实际提供的方法（以 `RhinoEvaluator.kt` 的 `StudioJsApi` 为准）：
 
 **网络：**
 ```js
-java.ajax(url)
+java.ajax(url)                // 返回响应体字符串。阅读端第一参可解析 AnalyzeUrl 行内选项
+                              // `https://example.com/api,{JSON}`（method/body/header/webView/webJs 与 searchUrl 同形）。
+                              // 沙箱是否同解析以阅读端为准，不要为沙箱改写法。
 java.connect(url)
 java.connect(url, header)
 java.connect(url, header, methodOrTimeout)   // 第3参 "GET"/"POST"/"HEAD" 视为请求方法，否则当 timeout
 java.connect(url, header, method, body)
 java.connect(url, header, method, body, charset)
-java.get(url, headers?)
-java.post(url, body, headers?)
+java.get(url, headers?)       // 第一参是普通 URL，不要拼 `,JSON`；headers 为 Map 或 JSON 字符串
+java.post(url, body, headers?) // 同上：URL / body / headers 分参，不要把选项塞进 URL
 java.fetchFont(url)             // Studio 沙箱专有：仅放行字体响应（font/* Content-Type 或 .woff/.woff2/.ttf/.otf
                                 // URL，且前 4 字节魔数为 wOF2/wOFF/TTF/OTTO），返回原始 ByteArray，其余一律报错
 java.decodeWoff2(data)          // Studio 沙箱专有：解 WOFF2（内部 Brotli）/WOFF/TTF/OTTO 的 cmap；
                                 // 入参 ByteArray 或 base64 字符串；返回 {"U+4E2D":1,...} 码点→glyphId。
-                                // 注意：glyphId 是字形序号，不等于汉字；gid→汉字要字形轮廓比对
+                                // glyphId 是字形序号，不等于汉字。cmap 在 glyf 被变换时仍可能可读；
+                                // gid→汉字不是只能轮廓比对，见下方「字体查询边界」。
 java.queryTTF(data)             // 官方同名 API：解析字体为 QueryTTF（码点↔字形轮廓指纹映射）。
                                 // 入参 ByteArray / base64 字符串 / http(s) URL（URL 走 fetchFont 同套抓取校验）。
                                 // 支持 TTF/OTF/WOFF/WOFF2：woff/woff2 自动解包成 sfnt；
                                 // 限制：woff2 的 glyf/loca 若带 transformed glyf（transformVersion≠3）
-                                // 会报错（沙箱未实现逆变换），请换未变换的 woff2/woff/ttf 或先用工具转成 TTF。
+                                // 轮廓解析会报错（沙箱未实现逆变换）。这只说明本路径拿不到轮廓，
+                                // **不等于**阅读端不可解，也不要求为此改书源或先转 TTF。
                                 // 结果按字体字节 sha256 缓存（LRU 8 份），同字体重复调用不重解析。
                                 // 返回对象方法：getGlyfByUnicode(码点) 取轮廓指纹、getGlyfIdByUnicode(码点)
                                 // 取 glyphId、getUnicodeByGlyf(指纹) 反查码点、isBlankUnicode(码点)、
@@ -88,18 +102,40 @@ java.replaceFont(text, errFont, correctFont[, filter])
                                 //   var err = java.queryTTF(java.fetchFont("https://x/enc.woff2"));
                                 //   var ok  = java.queryTTF("https://x/orig.ttf");
                                 //   java.replaceFont(正文, err, ok, true)
-                                // 若确认字体只是 GB2312 顺序 gid 映射（无需轮廓），也可继续用
-                                // decodeWoff2 拿码点→gid 再按 gid 表映射——两条路都支持。
+                                // 轮廓比对只是路径之一。确认只是 GB2312 顺序 gid 映射时，可用
+                                // decodeWoff2 拿码点→gid 再按 gid 表映射。
 java.ajaxAll(urls)
-java.webView(url)             // 单参形式：loadUrl 抓渲染后页面
+java.webView(url)             // 单参形式：loadUrl 抓渲染后页面（仅当 java.webView 可调用）
 java.webView(html, url, js)   // 三参形式：html 非空时以 url 为 baseURL 直接渲染交接文档（loadDataWithBaseURL），
                               // html 为 null/空白仍 loadUrl；url 必须是公网 http/https（拒绝 file/javascript/回环私网），
-                              // js 返回 null 会按固定间隔轮询重试直到超时
+                              // js 返回 null 会按固定间隔轮询重试直到超时。页内异步解码把脚本放进 jsLib 函数返回，
+                              // 不要把超长字面量写进规则；路径差异见 webjs.md。
+                              // 部分阅读分支上 java.webView 是 object 不是函数（调用报「不是函数，它是 object」）。
+                              // 跨分支优先 URL 选项 {"webView":true,"webJs":"..."}，不要默认三参调用。
+                              // 沙箱可调用不代表目标阅读端可调用。
 java.startBrowserAwait(url, title?, refetch?, html?) // 创建 webview 验证会话→用户在手机验证中心 WebView 过盾→沙箱 WebView 通道抓该 URL（html 非空作交接文档）返回整页源码 StrResponse；取消/超时返回空 body
 java.getVerificationCode(imageUrl) // 单次受限 HTTP 拉真实图片（PNG/JPEG/GIF/WebP，最多 2MB）→手机验证中心看图输入（最长 120 秒）；取消/超时返回空串，拉图失败抛错
 ```
 
+**字体查询边界（沙箱 `queryTTF` 失败 ≠ 阅读端不可解）：**
+
+1. 先核对**未变换**的 `cmap` / `post` / `name` 表。`decodeWoff2` / `fetch_font` 读 cmap 时，glyf 被变换通常仍能给出码点→glyphId；这不等于汉字，但说明字体不是「完全不可解析」。
+2. `queryTTF` 报 transformed glyf（`transformVersion≠3`）只说明**轮廓路径**在该环境拿不到 glyf 逆变换。禁止据此改书源、宣称正文不可解、或要求先转 TTF。
+3. 轮廓比对（`queryTTF` + `replaceFont`）不是唯一途径。页内异步解码（站点自己的 JS/WASM）可通过 jsLib 函数**返回** webJs 字符串。跨分支优先写进 URL 选项 `{"webView":true,"webJs":...}`；仅当目标阅读端 `java.webView` 可调用时才用三参 `java.webView(html, url, js)`。不要把超长解码字面量写进规则。路径超时差异见 [`webjs.md`](webjs.md)：`@webjs:` 固定 10 秒；`--章节URL` 未带 `webView:true` 时 `contentRule.webJs` 不执行。
+4. 沙箱不作规则标准。字体结论以阅读端 `--章节URL` / 网页正文实测为准；沙箱失败、阅读端已解，保留原写法并登记 `sandbox_divergent`。
+
 图片验证码请求拒绝私网入口、DNS/重定向私网以及 HTML/CF 挑战响应，不写入图片日志。403/Cloudflare 时先用本手机验证中心在**原站页面**人工过盾再重试；图片本身不经 WebView，Cookie/通行态跨 HTTP/WebView 通道复用不保证成功。不要反复请求一次性图片 URL；详见 [`verification.md`](verification.md)。
+
+**`java.ajax` 与 `java.get` / `java.post` 参数不是同一套：**
+
+| 方法 | 第一参 | 其余参数 | 典型用途 |
+|---|---|---|---|
+| `java.ajax(urlStr)` | 可解析 AnalyzeUrl 行内选项：`https://example.com/api,{JSON}`（`method`/`body`/`header`/`webView`/`webJs` 等与 searchUrl 同形） | 可选 timeout | 规则里复用 searchUrl 那种 `url,{JSON}` 字符串，返回响应体 |
+| `java.get(url, headers?, timeout?)` | **普通 URL**，不要拼 `,JSON` | headers 为 Map 或 JSON 字符串 | 只要 GET 与自定义头 |
+| `java.post(url, body, headers?, timeout?)` | **普通 URL** | body、headers 分参传入 | POST 表单或 JSON 正文 |
+| `java.connect(url, ...)` | 沙箱会解析 URL 选项；阅读端以目标版本为准 | 后续 header/method/body/charset | 需要状态码、响应头、重定向链 |
+
+把 `"url," + JSON.stringify({method:"POST", body:...})` 传给 `java.get` / `java.post` 会把整段当 URL，请求失败。需要行内选项时用 `java.ajax` 或 `java.connect`。headers 传 `null`/`undefined` 在部分阅读分支会 NPE，空头传 `{}`。沙箱签名与阅读端不必相同，保留阅读端写法。
 
 **工坊 POST 编码边界：** 普通 `searchUrl` 模板先对 `{{key}}` 作 UTF-8 表单编码，再解析 `,{...}` 请求选项，因此 body 内的 `{{key}}` 也会编码（空格为 `+`，字面加号为 `%2B`）。`@js:` 使用原始 `key` 变量；其返回选项的 body 与 `java.post` 的 body 按脚本构造值发送，不会自动再编码。需要百分号编码时显式调用 `java.encodeURI(key)`（空格为 `%20`）；JSON 或其他非表单正文应自行构造并设置对应 Content-Type。不要将这几条路径视为相同的自动编码入口，也不要把模板中已编码的值再次编码。
 
@@ -150,7 +186,7 @@ java.setCookie(url, cookie)
 ```js
 java.lang.Thread.sleep(ms)   // 仅此一个 java.lang 用法可用
 ```
-> 注意：部分阅读分支没有 `java.lang`（真机报 `jl=undefined` / TypeError），沙箱能跑不代表阅读端能跑。要兼容多个阅读分支，睡眠写 `Packages.java.lang.Thread.sleep(ms)`，并以 `reader_web_debug` 的阅读端日志为准。
+> 注意：部分阅读分支没有 `java.lang`（真机报 `jl=undefined` / TypeError），以目标阅读端为准。沙箱的 `java.lang` 支持范围不能推断阅读端能力；不要仅为迁就沙箱改写，保留原写法并以 `reader_web_debug` 日志判断。
 
 **全局同名对象：**
 ```js
@@ -197,12 +233,12 @@ chapter.putVariable(key, value) / chapter.getVariable(key?)
 chapter.putLyric(v) / chapter.putImgUrl(v) / chapter.update()
 ```
 
-**明确不可用（写了必报错，不要用）：**
+**Studio 沙箱限制（不代表目标阅读端不可用）：**
 
-- `java.lang.*` 除 `Thread.sleep` 外全部不可用（`java.util.List`、`java.lang.System` 等都拿不到）；需显式构造 String 对象用 `new Packages.java.lang.String(...)`，没有 `new java.lang.String(...)`
-- `java.currentTimeMillis` / `java.decodeURI` / `java.utf8ToGbk` / `java.getElement` / `java.getElements`：任何环境都没有，别按「原版清单」想当然
-- `java.bytesToStr` 是 Studio 沙箱专有，官方 App 未验证；跨环境书源字节转字符串一律用标准两件套 `java.base64DecodeToByteArray(s)` + `new Packages.java.lang.String(bytes, "UTF-8")`
-- （仅 Studio 沙箱）`org.jsoup.Jsoup.parse` 等 Java 包路径直调不可用（报「parse 不是函数，它是 object」一类错误）；**沙箱注入了全局 `Jsoup` 代理对象**，用 `Jsoup.parse(html)` / `Jsoup.parseBodyFragment(html)` / `Jsoup.connect(url)` 代替；官方 App 中 `org.jsoup.Jsoup` 直调可用，但两环境下都建议优先 `java.getString`/`@css:` 规则
+- 沙箱中 `java.lang.*` 除 `Thread.sleep` 外不可用（如 `java.util.List`、`java.lang.System`）；字符串构造可用 `new Packages.java.lang.String(...)`。真实阅读端的可用性依目标分支，以阅读端日志为准。
+- 沙箱未实现 `java.currentTimeMillis` / `java.decodeURI` / `java.utf8ToGbk` / `java.getElement` / `java.getElements`；不要据此推断目标阅读端也不可用，保留原写法并在阅读端实测。
+- `java.bytesToStr` 是 Studio 沙箱专有，官方 App 未验证；需要跨环境时先以目标阅读端实测确认，不要仅为沙箱改写规则。
+- 沙箱的 `org.jsoup.Jsoup.parse` 等 Java 包路径直调可能不可用（例如报「parse 不是函数，它是 object」）；沙箱注入了全局 `Jsoup` 代理对象。真实阅读端通常可用 `org.jsoup.Jsoup`；沙箱报错时属于沙箱限制，保留原写法并以阅读端日志为准。
 - Rhino 里 java 方法返回的 `java.lang.String` 直接 `.replace(/正则/, ...)` 会报「选择不明确」，必须先 `String()` 包一层；域名等纯文本替换直接 `.replace("a","b")`
 - `'+'` 拼接产生的是 ConsString，直接传给 java 方法当 `java.lang.String` 参数可能 `ClassCastException`，包 `String()` 兜底
 
@@ -312,7 +348,7 @@ java.setContent(content: Any?, baseUrl: String? = null)
 ```
 
 **获取 Element/Element 列表：**
-> 官方 App 的 `AnalyzeRule` 有 `getElement/getElements`，但 **Studio 沙箱未实现，调试期调用必报错**；取元素一律改用 CSS 选择器 + `java.getString('div.x@text', html)`，列表用 `java.getStringList`。
+> 官方 App 的 `AnalyzeRule` 有 `getElement/getElements`，但 **Studio 沙箱未实现，沙箱调试期调用会报错**。若只需在沙箱取证，可用 CSS 选择器 + `java.getString('div.x@text', html)` / `java.getStringList`；不要仅为沙箱而改写规则，原写法以目标阅读端实测为准。
 ```js
 java.getElement(ruleStr: String)
 java.getElements(ruleStr: String)
@@ -345,7 +381,7 @@ java.getWebViewUA(): String
 
 **网络请求：**
 ```js
-// 普通请求
+// 普通请求。urlStr 可带 AnalyzeUrl 行内选项：`https://example.com/api,{JSON}`
 java.ajax(urlStr, callTimeout: Int? = null): String
 
 // 并发访问网络，skipRateLimit 为 true 时不受源并发率限制
@@ -359,12 +395,13 @@ java.ajaxTestAll(urlList: Array<String>, timeout: Int, skipRateLimit: Boolean = 
 // 连接请求，返回 StrResponse 对象具有方法：body() code() message() headers() raw() toString() callTime()
 java.connect(urlStr, header = null, callTimeout: Int? = null): StrResponse
 
-// POST / GET / HEAD 请求
+// POST / GET / HEAD：url 是普通地址，不要拼 `,JSON`；body/headers/timeout 走后续参数
 java.post(url: String, body: String, headerMap: Map<String, String>, timeout: Int? = null): Connection.Response
 java.get(url: String, headerMap: Map<String, String>, timeout: Int? = null): Connection.Response
 java.head(url: String, headerMap: Map<String, String>, timeout: Int? = null): Connection.Response
 
 // 使用 webView 访问网络（html 非空时以 url 为 baseURL 内嵌渲染交接文档，等价官方 loadDataWithBaseURL 路径）
+// 部分阅读分支上 java.webView 是 object 不是函数；跨分支优先 URL {"webView":true,"webJs":"..."}
 java.webView(html: String?, url: String?, js: String?, cacheFirst: Boolean = false): String?
 
 // 使用 webView 获取跳转 url
@@ -780,7 +817,7 @@ cache.deleteMemory(key: String)              // 删除内存
 
 ## URL 选项参考
 
-URL 末尾以 `,{JSON}` 追加行内选项，格式如 `https://example.com/page,{"webView":true}`。
+URL 末尾以 `,{JSON}` 追加行内选项，格式如 `https://example.com/page,{"webView":true}`。这是跨阅读分支最稳妥的 WebView 路径：部分分支上 `java.webView` 不可调用，但 URL 选项 `webView` + `webJs` 仍走阅读自己的页面加载。`java.ajax` 的第一参也可带同一套选项；`java.get` / `java.post` 不行。
 
 | 选项 | 类型 | 说明 |
 |------|------|------|

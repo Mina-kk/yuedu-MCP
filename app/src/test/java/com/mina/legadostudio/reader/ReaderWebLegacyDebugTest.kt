@@ -29,6 +29,40 @@ class ReaderWebLegacyDebugTest {
 
     // ---- 目标派生（纯逻辑） ----
 
+    @Test fun logOffsetParserAndHeadIncompleteAreIndependentOfInlineTail() {
+        assertEquals(1L, ReaderWebLegacyDebugClient.parseLogOffsetMs("[00:00.001] ⇒开始搜索关键字:玄鉴仙族"))
+        assertEquals(1653L, ReaderWebLegacyDebugClient.parseLogOffsetMs("[00:01.653] └http://example.test/cover.jpg"))
+        assertEquals(2424L, ReaderWebLegacyDebugClient.parseLogOffsetMs("[00:02.424] ┌获取封面链接"))
+        assertNull(ReaderWebLegacyDebugClient.parseLogOffsetMs("︾开始搜索关键字 我的"))
+        assertFalse(
+            "完整原记录从 0ms 开始不算缺开头",
+            ReaderWebLegacyDebugClient.logsHeadIncomplete(
+                listOf("[00:00.001] ⇒开始搜索关键字:玄鉴仙族", "[00:01.653] └cover"),
+            ),
+        )
+        assertTrue(
+            "首行已过 1s 且没有搜索起始行，才标原记录缺开头",
+            ReaderWebLegacyDebugClient.logsHeadIncomplete(
+                listOf("[00:01.653] └http://example.test/cover.jpg", "[00:02.424] ┌获取封面链接"),
+            ),
+        )
+        val payload = ReaderWebLegacyDebugClient.Outcome(
+            sourceUrl = "https://book.test/source",
+            keyword = "我的",
+            debugLogs = listOf("[00:00.001] ⇒开始搜索关键字:玄鉴仙族"),
+            frames = 1,
+            bytes = 10,
+            truncated = false,
+            closeCode = 1000,
+            closeReason = "",
+            elapsedMs = 12,
+            completionSignal = true,
+        ).toPayload()
+        assertEquals(false, payload["truncated"])
+        assertEquals(false, payload["debugLogsHeadIncomplete"])
+        assertEquals(1L, payload["debugLogsFirstOffsetMs"])
+    }
+
     @Test fun debugTargetIsAlwaysWebPortPlusOneWithFixedPath() {
         val target = ReaderWebEndpoint.derive("http://192.168.1.8:1122")
         assertEquals("192.168.1.8", target.host)
@@ -411,8 +445,49 @@ class ReaderWebLegacyDebugTest {
             assertTrue(error is ReaderWebLegacyDebugClient.LegacyDebugException)
             val timeout = error as ReaderWebLegacyDebugClient.LegacyDebugException
             assertEquals("TIMEOUT", timeout.code)
+            assertEquals(ReaderWebLegacyDebugClient.TIMEOUT_KIND_IDLE, timeout.observations["timeoutKind"])
             assertTrue("应远早于总超时结束（实际 ${elapsedMs}ms）", elapsedMs < 4_000)
             assertTrue("应带回已收到的日志", timeout.debugLogs.contains("▷ 开始调试"))
+            assertTrue((timeout.observations["framesReceived"] as Int) >= 1)
+            assertTrue(
+                "lastFrameAgoMs=${timeout.observations["lastFrameAgoMs"]}",
+                (timeout.observations["lastFrameAgoMs"] as Long) >= 250,
+            )
+            val payload = timeout.toErrorPayload()
+            assertEquals("legacy_debug_only", payload["status"])
+            assertEquals("unverifiable", payload["machineVerdict"])
+            assertEquals("idle", payload["timeoutKind"])
+        }
+    }
+
+    @Test fun silentOpenChannelHitsTotalTimeoutNotIdle() = kotlinx.coroutines.test.runTest {
+        MockWebServer().use { server ->
+            server.dispatcher = webSocketDispatcher { _, _ ->
+                // 握手后不发帧也不关闭：模拟旧版通道稳定无输出
+                true
+            }
+            server.start()
+            val started = System.nanoTime()
+            val error = runCatching {
+                client(originFor(server)).debug(
+                    sourceUrl = "https://a.test",
+                    keyword = "",
+                    totalTimeoutMs = 900,
+                    handshakeTimeoutMs = 400,
+                    idleTimeoutMs = 200,
+                )
+            }.exceptionOrNull() as ReaderWebLegacyDebugClient.LegacyDebugException
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            assertEquals("TIMEOUT", error.code)
+            assertEquals(ReaderWebLegacyDebugClient.TIMEOUT_KIND_TOTAL, error.observations["timeoutKind"])
+            assertEquals(0, error.observations["framesReceived"])
+            assertNull(error.observations["lastFrameAgoMs"])
+            assertTrue("无帧通道不得被空闲超时提前误断（实际 ${elapsedMs}ms）", elapsedMs >= 600)
+            assertTrue("总超时应收口（实际 ${elapsedMs}ms）", elapsedMs < 4_000)
+            val payload = error.toErrorPayload()
+            assertEquals("legacy_debug_only", payload["status"])
+            assertEquals("total", payload["timeoutKind"])
+            assertEquals(0, payload["framesReceived"])
         }
     }
 
@@ -627,6 +702,122 @@ class ReaderWebLegacyDebugTest {
         assertEquals("unverifiable", payload["machineVerdict"])
         assertEquals("reader_web_legacy_debug", payload["evidenceScope"])
         assertEquals("TOKEN_REQUIRED", payload["errorCode"])
+    }
+
+    @Test fun idleTimeoutDoesNotFireOnSilentChannel() {
+        assertFalse(ReaderWebLegacyDebugClient.idleTimedOut(0, null, 15_000))
+        assertFalse(ReaderWebLegacyDebugClient.idleTimedOut(0, 60_000, 15_000))
+        assertFalse(ReaderWebLegacyDebugClient.idleTimedOut(1, null, 15_000))
+        assertFalse(ReaderWebLegacyDebugClient.idleTimedOut(1, 14_999, 15_000))
+        assertTrue(ReaderWebLegacyDebugClient.idleTimedOut(1, 15_000, 15_000))
+        assertTrue(ReaderWebLegacyDebugClient.idleTimedOut(3, 20_000, 15_000))
+    }
+
+    @Test fun totalTimeoutClampKeepsTwoHundredFloorAndThirtySecondDefaultAndRaisesMaxToOneEighty() {
+        assertEquals(200L, ReaderWebLegacyDebugClient.TOTAL_TIMEOUT_MIN_MS)
+        assertEquals(30_000L, ReaderWebLegacyDebugClient.DEFAULT_TOTAL_TIMEOUT_MS)
+        assertEquals(180_000L, ReaderWebLegacyDebugClient.TOTAL_TIMEOUT_MAX_MS)
+        assertEquals(200L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(0))
+        assertEquals(200L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(199))
+        assertEquals(200L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(200))
+        assertEquals(30_000L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(30_000))
+        assertEquals(120_000L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(120_000))
+        assertEquals(180_000L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(180_000))
+        assertEquals(180_000L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(180_001))
+        assertEquals(180_000L, ReaderWebLegacyDebugClient.clampTotalTimeoutMs(999_999))
+    }
+
+    @Test fun oneEightySecondTotalTimeoutReachesWebSocketInsteadOfBeingCappedAtOneTwenty() =
+        kotlinx.coroutines.test.runTest {
+            MockWebServer().use { server ->
+                server.dispatcher = webSocketDispatcher(onMessage = { socket, _ ->
+                    socket.send("调试完成")
+                    socket.close(1000, "")
+                    true
+                })
+                server.start()
+                val outcome = client(originFor(server)).debug(
+                    sourceUrl = "https://a.test",
+                    keyword = "",
+                    totalTimeoutMs = 180_000,
+                )
+                assertEquals(1000, outcome.closeCode)
+                assertTrue(outcome.completionSignal)
+                assertEquals("/bookSourceDebug", server.takeRequest().path)
+            }
+        }
+
+    @Test fun timeoutErrorPayloadCarriesKindAndTimings() {
+        val idle = ReaderWebLegacyDebugClient.timeoutObservations("idle", 1_800, 1_500, 2)
+        val total = ReaderWebLegacyDebugClient.timeoutObservations("total", 30_000, null, 0)
+        assertEquals("idle", idle["timeoutKind"])
+        assertEquals(1_800L, idle["elapsedMs"])
+        assertEquals(1_500L, idle["lastFrameAgoMs"])
+        assertEquals(2, idle["framesReceived"])
+        assertEquals("total", total["timeoutKind"])
+        assertEquals(0, total["framesReceived"])
+        assertNull(total["lastFrameAgoMs"])
+
+        val payload = ReaderWebLegacyDebugClient.Outcome.errorPayload(
+            "TIMEOUT",
+            "空闲超时",
+            listOf("▷ 开始调试"),
+            idle,
+        )
+        assertEquals("legacy_debug_only", payload["status"])
+        assertEquals("unverifiable", payload["machineVerdict"])
+        assertEquals("reader_web_legacy_debug", payload["evidenceScope"])
+        assertEquals("TIMEOUT", payload["errorCode"])
+        assertEquals("idle", payload["timeoutKind"])
+        assertEquals(1_800L, payload["elapsedMs"])
+        assertEquals(1_500L, payload["lastFrameAgoMs"])
+        assertEquals(2, payload["framesReceived"])
+        assertEquals(listOf("▷ 开始调试"), payload["debugLogs"])
+        assertFalse(payload.toString().contains("PASSED"))
+    }
+
+    @Test fun connectionLostPayloadCarriesCloseAndLostKind() {
+        val noClose = ReaderWebLegacyDebugClient.lostObservations(
+            ReaderWebLegacyDebugClient.LOST_KIND_NO_CLOSE_FRAME, 2_100, 800, 1, null, "",
+        )
+        assertEquals("no_close_frame", noClose["lostKind"])
+        assertNull(noClose["closeCode"])
+        assertEquals("", noClose["closeReason"])
+        assertEquals(2_100L, noClose["elapsedMs"])
+        assertEquals(800L, noClose["lastFrameAgoMs"])
+        assertEquals(1, noClose["framesReceived"])
+
+        val io = ReaderWebLegacyDebugClient.lostObservations(
+            ReaderWebLegacyDebugClient.LOST_KIND_IO_FAILURE, 500, 100, 2, 1006, "abnormal",
+        )
+        assertEquals("io_failure", io["lostKind"])
+        assertEquals(1006, io["closeCode"])
+        assertEquals("abnormal", io["closeReason"])
+
+        val payload = ReaderWebLegacyDebugClient.LegacyDebugException(
+            "CONNECTION_LOST",
+            "阅读调试连接已断开，但没有收到关闭帧",
+            listOf("▷ 开始"),
+            noClose,
+        ).toErrorPayload()
+        assertEquals("legacy_debug_only", payload["status"])
+        assertEquals("CONNECTION_LOST", payload["errorCode"])
+        assertEquals("no_close_frame", payload["lostKind"])
+        assertNull(payload["closeCode"])
+        assertEquals(1, payload["framesReceived"])
+        assertFalse(payload.toString().contains("PASSED"))
+    }
+
+    @Test fun observationsCannotOverwriteLegacyStatus() {
+        val payload = ReaderWebLegacyDebugClient.Outcome.errorPayload(
+            "TIMEOUT",
+            "超时",
+            emptyList(),
+            mapOf("status" to "PASSED", "machineVerdict" to "PASSED", "timeoutKind" to "idle"),
+        )
+        assertEquals("legacy_debug_only", payload["status"])
+        assertEquals("unverifiable", payload["machineVerdict"])
+        assertEquals("idle", payload["timeoutKind"])
     }
 
     // ---- helpers ----

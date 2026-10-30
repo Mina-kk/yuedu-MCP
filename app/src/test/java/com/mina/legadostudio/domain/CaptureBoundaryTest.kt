@@ -52,6 +52,9 @@ class CaptureBoundaryTest {
         assertFalse(LogFilterUtils.isLoopbackOrPrivate("69shu.cx"))
         assertFalse(LogFilterUtils.isLoopbackOrPrivate("203.0.113.5"))
         assertFalse(LogFilterUtils.isLoopbackOrPrivate("8.8.8.8"))
+        assertFalse(LogFilterUtils.isLoopbackOrPrivate("2606:4700:3031::ac43:d3a3"))
+        assertFalse(LogFilterUtils.isLoopbackOrPrivate("https://[2606:4700:3031::ac43:d3a3]/"))
+        assertNull(absoluteGuard("https://[2606:4700:3031::ac43:d3a3]/"))
     }
 
     // ---- redirectGuard 现在收到的是 HttpFetcher resolve 后的绝对 URL ----

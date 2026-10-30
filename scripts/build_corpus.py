@@ -16,6 +16,11 @@ import sys
 from datetime import date
 from urllib.parse import urlparse
 
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from sanitize_corpus import sanitize_source  # noqa: E402
+
 # 白名单字段
 ALLOWED_FIELDS = {
     'bookSourceName',
@@ -93,8 +98,9 @@ def extract_search_method(search_url):
 
 
 def clean_source(raw):
-    """清洗单条书源，只保留白名单字段"""
-    return {k: v for k, v in raw.items() if k in ALLOWED_FIELDS}
+    """白名单字段 + 脱敏（认证值/私网主机替换为无效占位，防止再引入）。"""
+    filtered = {k: v for k, v in raw.items() if k in ALLOWED_FIELDS}
+    return sanitize_source(filtered)
 
 
 def safe_extract_host(url):
@@ -121,11 +127,12 @@ def safe_extract_host(url):
 
 
 def extract_features(raw):
-    """分析单条源的聚类与位掩码特征"""
-    url = str(raw.get('bookSourceUrl', '') or '').strip()
+    """分析单条源的聚类与位掩码特征。先清洗（白名单+脱敏），再对清洗后的信息建索引。"""
+    cleaned = clean_source(raw)
+    url = str(cleaned.get('bookSourceUrl', '') or '').strip()
     host = safe_extract_host(url)
 
-    stype = raw.get('bookSourceType', 0)
+    stype = cleaned.get('bookSourceType', 0)
     try:
         stype = int(stype) if stype is not None else 0
     except (TypeError, ValueError):
@@ -135,22 +142,22 @@ def extract_features(raw):
         except (TypeError, ValueError):
             stype = 0
 
-    su = raw.get('searchUrl', '')
+    su = cleaned.get('searchUrl', '')
     smethod = extract_search_method(su)
 
     # 规则 style
-    rs = raw.get('ruleSearch') or {}
-    rbi = raw.get('ruleBookInfo') or {}
-    rtoc = raw.get('ruleToc') or {}
-    rc = raw.get('ruleContent') or {}
+    rs = cleaned.get('ruleSearch') or {}
+    rbi = cleaned.get('ruleBookInfo') or {}
+    rtoc = cleaned.get('ruleToc') or {}
+    rc = cleaned.get('ruleContent') or {}
 
     book_list_style = rule_style(rs.get('bookList') if isinstance(rs, dict) else rs)
     book_info_style = rule_style(rbi.get('init') or rbi.get('name') if isinstance(rbi, dict) else rbi)
     toc_style = rule_style(rtoc.get('chapterList') if isinstance(rtoc, dict) else rtoc)
     content_style = rule_style(rc.get('content') if isinstance(rc, dict) else rc)
 
-    # 全文 JSON 用于特征搜索
-    raw_str = json.dumps(raw, ensure_ascii=False)
+    # 全文 JSON 用于特征搜索（清洗后，不含认证值/私网主机）
+    raw_str = json.dumps(cleaned, ensure_ascii=False)
 
     uses_js = ('@js' in raw_str) or ('<js>' in raw_str)
     uses_webview = ('webView' in raw_str) or ('webview' in raw_str)
@@ -175,31 +182,30 @@ def extract_features(raw):
     # 32: enabled=false
     # 64: 四段rule不全（缺ruleSearch/ruleBookInfo/ruleToc/ruleContent任一）
     flags = 0
-    if raw.get('enabledCookieJar'):
+    if cleaned.get('enabledCookieJar'):
         flags |= 1
-    if raw.get('loginUrl'):
+    if cleaned.get('loginUrl'):
         flags |= 2
-    if raw.get('loginCheckJs'):
+    if cleaned.get('loginCheckJs'):
         flags |= 4
     if CAPTCHA_RE.search(raw_str):
         flags |= 8
     if CF_RE.search(raw_str):
         flags |= 16
-    if raw.get('enabled') is False:
+    if cleaned.get('enabled') is False:
         flags |= 32
 
-    has_search = bool(raw.get('ruleSearch'))
-    has_book_info = bool(raw.get('ruleBookInfo'))
-    has_toc = bool(raw.get('ruleToc'))
-    has_content = bool(raw.get('ruleContent'))
+    has_search = bool(cleaned.get('ruleSearch'))
+    has_book_info = bool(cleaned.get('ruleBookInfo'))
+    has_toc = bool(cleaned.get('ruleToc'))
+    has_content = bool(cleaned.get('ruleContent'))
     is_complete = has_search and has_book_info and has_toc and has_content
     if not is_complete:
         flags |= 64
 
-    cleaned = clean_source(raw)
     cleaned_bytes = len(json.dumps(cleaned, ensure_ascii=False).encode('utf-8'))
 
-    name = str(raw.get('bookSourceName', '') or '')
+    name = str(cleaned.get('bookSourceName', '') or '')
 
     return {
         'host': host,
@@ -209,7 +215,7 @@ def extract_features(raw):
         'cluster_key': cluster_key,
         'flags': flags,
         'is_complete': is_complete,
-        'enabled': raw.get('enabled') is not False,
+        'enabled': cleaned.get('enabled') is not False,
         'cleaned': cleaned,
         'size': cleaned_bytes,
         'url': url,

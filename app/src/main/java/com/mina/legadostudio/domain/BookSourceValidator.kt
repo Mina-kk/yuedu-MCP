@@ -5,6 +5,19 @@ import com.google.gson.annotations.SerializedName
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.htmlunit.corejs.javascript.CompilerEnvirons
+import org.htmlunit.corejs.javascript.Context
+import org.htmlunit.corejs.javascript.Parser
+import org.htmlunit.corejs.javascript.Token
+import org.htmlunit.corejs.javascript.ast.Assignment
+import org.htmlunit.corejs.javascript.ast.AstNode
+import org.htmlunit.corejs.javascript.ast.CatchClause
+import org.htmlunit.corejs.javascript.ast.FunctionCall
+import org.htmlunit.corejs.javascript.ast.FunctionNode
+import org.htmlunit.corejs.javascript.ast.Name
+import org.htmlunit.corejs.javascript.ast.ObjectProperty
+import org.htmlunit.corejs.javascript.ast.PropertyGet
+import org.htmlunit.corejs.javascript.ast.VariableInitializer
 
 class BookSourceValidator {
     /**
@@ -25,7 +38,7 @@ class BookSourceValidator {
      */
     private fun checkHttpUrl(path: String, raw: String, allowRelative: Boolean, issues: MutableList<Issue>) {
         if (raw.isBlank()) return
-        if (raw.startsWith("@js:")) return // JS 模板由运行时求值，不在这条静态校验里展开
+        if (raw.startsWith("@js:", ignoreCase = true)) return
         val withoutIdentity = stripIdentity(raw)
         if (withoutIdentity.startsWith("http://") || withoutIdentity.startsWith("https://")) {
             if (withoutIdentity.toHttpUrlOrNull() == null) {
@@ -98,8 +111,8 @@ class BookSourceValidator {
 
         val ruleSearch = objectOrNull(obj, "ruleSearch")
         if (!searchUrl.isNullOrBlank()) {
-            if (!searchUrl.contains("{{key}}") && !searchUrl.contains("key") && !searchUrl.startsWith("@js:")) {
-                issues += Issue("searchUrl", "搜索 URL 应包含 {{key}} 或 JavaScript key")
+            if (jsSegments(searchUrl).none { "key" in RuleJsInspection.unresolvedReads(it, setOf("key")) }) {
+                warnings += Issue("searchUrl", "未静态识别到搜索关键词 key 的引用；请在阅读端用站内真实书名检查实际请求，不因该提示自动改写动态搜索规则")
             }
             if (ruleSearch == null || text(ruleSearch, "bookList").isNullOrBlank()) {
                 issues += Issue("ruleSearch.bookList", "启用搜索时必须配置书籍列表规则")
@@ -127,7 +140,149 @@ class BookSourceValidator {
         if (toc == null || text(toc, "chapterList").isNullOrBlank()) {
             issues += Issue("ruleToc.chapterList", "目录列表规则不能为空")
         }
+        ruleSearch?.let { text(it, "checkKeyWord") }?.trim()?.takeIf { it.length == 1 }?.let {
+            warnings += Issue("ruleSearch.checkKeyWord", "校验关键词「$it」是单字，站点常拒绝或返回空结果；建议改为站内真实存在的书名（≥2 字）")
+        }
+        bareUrlWarnings(obj, warnings)
+        // jsLib 装载阶段与规则 JS 不同：阅读旧分支顶层可能没有 source/cookie/cache，
+        // java.webView 可能是 object 不是函数；沙箱却可能跑通。只 warning，不改写、不拦保存。
+        text(obj, "jsLib")?.let { jsLibPortabilityWarnings(it, warnings) }
         return Report(issues, warnings)
+    }
+
+    private fun bareUrlWarnings(obj: JsonObject, warnings: MutableList<Issue>) {
+        val fields = mutableListOf<Pair<String, String>>()
+        listOf("searchUrl", "exploreUrl", "loginUrl", "header", "loginUi", "loginCheckJs", "jsLib").forEach { key ->
+            text(obj, key)?.let { fields += key to it }
+        }
+        RULE_OBJECTS.forEach { ruleKey ->
+            objectOrNull(obj, ruleKey)?.entrySet()?.forEach { (key, value) ->
+                if (value.isJsonPrimitive && value.asJsonPrimitive.isString) fields += "$ruleKey.$key" to value.asString
+            }
+        }
+        for ((path, rule) in fields) {
+            val segments = jsSegments(rule).ifEmpty {
+                if (path == "loginCheckJs" || path == "jsLib" && !rule.trim().startsWith("http", ignoreCase = true)) listOf(rule)
+                else emptyList()
+            }
+            val names = segments.flatMap { RuleJsInspection.unresolvedReads(it, setOf("url", "isFromBookInfo")) }.toSet()
+            if ("url" in names) {
+                warnings += Issue(path, "规则 JS 疑似引用未声明的 url；它不是阅读规则的通用内置变量，取当前页地址通常使用 baseUrl。若未由 jsLib 或前序脚本定义，沙箱与阅读端均可能报 ReferenceError；请在目标阅读端核对，不自动改写规则")
+            }
+            if ("isFromBookInfo" in names) {
+                warnings += Issue(path, "规则 JS 疑似引用未声明的 isFromBookInfo；不要依赖沙箱额外注入的变量，请核对目标阅读版本与该阶段实际提供的变量，不能直接替换成固定值")
+            }
+        }
+    }
+
+    private fun jsLibPortabilityWarnings(jsLib: String, warnings: MutableList<Issue>) {
+        val script = jsLib.trim()
+        if (script.isEmpty()) return
+        if (script.startsWith("http://", ignoreCase = true) || script.startsWith("https://", ignoreCase = true)) return
+        val environment = CompilerEnvirons().apply { languageVersion = Context.VERSION_ES6 }
+        val root = runCatching { Parser(environment).parse(script, "jsLib", 1) }.getOrNull() ?: return
+        val identifiers = setOf("source", "java", "cookie", "cache")
+        val assignments = mutableListOf<Assignment>()
+        val bindings = mutableListOf<Name>()
+        val names = mutableListOf<Name>()
+        val webViewCalls = mutableListOf<FunctionCall>()
+        root.visit { node ->
+            if (node is Assignment && node.operator == Token.ASSIGN && node.left is Name) assignments += node
+            if (node is VariableInitializer) node.target.visit { target ->
+                if (target is Name && target.identifier in identifiers) bindings += target
+                true
+            }
+            if (node is CatchClause) (node.varName as? Name)?.let { binding ->
+                if (binding.identifier in identifiers) bindings += binding
+            }
+            if (node is Name && node.identifier in identifiers) names += node
+            if (node is FunctionCall) webViewCalls += node
+            true
+        }
+        fun isUnresolvedRead(name: Name): Boolean {
+            val parent = name.parent
+            val isProperty = parent is PropertyGet && parent.property === name ||
+                parent is ObjectProperty && parent.key === name
+            val isFunctionName = parent is FunctionNode && parent.functionName === name
+            val isWrite = parent is Assignment && parent.operator == Token.ASSIGN && parent.left === name
+            val hasDeclaration = name.enclosingScope?.getDefiningScope(name.identifier) != null ||
+                bindings.any { binding -> binding.identifier == name.identifier &&
+                    binding.enclosingFunction === name.enclosingFunction &&
+                    (binding === name || binding.parent is CatchClause && isJsLibWithin(name, binding.parent) ||
+                        binding.parent !is CatchClause && binding.absolutePosition <= name.absolutePosition) }
+            val assignedEarlier = assignments.any { assignment ->
+                (assignment.left as Name).identifier == name.identifier &&
+                    assignment.absolutePosition + assignment.length <= name.absolutePosition &&
+                    assignment.enclosingFunction === name.enclosingFunction &&
+                    !isJsLibWithin(name, assignment)
+            }
+            return !isProperty && !isFunctionName && !isWrite && !hasDeclaration && !assignedEarlier
+        }
+        fun isJavaWebViewCall(call: FunctionCall): Boolean {
+            val target = call.target as? PropertyGet ?: return false
+            val obj = target.target as? Name ?: return false
+            return obj.identifier == "java" && target.property.identifier == "webView" && isUnresolvedRead(obj)
+        }
+        val unresolved = names.filter(::isUnresolvedRead)
+        val topLevel = unresolved.filter { it.enclosingFunction == null }.map { it.identifier }.toSet()
+        val inFunctionBare = unresolved
+            .filter { it.enclosingFunction != null && it.identifier in setOf("source", "java") }
+            .map { it.identifier }
+            .toSet()
+        val topLevelWebView = webViewCalls.any { it.enclosingFunction == null && isJavaWebViewCall(it) }
+        val inFunctionWebView = webViewCalls.any { it.enclosingFunction != null && isJavaWebViewCall(it) }
+        if (topLevel.isNotEmpty()) {
+            val listed = topLevel.sorted().joinToString("/")
+            val noun = if (topLevel.size == 1) "该绑定" else "这些绑定"
+            warnings += Issue(
+                "jsLib",
+                "jsLib 顶层疑似引用 $listed；阅读旧分支装载 jsLib 时可能未注入$noun（实测 source 未定义），沙箱却可能跑通。请在目标阅读端核对，不自动改写规则",
+            )
+        }
+        if (topLevelWebView) {
+            warnings += Issue(
+                "jsLib",
+                "jsLib 顶层疑似调用 java.webView(...)；阅读旧分支上 java.webView 可能是 object 不是函数（TypeError），沙箱却可能当函数跑通。请在目标阅读端核对，不自动改写规则",
+            )
+        }
+        val cautiousNames = (inFunctionBare - topLevel).sorted()
+        if (cautiousNames.isNotEmpty() || (inFunctionWebView && !topLevelWebView)) {
+            val parts = mutableListOf<String>()
+            if (cautiousNames.isNotEmpty()) parts += "裸引用 ${cautiousNames.joinToString("/")}"
+            if (inFunctionWebView && !topLevelWebView) parts += "调用 java.webView(...)"
+            warnings += Issue(
+                "jsLib",
+                "jsLib 函数内${parts.joinToString("，")}；可移植性依赖调用点绑定，官方惯用法是 const {java,source}=this。仅作提示，不视为必错，请在目标阅读端核对，不自动改写规则",
+            )
+        }
+    }
+
+    private fun isJsLibWithin(node: AstNode, ancestor: AstNode): Boolean {
+        var parent = node.parent
+        while (parent != null) {
+            if (parent === ancestor) return true
+            parent = parent.parent
+        }
+        return false
+    }
+
+    private fun jsSegments(rule: String): List<String> {
+        val at = rule.indexOf("@js:", ignoreCase = true)
+        val prefix = if (at >= 0) rule.substring(0, at) else rule
+        val tagRegex = jsTagRegex()
+        val segments = runCatching { tagRegex.findAll(prefix).map { it.groupValues[1] }.toMutableList() }
+            .getOrElse { mutableListOf() }
+        if (at >= 0) segments += rule.substring(at + 4)
+        val withoutTags = runCatching { tagRegex.replace(prefix, "") }.getOrDefault(prefix)
+        segments += JsTemplates.findAll(withoutTags).map { it.expression }
+        return segments
+    }
+
+    private companion object {
+        val RULE_OBJECTS = listOf("ruleSearch", "ruleExplore", "ruleBookInfo", "ruleToc", "ruleContent")
+        /** 懒编译，避免把正则放进 `<clinit>`（防护见 [JsTemplates]）。本正则不含 `}`。 */
+        private val jsTag: Regex by lazy { Regex("<js>([\\s\\S]*?)</js>", RegexOption.IGNORE_CASE) }
+        private fun jsTagRegex(): Regex = jsTag
     }
 
     private fun requireText(obj: JsonObject, key: String, issues: MutableList<Issue>, message: String) {

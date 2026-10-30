@@ -16,6 +16,11 @@
 -keep class com.mina.legadostudio.device.** { *; }
 -keep class com.mina.legadostudio.skills.** { *; }
 -keep class com.mina.legadostudio.mcp.** { *; }
+-keep class com.mina.legadostudio.domain.BookSourceValidator { *; }
+-keep class com.mina.legadostudio.domain.BookSourceValidator$* { *; }
+-keep class com.mina.legadostudio.domain.JsTemplates { *; }
+-keep class com.mina.legadostudio.diagnostic.RuntimeFaultStore { *; }
+-keep class com.mina.legadostudio.mcp.McpToolErrors { *; }
 -keep class com.mina.legadostudio.export.** { *; }
 -keep class io.legado.app.** { *; }
 -keep class com.script.** { *; }

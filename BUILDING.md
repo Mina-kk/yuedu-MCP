@@ -87,6 +87,6 @@ export RELEASE_KEY_PASSWORD='your-key-password'
 bash scripts/verify_release_contract.sh
 ```
 
-产物位于 `app/build/outputs/apk/release/app-release.apk`。`verify_release_contract.sh` 检查混淆后 MCP/Runtime 的 JSON 契约是否保持。
+产物位于 `app/build/outputs/apk/release/app-release.apk`。`verify_release_contract.sh` 检查混淆后 MCP/Runtime 的公开类名及阶段证据、调试报告、校验结果的字段映射。发布前必须对本次构建的 mapping 执行，不可用 Debug 单测代替 Release 契约检查；静态检查不等于 APK 在设备上实际运行。
 
 自行签名的 APK 与官方包证书不同，不能直接覆盖官方安装。官方更新包使用一致证书；升级前建议备份重要书源和设置。本 App 不保存任何模型密钥。

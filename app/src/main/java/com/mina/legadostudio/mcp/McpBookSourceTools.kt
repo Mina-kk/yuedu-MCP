@@ -1,7 +1,10 @@
 package com.mina.legadostudio.mcp
 
 import com.google.gson.JsonParser
+import com.mina.legadostudio.domain.RecentCheckOutcomes
 import com.mina.legadostudio.domain.SourceDedupeAnalyzer
+import com.mina.legadostudio.domain.SourceFieldDiff
+import com.mina.legadostudio.reader.ReaderExecutionRegistry
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.types.ToolAnnotations
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
@@ -31,6 +34,8 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
             val fieldsKeys = fields?.keySet()?.sorted().orEmpty()
             val fieldsSuffix = fieldsKeys.takeIf { it.isNotEmpty() }?.let { "（本次收到 fields 键：${app.gson.toJson(it)}）" }.orEmpty()
             var mergedFromExisting = false
+            var comparisonBase: com.google.gson.JsonObject? = null
+            var changedFieldsBase = "none"
             val obj = runCatching { JsonParser.parseString(sourceText).asJsonObject }.getOrNull()
                 ?: error((app.validator.validate(sourceText).issues.firstOrNull()?.let { "source 不是合法 JSON 对象：${it.message}" }
                     ?: "source 不是合法 JSON 对象") + fieldsSuffix)
@@ -39,21 +44,37 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
             // source 也给了内容时以 source 为基底（fields 只覆盖点名键，其余取 source 的）。找不到基底才报「需先完整创建」。
             if (fields != null && obj.entrySet().isEmpty()) {
                 val wantUrl = fields.get("bookSourceUrl")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
-                val base = if (wantUrl.isNotBlank()) {
+                val baseProject = if (wantUrl.isNotBlank()) {
                     app.projects.list()
                         .filter { it.siteUrl.trim() == wantUrl }
                         .maxByOrNull { it.updatedAt }
-                        ?.let { runCatching { JsonParser.parseString(it.sourceJson).asJsonObject }.getOrNull() }
                 } else null
+                val base = baseProject?.let { runCatching { JsonParser.parseString(it.sourceJson).asJsonObject }.getOrNull() }
                 if (base != null) {
+                    comparisonBase = base.deepCopy()
+                    changedFieldsBase = "fields_base"
                     obj.entrySet().toList().forEach { obj.remove(it.key) }
                     base.entrySet().forEach { obj.add(it.key, it.value) }
                     mergedFromExisting = true
                 }
+            } else if (fields != null) {
+                comparisonBase = obj.deepCopy()
+                changedFieldsBase = "fields_source"
+            } else {
+                val wantUrl = obj.get("bookSourceUrl")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                val previous = if (wantUrl.isNotEmpty()) app.projects.list().mapNotNull { project ->
+                    val previousSource = runCatching { JsonParser.parseString(project.sourceJson).asJsonObject }.getOrNull()
+                    val previousUrl = previousSource?.get("bookSourceUrl")
+                        ?.takeIf { it.isJsonPrimitive }?.asString?.trim()
+                    if (previousUrl == wantUrl && previousSource != null) project.updatedAt to previousSource else null
+                }.maxByOrNull { it.first }?.second else null
+                comparisonBase = previous
+                if (comparisonBase != null) changedFieldsBase = "latest_version"
             }
             // fields 顶层键整体覆盖，null 值表示删除该顶层键（obj.remove，与工具描述一致）——
             // 不是写入 null（写入后 has(key) 仍为 true，会让下游以为字段还在）
-            fields?.let { McpSourceTools.mergeFieldsInto(obj, it) }
+            val normalizedFields = mutableListOf<String>()
+            fields?.let { McpSourceTools.mergeFieldsInto(obj, it, normalizedFields) }
             // 校验失败时回显本次实际收到的字段名：source 顶层键 + fields 键，
             // 帮 AI 发现自己字段名拼错/漏传（如把 ruleSearch 写成 ruleSerach）
             val receivedFieldsSuffix = "（本次收到 source 顶层键：${app.gson.toJson(obj.keySet().sorted())}；" +
@@ -71,7 +92,10 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
                 error("书源验证未通过：${app.gson.toJson(report.issues)}$receivedFieldsSuffix$hint")
             }
             // 缺省时按用户在 MCP 页选择的目标类型写入 bookSourceType(0 文本/1 音频/2 图片/3 文件/4 视频)；「自动」时不干预，保留 JSON 原样
-            if (app.runtimeConfig.bookSourceType >= 0 && (!obj.has("bookSourceType") || obj.get("bookSourceType").isJsonNull)) obj.addProperty("bookSourceType", app.runtimeConfig.bookSourceType)
+            val injectedFields = injectSelectedBookSourceType(obj, app.runtimeConfig.bookSourceType)
+            val changedFields = SourceFieldDiff.changedFields(comparisonBase, obj)
+            val sourceUrl = obj.get("bookSourceUrl")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
+            val editWithoutReaderEvidence = shouldFlagEditWithoutReaderEvidence(sourceUrl)
             // 落库决策集中在 McpSourceTools.decideSave：身份 = 规范化 bookSourceUrl 全文（保留尾部/与 #标签），
             // 同 URL 不同 JSON → 新版本；完全一致 → 幂等覆写。trimEnd('/') 归并已移除——尾部有/无是两个身份。
             val now = System.currentTimeMillis()
@@ -92,14 +116,22 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
                 "note" to decision.note,
                 "conflicts" to decision.conflicts.takeIf { it.isNotEmpty() },
                 "fieldsMergedOntoExisting" to (if (mergedFromExisting) true else null),
+                "injectedFields" to injectedFields,
+                "normalizedFields" to normalizedFields.distinct(),
+                "changedFields" to changedFields,
+                "changedFieldsBase" to changedFieldsBase,
+                "editWithoutReaderEvidence" to editWithoutReaderEvidence,
                 // stage 命名须如实：VALIDATED=静态校验通过，不代表已联网实测——联网实测请以 check_source 的 verdict 为准
                 "stageMeaning" to "VALIDATED=静态校验通过（未联网）；联网实测结果用 check_source 的 verdict/evidence 字段判定；回读完整 JSON 用 get_source(projectId)",
-            )))
-        }.getOrElse { err(it.message.orEmpty()) }
+            ).apply {
+                if (editWithoutReaderEvidence) put("editHint", EDIT_WITHOUT_READER_EVIDENCE_HINT)
+            }))
+        }.getOrElse { if (it is LinkageError) linkageFailure(it) else err(it.message.orEmpty()) }
     }
-    server.tool("list_sources", "列出已保存 BookSource 摘要（默认不做任何折叠/合并——同 URL 多版本逐条列出，按 updatedAt 倒序；用 analyze_sources 看重复簇）。latestOnly=true 时每个 bookSourceUrl 只回最新一条代表并附 versionCount，查历史版本去掉该参数；清旧版本用 archive_source_versions。", ToolSchema(properties = buildJsonObject {
+    server.tool("list_sources", "列出已保存 BookSource 摘要（默认不做任何折叠/合并——同 URL 多版本逐条列出，按 updatedAt 倒序；用 analyze_sources 看重复簇）。query 按 bookSourceName/bookSourceUrl 子串过滤（拉丁大小写不敏感，中文按字面包含；超长报错不截断），过滤后再 limit/offset 分页，total/hasMore 相对过滤结果，避免全量回包。latestOnly=true 时每个 bookSourceUrl 只回最新一条代表并附 versionCount，查历史版本去掉该参数；清旧版本用 archive_source_versions。", ToolSchema(properties = buildJsonObject {
         putJsonObject("limit") { put("type", "integer"); put("description", "默认 200，最大 1000；超过用 offset 翻页") }
-        putJsonObject("offset") { put("type", "integer"); put("description", "分页偏移") }
+        putJsonObject("offset") { put("type", "integer"); put("description", "分页偏移（相对过滤后集合）") }
+        put("query", stringProp("可选：按 bookSourceName / bookSourceUrl 子串过滤（去空白后 1..${McpSourceTools.MAX_LIST_QUERY_CHARS} 字符；拉丁大小写不敏感，中文按字面包含）。空白=不过滤。过滤后再分页，不搜 sourceJson 正文"))
         putJsonObject("collapseIdentical") { put("type", "boolean"); put("description", "true=仅折叠结构完全相同且零冲突的重复副本（同 dedupe export_one 口径）；默认 false=全列出") }
         putJsonObject("latestOnly") { put("type", "boolean"); put("description", "true=每个 bookSourceUrl 只回 updatedAt 最新的一条（附 versionCount）；默认 false=同 URL 多版本逐条全列") }
     }, required = emptyList()), toolAnnotations = readOnly) { req ->
@@ -107,10 +139,12 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
             val all = app.projects.list().sortedByDescending { it.updatedAt }
             val limit = (req.arguments.int("limit") ?: McpSourceTools.DEFAULT_LIST_LIMIT).coerceIn(1, McpSourceTools.MAX_LIST_LIMIT)
             val offset = (req.arguments.int("offset") ?: 0).coerceAtLeast(0)
+            val (query, queryErr) = McpSourceTools.parseListQuery(req.arguments.str("query"))
+            require(queryErr == null) { queryErr!! }
             val collapse = req.arguments.bool("collapseIdentical") == true
             val latestOnly = req.arguments.bool("latestOnly") == true
             require(!(collapse && latestOnly)) { "collapseIdentical 与 latestOnly 只能选一个：前者按内容全等折叠，后者按 URL 取最新代表" }
-            val items = when {
+            val viewed = when {
                 latestOnly -> McpSourceTools.latestOnly(all)
                 !collapse -> all
                 else -> {
@@ -122,15 +156,17 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
                     all.filter { it.id !in clustered || it.id in keepIds }
                 }
             }
+            val filtered = McpSourceTools.filterByListQuery(viewed, query)
             val counts = McpSourceTools.versionCounts(all)
-            val page = items.drop(offset).take(limit)
+            val page = McpSourceTools.pageList(filtered, offset, limit)
             ok(app.gson.toJson(linkedMapOf<String, Any?>(
-                "total" to items.size, "offset" to offset, "limit" to limit,
-                "hasMore" to (offset + page.size < items.size),
+                "total" to page.total, "offset" to offset, "limit" to limit,
+                "hasMore" to page.hasMore,
+                "query" to query,
                 "collapseIdentical" to collapse,
                 "latestOnly" to latestOnly,
-                "collapsedAway" to (all.size - items.size),
-                "items" to page.map {
+                "collapsedAway" to (all.size - viewed.size),
+                "items" to page.items.map {
                     linkedMapOf(
                         "projectId" to it.id,
                         "bookSourceName" to it.name,
@@ -141,7 +177,7 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
                         "versionCount" to (counts[it.siteUrl.trim()] ?: 1),
                     )
                 },
-                "hint" to "同 URL 多版本全部列出（不做静默合并）；重复候选簇/冲突判定用 analyze_sources；latestOnly=true 只看每 URL 最新一条；archive_source_versions 按 URL 清理旧版本（保留最新 N 条）；siteUrl 逐字符精确匹配，不做 trimEnd('/') 归并",
+                "hint" to "query 按书名/URL 子串过滤后再分页（total/hasMore 相对过滤结果）；同 URL 多版本全部列出（不做静默合并）；重复候选簇/冲突判定用 analyze_sources；latestOnly=true 只看每 URL 最新一条；archive_source_versions 按 URL 清理旧版本（保留最新 N 条）；siteUrl 逐字符精确匹配，不做 trimEnd('/') 归并",
             )))
         }.getOrElse { err(it.message.orEmpty()) }
     }
@@ -194,4 +230,19 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
         val report = app.validator.validate(project.sourceJson)
         if (report.isValid) ok(project.sourceJson) else err("书源验证未通过：${app.gson.toJson(report.issues)}")
     }
+}
+
+internal const val EDIT_WITHOUT_READER_EVIDENCE_HINT =
+    "上一次只有沙箱失败、阅读端未执行：本次修改缺少阅读端依据。请先 reader_web_sync_source / reader_web_debug 拿阅读端日志，确认阅读端也失败再改规则；沙箱专属问题（category=sandbox）不要改规则"
+
+internal fun injectSelectedBookSourceType(obj: com.google.gson.JsonObject, selectedType: Int): List<String> {
+    if (selectedType < 0 || obj.has("bookSourceType") && !obj.get("bookSourceType").isJsonNull) return emptyList()
+    obj.addProperty("bookSourceType", selectedType)
+    return listOf("bookSourceType")
+}
+
+internal fun shouldFlagEditWithoutReaderEvidence(bookSourceUrl: String): Boolean {
+    val previous = RecentCheckOutcomes.get(bookSourceUrl) ?: return false
+    if (!previous.hadFailure) return false
+    return ReaderExecutionRegistry.all(bookSourceUrl).none { it.executed && it.at > previous.atMs }
 }

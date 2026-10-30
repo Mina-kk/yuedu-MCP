@@ -5,7 +5,7 @@ description: 对目标做逆向取证时使用——含 JS/Web 加密接口、AP
 
 # 逆向取证（REA × js-reverse）
 
-对**没有源码**的目标（加密站点、APP、二进制、协议）做逆向时按本技能走。两条主线索：**REA 的证据语义纪律**（结论必须分级、挂证据、标未知）+ **js-reverse 的实战打法**（抓包→静态→动态→复现）。书源制作是逆向结论的最终载体之一。
+对**没有源码**的目标（加密站点、APP、二进制、协议）做逆向时按本技能走。两条主线索：**REA 的证据语义纪律**（结论必须分级、挂证据、标未知）+ **js-reverse 的实战打法**（抓包→静态→按请求取得运行时证据→复现）。书源制作是逆向结论的最终载体之一。运行时证据须区分只观察与会执行动作的观察。
 
 ## 证据纪律（REA 方法论，最高优先级）
 
@@ -19,11 +19,14 @@ description: 对目标做逆向取证时使用——含 JS/Web 加密接口、AP
 | `unknown` 未知 | 没证据支撑 | 未验证的阶段、反爬墙后、需要的运行环境缺失 |
 
 **铁律**：
-- **静态 ≠ 运行**。看代码推出"它会加密"是 inference；只有真发一次请求、拿到真实响应才是 observation。不要用静态分析冒充运行时结果。
-- **未知要登记**。没解决的问题写明还需要什么证据/环境（required authority），带支持和反驳的证据 id，不要含糊带过或假装完成。
+- **结论分开标**：观察、推断、未知必须区分，结论强度不得超过证据强度。
+- **静态 ≠ 运行**。静态读 JS 不证明运行时行为；不要用静态分析冒充运行时结果。
+- **运行时证据按请求取得**，并注明是只观察，还是会执行动作的观察；说明目标、动作与证据覆盖范围。
+- **未知要登记**。没解决的问题写明还需要什么证据/环境（required authority）；未知不等于不存在。
+- **冲突证据并列**。把支持与反对两侧都记下，不择一抹去。
 - **覆盖不全 = 未知**。声明"新增了/没有了"必须双侧完整覆盖，否则报 unknown，不报"不存在"。
 - **summary-first**。大结果先取摘要再按 evidence 引用分页，不重复同一调用。
-- **证据台账**：每条结论 → 证据ID + 置信度/类型 + 搜索边界 + 剩余未知，后续可复用。
+- **证据台账**：每条结论 → 证据ID + 置信度/类型 + 搜索边界/覆盖范围 + 剩余未知，后续可复用。
 
 ## 四阶段实战流程（js-reverse）
 
@@ -31,7 +34,7 @@ description: 对目标做逆向取证时使用——含 JS/Web 加密接口、AP
 
 **阶段1 静态分析**：脚本落盘格式化 → 关键词搜（`encrypt|sign|token|AES|HMAC|nonce|session|signature`）→ 混淆分级（普通可 AST，大数组+解释器=JSVMP 走读字节码路线）。**签名逆向顺序：先逆拼接规则→再确认算法→最后找 salt/key。**
 
-**阶段2 动态分析**：断点/Hook（fetch、XHR、JSON.stringify、btoa、charCodeAt、加密库）抓"明文—密文"配对；提前注入须先于页面脚本；换通道优先于硬改。
+**阶段2 动态分析**：按请求取得运行时证据；注明只观察还是会执行动作的观察。断点/Hook（fetch、XHR、JSON.stringify、btoa、charCodeAt、加密库）抓"明文—密文"配对；提前注入须先于页面脚本；换通道优先于硬改。
 
 **阶段3 复现验证**：标准库直接复现 / 模拟执行 / 借页面环境 RPC 调用；用脚本自算并对照真实响应逐段 diff（编码、字节序、填充、拼接顺序是最常见偏差）。
 
@@ -41,10 +44,32 @@ description: 对目标做逆向取证时使用——含 JS/Web 加密接口、AP
 2. **协议复现**（最彻底）：算法标准、常量可抠时脚本直连，追求免浏览器。
 3. **判断防线在哪层再动手**：不要在错误层硬刚（本地伪造 TLS/指纹被服务端直连校验堵=白做）。
 
+## 手机端工具映射
+
+| 上游方法/证据需求 | 本 MCP 工具 | 说明 |
+|---|---|---|
+| 抓原始网页 | `fetch_page` / `analyze_html` / `read_page` | 抓取页面、分析 HTML、读取快照正文。 |
+| 规则与 JS 求值 | `inspect_rule` / `eval_js` | 在快照或书源沙箱中运行规则/JS，不等同于阅读端运行。 |
+| 真实 WebView 渲染 | `webview_render` | 获取真实 WebView 渲染后的 DOM/HTML。 |
+| 受限抓包 | `capture_once` / `webview_capture` | `webview_capture` 是 OkHttp 供给/观察，不是 WebView 原生网络栈。 |
+| 阅读端观察与执行 | `reader_web_status` / `reader_web_sync_source` / `reader_web_debug` / `reader_web_page` / `reader_web_verify` | `reader_web_page` 仅限用户已配置的阅读网页，不是通用浏览器。 |
+
+## 手机端不可用
+
+REA 提到以下能力时，在本 App 未覆盖，不能声称已执行：Ghidra、IDA、JEB、Hopper、Frida、ADB、通用浏览器场景录制、AgentEnv（见 `references/reverse-engineer-anything__references__environments.md`）。
+
+**书源冲突红线**：沙箱（`check_source` / `debug_source` / `eval_js`）与阅读端（`reader_web_*`）证据冲突时，属于冲突证据，支持与反对两侧并列记录，以阅读端为准；禁止仅为让沙箱通过而修改书源规则。
+
 ## 参考
 
 - `references/reverse-engineer-anything__SKILL.md`：REA 完整方法论（目标路由、证据模型、工具选型、调查计划）。
-- `references/reverse-engineer-anything__references__*.md`：REA 分领域指南（JS/Electron、Android、native/artifact、运行时观察、证据工作流、连接与恢复）。
+- `references/reverse-engineer-anything__references__native-and-artifacts.md`：原生程序、托管程序、归档与制品。
+- `references/reverse-engineer-anything__references__javascript-applications.md`：JS/Electron 应用分析。
+- `references/reverse-engineer-anything__references__android-applications.md`：Android APK 静态分析。
+- `references/reverse-engineer-anything__references__runtime-observation.md`：运行时观察与抓包。
+- `references/reverse-engineer-anything__references__evidence-workflows.md`：证据、比较与验证工作流。
+- `references/reverse-engineer-anything__references__connection-and-recovery.md`：连接与恢复。
+- `references/reverse-engineer-anything__references__environments.md`：与书源制作关系弱，仅在需要复现 Web 应用时参考。
 - `references/rea-tool-design__SKILL.md`：REA 工具契约设计（改 MCP 工具时参考）。
 - 书源实战案例：见 `knowledge/` 的 `js-reverse-s0-methodology.md`、`js-reverse-s2-basic.md`、`js-reverse-s2-advanced.md`、`js-reverse-s2-booksource.md`、`JS挑战与动态搜索避坑实战-阿里书屋.md`，以及技能 `legado-book-source` 的 `references/evidence-methodology.md`（书源调试语境的证据分级落地）。
 

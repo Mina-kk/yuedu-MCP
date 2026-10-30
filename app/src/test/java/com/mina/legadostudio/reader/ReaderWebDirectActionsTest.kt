@@ -26,6 +26,29 @@ class ReaderWebDirectActionsTest {
         }
     }
 
+    @Test fun changedSourceStopsBeforeWebSocketAndInvalidatesPriorEvidence() = runTest {
+        ReaderExecutionRegistry.clear()
+        pair { http, ws ->
+            val url = "https://books.example/source"
+            val config = ReaderWebConfigStore.Config("http://${http.hostName}:${http.port}", "")
+            val previous = com.google.gson.JsonParser.parseString("""{"bookSourceUrl":"$url","ruleSearch":{"bookList":".old"}}""").asJsonObject
+            val current = com.google.gson.JsonParser.parseString("""{"bookSourceUrl":"$url","ruleSearch":{"bookList":".new"}}""").asJsonObject
+            ReaderExecutionRegistry.record(url, ReaderExecutionRegistry.Record("verify", System.currentTimeMillis() - 1000,
+                true, verifyStatus = "passed", sourceHash = ReaderExecutionRegistry.sourceHashOf(previous),
+                configFingerprint = ReaderExecutionRegistry.configFingerprintOf(config), complete = true))
+            http.enqueue(MockResponse().setBody("""{"isSuccess":true,"data":$current}"""))
+            val result = actions(http).debug(url, "捞尸人", 5,
+                ReaderExecutionRegistry.configFingerprintOf(config), ReaderWebSourceSync.hashOf(previous))
+            assertEquals("SOURCE_CHANGED", result["errorCode"])
+            assertEquals(0, ws.requestCount)
+            assertEquals("SOURCE_CHANGED", ReaderExecutionRegistry.latest(url)?.status)
+            assertFalse(ReaderExecutionRegistry.passed(ReaderExecutionRegistry.summary(url,
+                sourceHash = ReaderExecutionRegistry.sourceHashOf(previous),
+                configFingerprint = ReaderExecutionRegistry.configFingerprintOf(config))))
+        }
+        ReaderExecutionRegistry.clear()
+    }
+
     @Test fun activeDebugUsesSameSnapshotForLookupAndWsEvenWithoutNewRest() = runTest {
         pair { http, ws ->
             var current = ReaderWebConfigStore.Config("http://${http.hostName}:${http.port}", "old-token")
@@ -83,6 +106,29 @@ class ReaderWebDirectActionsTest {
         ReaderExecutionRegistry.clear()
     }
 
+    @Test fun blankKeywordPrefersSavedSourceCheckKeyWordSoReaderAndSandboxSearchTheSameWord() = runTest {
+        ReaderExecutionRegistry.clear()
+        pair { http, ws ->
+            http.enqueue(MockResponse().setBody(
+                """{"isSuccess":true,"data":{"bookSourceUrl":"https://books.example/source","ruleSearch":{"checkKeyWord":" 捞尸人 "}}}"""))
+            var sentKey: String? = null
+            ws.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        sentKey = com.google.gson.JsonParser.parseString(text).asJsonObject.get("key").asString
+                        webSocket.send("调试完成")
+                        webSocket.close(1000, "")
+                    }
+                })
+            }
+            val result = actions(http).debug("https://books.example/source", "", 5)
+            assertEquals("捞尸人", sentKey)
+            assertEquals("捞尸人", result["keyword"])
+            assertEquals(true, result["keywordDefaulted"])
+        }
+        ReaderExecutionRegistry.clear()
+    }
+
     @Test fun searchUsesRealArrayFramesAndDeduplicatesUpdates() = runTest {
         pair { http, ws ->
             ws.dispatcher = object : Dispatcher() {
@@ -127,6 +173,56 @@ class ReaderWebDirectActionsTest {
             val missing = actions(http).search("词", 5, 10)
             assertEquals("ENDPOINT_MISSING", missing["errorCode"])
             assertEquals(false, missing["executed"])
+        }
+    }
+
+    @Test fun debugTimeoutSecKeepsOriginalMinAndDefaultAndRaisesMaxToOneEighty() {
+        assertEquals(5, ReaderWebDirectActions.DEBUG_TIMEOUT_MIN_SEC)
+        assertEquals(180, ReaderWebDirectActions.DEBUG_TIMEOUT_MAX_SEC)
+        assertEquals(5, ReaderWebDirectActions.clampDebugTimeoutSec(5))
+        assertEquals(5, ReaderWebDirectActions.clampDebugTimeoutSec(4))
+        assertEquals(5, ReaderWebDirectActions.clampDebugTimeoutSec(1))
+        assertEquals(120, ReaderWebDirectActions.clampDebugTimeoutSec(120))
+        assertEquals(60, ReaderWebDirectActions.clampDebugTimeoutSec(60))
+        assertEquals(15, ReaderWebDirectActions.clampDebugTimeoutSec(15))
+        assertEquals(180, ReaderWebDirectActions.clampDebugTimeoutSec(180))
+        assertEquals(180, ReaderWebDirectActions.clampDebugTimeoutSec(181))
+        assertEquals(180, ReaderWebDirectActions.clampDebugTimeoutSec(999))
+    }
+
+    @Test fun debugTimeoutSecOneEightyReachesWebSocketInsteadOfBeingTruncatedToOneTwenty() = runTest {
+        pair { http, ws ->
+            http.enqueue(MockResponse().setBody("""{"isSuccess":true,"data":{"bookSourceUrl":"https://books.example/source"}}"""))
+            ws.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        webSocket.send("调试完成")
+                        webSocket.close(1000, "")
+                    }
+                })
+            }
+            val result = actions(http).debug("https://books.example/source", "词", 180)
+            assertEquals("legacy_debug_only", result["status"])
+            assertEquals(true, result["executed"])
+            assertEquals("/bookSourceDebug", ws.takeRequest().path)
+        }
+    }
+
+    @Test fun debugTimeoutSecBelowMinStillRunsWithOriginalFiveSecondFloor() = runTest {
+        pair { http, ws ->
+            http.enqueue(MockResponse().setBody("""{"isSuccess":true,"data":{"bookSourceUrl":"https://books.example/source"}}"""))
+            ws.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        webSocket.send("调试完成")
+                        webSocket.close(1000, "")
+                    }
+                })
+            }
+            val result = actions(http).debug("https://books.example/source", "词", 1)
+            assertEquals("legacy_debug_only", result["status"])
+            assertEquals(true, result["executed"])
+            assertEquals("/bookSourceDebug", ws.takeRequest().path)
         }
     }
 

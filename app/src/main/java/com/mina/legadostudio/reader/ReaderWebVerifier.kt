@@ -1,6 +1,7 @@
 package com.mina.legadostudio.reader
 
 import com.google.gson.JsonObject
+import com.mina.legadostudio.domain.CheckSourceRunner
 import kotlinx.coroutines.delay
 
 /**
@@ -66,13 +67,25 @@ class ReaderWebVerifier(
         val legacyDebugPayload: Map<String, Any?>? = null,
         /** 失败那次请求的脱敏诊断（如轮询中断）：成功时通常为最后一次状态读取，null = 未拿到。 */
         val diagnostic: ReaderWebRequestDiagnostic? = null,
+        /** 本次检验所针对的书源内容指纹（从阅读端读回的书源算出）；拿不到内容为 null。 */
+        val sourceHash: String? = null,
+        /** 本次检验固定使用的阅读 Web 配置指纹（origin+令牌哈希，不含令牌本体）。 */
+        val configFingerprint: String? = null,
+        /** 是否拿到了归属本次的完整终止证据（结构化 = 归属本次的终态；旧版 = 关闭帧未截断）。 */
+        val complete: Boolean = false,
     ) {
         /** MCP 工具回包形状（纯数据，JVM 可测）：如实标注证据来源与证据不跨实例。 */
         fun toPayload(): Map<String, Any?> {
+            val evidenceIdentity = linkedMapOf<String, Any?>(
+                "evidenceSourceHash" to sourceHash,
+                "evidenceConfigFingerprint" to configFingerprint,
+                "executionComplete" to complete,
+            ).filterValues { it != null }
             // 旧版通道：原样使用其回包，绝不改写 status / machineVerdict
             legacyDebugPayload?.let { legacy ->
                 return linkedMapOf<String, Any?>().apply {
                     putAll(legacy)
+                    putAll(evidenceIdentity)
                     put("evidenceScope", "reader_web_legacy_debug")
                     put(
                         "evidenceNote",
@@ -102,7 +115,10 @@ class ReaderWebVerifier(
                 "evidenceScope" to "reader_web",
                 "evidenceNote" to
                     "结果由阅读 App 检验产生，仅代表阅读端状态；不登记为本实例 check_source 的证据，不代表四阶段样本检查通过",
-            ).apply { diagnostic?.let { put("diagnostic", it.toPayload()) } }
+            ).apply {
+                putAll(evidenceIdentity)
+                diagnostic?.let { put("diagnostic", it.toPayload()) }
+            }
         }
 
         companion object {
@@ -325,6 +341,9 @@ class ReaderWebVerifier(
             lastObservedState = stateOfRun ?: lastState,
             // 轮询失败时把「哪条请求失败、什么阶段」一起带回去，不只留一句文案
             diagnostic = lastError?.diagnostic,
+            sourceHash = ReaderExecutionRegistry.sourceHashOf(entry.source),
+            configFingerprint = ReaderExecutionRegistry.configFingerprintOf(client.configSnapshot()),
+            complete = stateOfRun != null && summary in setOf("passed", "failed", "uncheckable"),
         )
     }
 
@@ -371,7 +390,9 @@ class ReaderWebVerifier(
                     "旧版调试通道也要求书源已保存在阅读中",
             )
         }
-        val key = keyword?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_LEGACY_KEYWORD
+        val key = keyword?.trim()?.takeIf { it.isNotEmpty() }
+            ?: lookup.source?.let { CheckSourceRunner.probeKeyword(it) }
+            ?: DEFAULT_LEGACY_KEYWORD
         // 给旧版调试留出剩余预算（至少 10 秒，最多 120 秒），不把整次调用拖到预算外
         val remainingMs = (budgetMs - (now() - started)).coerceIn(10_000L, 120_000L)
         val debugOutcome = try {
@@ -381,11 +402,7 @@ class ReaderWebVerifier(
             throw VerifyException(
                 error.code,
                 error.message.orEmpty(),
-                ReaderWebLegacyDebugClient.Outcome.errorPayload(
-                    error.code,
-                    error.message.orEmpty(),
-                    error.debugLogs,
-                ) + mapOf(
+                error.toErrorPayload() + mapOf(
                     "reason" to "structured_check_unavailable",
                     "structuredCheckCode" to cause.code,
                 ),
@@ -403,10 +420,14 @@ class ReaderWebVerifier(
             elapsedMs = now() - started,
             message = "该阅读版本没有结构化检验接口，已运行旧版 WebSocket 调试：只有日志，没有通过/失败结论",
             progress = linkedMapOf("legacyDebug" to true, "structuredCheckCode" to cause.code),
+            sourceHash = lookup.source?.let(ReaderExecutionRegistry::sourceHashOf),
+            configFingerprint = ReaderExecutionRegistry.configFingerprintOf(client.configSnapshot()),
+            complete = ReaderExecutionRegistry.debugComplete(debugOutcome.toPayload()),
             legacyDebugPayload = debugOutcome.toPayload() + mapOf(
                 "reason" to "structured_check_unavailable",
                 "structuredCheckCode" to cause.code,
-                "nextAction" to "查看日志定位问题；该通道不产出 PASSED，不能作为检验通过依据",
+                "executionStartedAtEpochMs" to started,
+                "nextAction" to "核对当前版本的完整阅读日志与实际字段，不把阶段名称当成功，也不退回沙箱结论",
             ),
         )
     }

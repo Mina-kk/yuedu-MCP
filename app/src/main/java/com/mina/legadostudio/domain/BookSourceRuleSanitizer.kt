@@ -40,9 +40,9 @@ object BookSourceRuleSanitizer {
                 val headHit = headPrefix.find(rule)?.groupValues?.get(1)
                 when {
                     branchHit != null && headHit == null ->
-                        warnings += "$section.$key：规则以默认(JSoup)模式开头，但 &&/||/%% 分支内含模式前缀「$branchHit」——真机 SourceRule 只在整串开头判模式，分支内前缀会被当 JSoup 字面量解析并可能报 Could not parse query；请把「$branchHit」移到规则开头（整段统一该模式）或删除前缀"
+                        warnings += "$section.$key：规则以默认(JSoup)模式开头，但 &&/||/%% 分支内含模式前缀「$branchHit」——真机 SourceRule 只在整串开头判模式，分支内前缀会被当 JSoup 字面量解析并可能报 Could not parse query；请把「$branchHit」移到规则开头（整段统一该模式）或删除前缀；此为启发式告警，若阅读端已能正常解析则无需修改"
                     branchHit != null && headHit != null && !branchHit.equals(headHit, true) ->
-                        warnings += "$section.$key：规则开头声明「$headHit」但分支内出现「$branchHit」——真机不会识别分支内前缀，请统一为开头声明的一种模式"
+                        warnings += "$section.$key：规则开头声明「$headHit」但分支内出现「$branchHit」——真机不会识别分支内前缀，请统一为开头声明的一种模式；此为启发式告警，若阅读端已能正常解析则无需修改"
                 }
             }
         }

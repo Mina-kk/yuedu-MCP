@@ -55,7 +55,9 @@ class TaskContextStoreTest {
         val store = TaskContextStore(); val id = store.create(); val e = store.saveResult(id, "abc[def]XYZ", "a")
         assertEquals("abc", store.read(e, limit = 3)["body"])
         assertEquals("[def]", store.read(e, limit = 5, query = "[def]")["body"])
-        assertEquals(false, store.read(e, query = "missing")["found"])
+        val miss = store.read(e, query = "missing")
+        assertEquals(false, miss["found"])
+        assertTrue(miss["hint"].toString().contains("字面原文片段"))
         assertEquals(false, store.read(e, offset = 10)["hasMore"])
         assertTrue(runCatching { store.read(e, -1) }.isFailure)
         assertTrue(runCatching { store.read(e, limit = 12001) }.isFailure)
@@ -206,6 +208,10 @@ class TaskContextStoreTest {
             assertEquals("restored-1", listed.single()["contextId"])
             val entry = store.get("restored-1", "e1", "fp")
             assertEquals(true, store.metadata(entry)["stale"])
+            // 旧快照缺 redirectChain：Gson 给 null，恢复成空列表，不编造 requestedUrl/crossHostRedirect
+            assertEquals(emptyList<String>(), entry.page!!.redirectChain)
+            assertEquals(200, entry.page!!.code)
+            assertEquals("https://example.org/", entry.page!!.finalUrl)
             // 恢复后所有写路径必须可用：create / fetch / saveResult / describe / clear
             val id = store.create("new")
             val hit = store.fetch(id, "GET/u", "fp", true, false) { page("p") }
@@ -308,5 +314,92 @@ class TaskContextStoreTest {
         assertTrue(ex.message!!.contains("contextId=$a"))
         assertTrue(runCatching { store.get(b, "missing-entry", "fp") }.exceptionOrNull()!!.message!!.contains("REFERENCE_EXPIRED_OR_UNKNOWN"))
         assertEquals("body-a", store.get(a, e.id, "fp").text)
+    }
+    @Test fun fetchKeepsRedirectChainUrlsWithoutInventingHopStatus() = runBlocking {
+        val store = TaskContextStore()
+        val id = store.create()
+        val chain = listOf("http://old.example.test/", "http://new.example.test/")
+        val hit = store.fetch(id, "k", "a", true, false) {
+            HttpFetcher.FetchResult(200, "http://new.example.test/", emptyMap(), "body", 1, redirectChain = chain)
+        }
+        assertEquals(chain, hit.entry.page!!.redirectChain)
+        assertTrue(hit.entry.page!!.headers.isEmpty())
+    }
+    @Test fun metadataExpiresInMsKeepsStaleSnapshotReadable() = runBlocking {
+        var now = 0L
+        val store = TaskContextStore(clock = { now }, idleMs = 1_000, freshMs = 100)
+        val id = store.create()
+        val e = store.fetch(id, "k", "a", true, false) { page() }.entry
+        val fresh = store.metadata(e)
+        assertEquals(false, fresh["stale"])
+        assertEquals(1_000L, fresh["expiresInMs"])
+        now = 150
+        val stale = store.metadata(e)
+        assertEquals(true, stale["stale"])
+        assertEquals(850L, stale["expiresInMs"])
+        assertEquals("abcdef", store.get(id, e.id, "a").text)
+        assertEquals(1_000L, store.metadata(e)["expiresInMs"])
+    }
+    @Test fun localRedirectChainSurvivesStoreAndStillReadableWhenStale() = runBlocking {
+        MockWebServer().use { web ->
+            web.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "/final?q=book"))
+            web.enqueue(MockResponse().setBody("<h1>ok</h1>"))
+            web.start()
+            val store = TaskContextStore()
+            val id = store.create()
+            val start = web.url("/start").toString()
+            val hit = store.fetch(id, "k", "a", true, false) {
+                HttpFetcher().fetch(HttpFetcher.FetchRequest(start))
+            }
+            val page = hit.entry.page!!
+            assertTrue(page.redirectChain.first().contains("/start"))
+            assertTrue(page.redirectChain.last().contains("/final"))
+            assertTrue(page.finalUrl.contains("/final"))
+            assertEquals(page.redirectChain, store.get(id, hit.entry.id, "a").page!!.redirectChain)
+        }
+    }
+    @Test fun livePageRedirectChainPersistsAndRestores() = runBlocking {
+        // 回归：scheduleSnapshot 曾只写 code/finalUrl/elapsedMs，live fetch 的 page.redirectChain 没落盘
+        val dir = java.nio.file.Files.createTempDirectory("ctx-snap-live-chain").toFile()
+        val fp = "auth-fp"
+        val chain = listOf("https://old.example.test/start", "https://new.example.test/final")
+        try {
+            val store = TaskContextStore(snapshotDir = dir)
+            val id = store.create("chain")
+            val hit = store.fetch(id, "GET/u", fp, true, false) {
+                HttpFetcher.FetchResult(200, "https://new.example.test/final", emptyMap(), "body", 5L, redirectChain = chain)
+            }
+            assertEquals(chain, hit.entry.page!!.redirectChain)
+
+            val deadline = System.currentTimeMillis() + 15_000
+            var snap: com.mina.legadostudio.mcp.TaskContextSnapshot.TaskSnapshot? = null
+            while (System.currentTimeMillis() < deadline) {
+                snap = com.mina.legadostudio.mcp.TaskContextSnapshot.load(dir)
+                    .firstOrNull { it.id == id }
+                if (snap != null && snap.entries.any { it.kind == "page" && it.redirectChain == chain }) break
+                kotlinx.coroutines.delay(150)
+            }
+            assertNotNull("快照未在限时内落盘", snap)
+            val written = snap!!.entries.single { it.kind == "page" }
+            assertEquals(chain, written.redirectChain)
+            assertEquals(200, written.code)
+            assertEquals("https://new.example.test/final", written.finalUrl)
+            assertEquals(5L, written.elapsedMs)
+            val json = java.io.File(dir, "$id.json").readText()
+            assertTrue(json.contains("redirectChain"))
+            assertFalse("Entry 没有 requestedUrl，快照不得编造", json.contains("requestedUrl"))
+            assertFalse("Entry 没有 crossHostRedirect，快照不得编造", json.contains("crossHostRedirect"))
+
+            val store2 = TaskContextStore(snapshotDir = dir)
+            val restored = store2.get(id, hit.entry.id, fp)
+            assertEquals(chain, restored.page!!.redirectChain)
+            assertEquals(200, restored.page!!.code)
+            assertEquals("https://new.example.test/final", restored.page!!.finalUrl)
+            assertEquals(5L, restored.page!!.elapsedMs)
+            assertEquals("body", restored.text)
+            assertEquals(true, store2.metadata(restored)["stale"])
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

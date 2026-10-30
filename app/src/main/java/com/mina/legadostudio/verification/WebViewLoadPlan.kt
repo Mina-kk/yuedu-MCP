@@ -1,6 +1,7 @@
 package com.mina.legadostudio.verification
 
 import com.mina.legadostudio.domain.LogFilterUtils
+import java.util.UUID
 
 /**
  * `java.webView(html, url, js)` / WebViewPageLoader 的纯逻辑判定与注入脚本构造。
@@ -13,6 +14,9 @@ object WebViewLoadPlan {
 
     /** webJs 轮询固定间隔（毫秒）。返回 null = 未就绪，到 load() 总超时为止，不用同步 XHR 泵。 */
     const val POLL_INTERVAL_MS = 300L
+
+    /** webview_eval 挂到 window 上的 Promise 状态键前缀；每次 eval 再拼唯一后缀。 */
+    const val EVAL_TOKEN_PREFIX = "__studio_eval_"
 
     /**
      * 校验后的加载计划。
@@ -69,6 +73,47 @@ object WebViewLoadPlan {
         return "(function(){try{var r;try{r=eval($src);}" +
             "catch(e0){if(!(e0 instanceof SyntaxError))throw e0;r=eval(\"(function(){\"+$src+\"})()\");}" +
             "return r==null?null:String(r);}catch(e){return '__STUDIO_ERROR__'+e;}})()"
+    }
+
+    /** webview_eval 一次调用一枚 token，挂到 window 上跨 300ms 轮询复用。 */
+    fun newEvalToken(): String = EVAL_TOKEN_PREFIX + UUID.randomUUID().toString().replace("-", "")
+
+    /**
+     * webview_eval 专用注入脚本（**不要**给 webview_render / java.webView 的 webJs 用）。
+     *
+     * 与 [buildPollScript] 的差异：脚本完成值若是 thenable，只 eval 一次，把状态挂到
+     * `window[token]`，后续同 token 轮询不重跑用户脚本——
+     * pending → JS `null`（Kotlin 侧按未就绪继续轮询）；
+     * fulfilled → `String(原值)`（含 fulfilled null/undefined → `"null"`/`"undefined"`）；
+     * reject / then 抛错 → `__STUDIO_ERROR__`。
+     * 非 Promise 仍是 `null` 重跑、有值 `String(r)`，与旧 eval 行为一致。
+     * 页面跳转（`location.href` 对不上）丢弃旧 token 并在新文档上重新首轮执行。
+     */
+    fun buildEvalPollScript(script: String, token: String): String {
+        require(script.isNotBlank()) { "webview_eval script 不能为空" }
+        require(token.isNotBlank()) { "webview_eval token 不能为空" }
+        val src = quoteJsString(script)
+        val tok = quoteJsString(token)
+        return "(function(){try{" +
+            "var k=$tok,st=window[k];" +
+            "if(st){" +
+            "if(st.h!==location.href){try{delete window[k]}catch(eD){window[k]=undefined}}" +
+            "else if(st.s==='p')return null;" +
+            "else if(st.s==='r'){try{delete window[k]}catch(eR){}return '__STUDIO_ERROR__'+st.v}" +
+            "else{try{delete window[k]}catch(eF){}return String(st.v)}" +
+            "}" +
+            "var r;try{r=eval($src);}" +
+            "catch(e0){if(!(e0 instanceof SyntaxError))throw e0;r=eval(\"(function(){\"+$src+\"})()\");}" +
+            "if(r!=null&&(typeof r==='object'||typeof r==='function')&&typeof r.then==='function'){" +
+            "var id=((st&&st.i)||0)+1;" +
+            "window[k]={s:'p',h:location.href,i:id};" +
+            "try{r.then(function(v){var c=window[k];if(!c||c.i!==id)return;window[k]={s:'f',v:v,h:location.href,i:id}}," +
+            "function(e){var c=window[k];if(!c||c.i!==id)return;window[k]={s:'r',v:e,h:location.href,i:id}})}" +
+            "catch(eT){try{delete window[k]}catch(eX){}return '__STUDIO_ERROR__'+eT}" +
+            "return null;" +
+            "}" +
+            "return r==null?null:String(r);" +
+            "}catch(e){return '__STUDIO_ERROR__'+e}})()"
     }
 
     /**

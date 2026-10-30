@@ -24,7 +24,9 @@ import java.security.MessageDigest
  *    - 预检形状读不懂（`data=null`、空对象、缺/错 `bookSourceUrl`）→ 停，**零写入**；
  * 3. HTTP 200 不算成功：先检查 `ReturnData.isSuccess`，再 `GET /getBookSource` 回读，
  *    对用户提交的**全部非元数据顶层字段**逐个做实质比较（含整棵嵌套规则）；
- *    只有回读完全一致才 `confirmed=true`，也只有那时才给出 `nextAction=reader_web_verify`。
+ *    只有回读完全一致才 `confirmed=true`，也只有那时才给出 `nextAction=reader_web_debug`
+ *    ——这是给工具层的底层建议：sync 已强制自动调试，最终回包的 nextAction 由
+ *    `mergeSyncDeliveryPayload` 统一收敛（稳定工具名/null），本字段不会直接透出。
  *
  * 安全边界：
  * - 目标 origin 只来自用户保存的配置；路径是固定 allowlist，工具不接受任意 URL/路径；
@@ -46,19 +48,6 @@ class ReaderWebSourceSync(
 ) {
 
     /**
-     * 阅读自身会维护、不属于「书源内容」的字段：只在**顶层**不参与实质比较，
-     * 也不会出现在冲突字段名里。这些值由阅读端按使用情况更新（最后更新时间、响应耗时、分组、启用状态等）。
-     *
-     * 注意：嵌套对象（如 `ruleSearch.enabled`、`ruleToc.group`）里的同名键是书源规则的一部分，
-     * 必须严格比较——否则两份不同的规则会被误判成相同而跳过写入。
-     */
-    private val READER_METADATA = setOf(
-        "lastUpdateTime", "respondTime", "weight", "customOrder",
-        "enabled", "enabledExplore", "bookSourceGroup", "bookSourceComment",
-        "variableComment",
-    )
-
-    /**
      * @property writeAttempted 本次是否**尝试过** `POST /saveBookSource`（只看有没有走写入这一步，不代表已送达）
      * @property writeOutcome `not_attempted` / `not_sent` / `unknown` / `rejected` / `accepted`：
      *   - `not_attempted`：预检失败、已存在、冲突拒写，根本没走到写入；
@@ -78,6 +67,10 @@ class ReaderWebSourceSync(
         val normalizedFields: List<String> = emptyList(),
         val localHash: String?,
         val remoteHash: String?,
+        /**
+         * 与阅读中**上一版**相比发生变化的顶层字段（写入成功时不是「没写进去」）。
+         * 回包同时给出别名 `changedVsPreviousTopLevelFields`。
+         */
         val differentTopLevelFields: List<String>,
         val remoteOnlyTopLevelFields: List<String>,
         val mismatchedFields: List<String>,
@@ -102,9 +95,10 @@ class ReaderWebSourceSync(
             "localHash" to localHash,
             "remoteHash" to remoteHash,
             "differentTopLevelFields" to differentTopLevelFields,
+            "changedVsPreviousTopLevelFields" to differentTopLevelFields,
             "remoteOnlyTopLevelFields" to remoteOnlyTopLevelFields,
             "mismatchedFields" to mismatchedFields,
-            "nextAction" to if (confirmed) "reader_web_verify" else null,
+            "nextAction" to if (confirmed) "reader_web_debug" else null,
             "message" to message,
             "diagnostic" to diagnostic?.toPayload(),
             // 成功回包也列出实际请求顺序：模型不再需要猜「同步是不是 GET /saveBookSource」
@@ -168,7 +162,60 @@ class ReaderWebSourceSync(
                 ?: "no-response"
             "${row["method"]} ${row["path"]} [${row["stage"]}] $status"
         }
+
+        // ---- 内容指纹（与回读比对同一口径；阅读端证据登记也用它） ----
+
+        /**
+         * 阅读自身会维护、不属于「书源内容」的字段：只在**顶层**不参与实质比较与哈希。
+         * 嵌套对象（如 `ruleSearch.enabled`）里的同名键是书源规则的一部分，必须严格比较。
+         */
+        private val READER_METADATA = setOf(
+            "lastUpdateTime", "respondTime", "weight", "customOrder",
+            "enabled", "enabledExplore", "bookSourceGroup", "bookSourceComment",
+            "variableComment",
+        )
+
+        /** 递归规范化：对象键排序、数组保序；字符串/数字/布尔按字面值。 */
+        fun canonical(element: JsonElement?): String = canonical(element, stripReaderMetadata = true)
+
+        /**
+         * 只在**最外层**剔除阅读自动维护的元数据；嵌套对象（规则体、header 等）里即使出现
+         * `enabled`/`group` 这类同名键也严格参与比较——它们是书源内容，不是阅读元数据。
+         */
+        private fun canonical(element: JsonElement?, stripReaderMetadata: Boolean): String = when (element) {
+            null, is JsonNull -> "null"
+            is JsonObject -> element.entrySet()
+                .filter { !(stripReaderMetadata && it.key in READER_METADATA) }
+                .sortedBy { it.key }
+                .joinToString(prefix = "{", postfix = "}", separator = ",") {
+                    "\"${it.key}\":${canonical(it.value, stripReaderMetadata = false)}"
+                }
+            is JsonArray -> element.joinToString(prefix = "[", postfix = "]", separator = ",") {
+                canonical(it, stripReaderMetadata = false)
+            }
+            is JsonPrimitive -> when {
+                element.isBoolean -> if (element.asBoolean) "true" else "false"
+                element.isNumber -> element.asNumber.toString()
+                else -> "\"${element.asString.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+            }
+            else -> element.toString()
+        }
+
+        /**
+         * 稳定短哈希（sha256 前 16 个十六进制字符），只用于报告「两侧是否相同」与证据身份登记。
+         * 顶层阅读元数据（`lastUpdateTime`/`respondTime`/分组等）不参与：它们是阅读自己维护的，
+         * 本地成品与阅读内的同一书源在这些字段上本来就不同。
+         */
+        fun hashOf(element: JsonElement): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest(canonical(element).toByteArray(StandardCharsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }.take(16)
+        }
     }
+
+    internal fun canonical(element: JsonElement?): String = Companion.canonical(element)
+
+    internal fun hashOf(element: JsonElement): String = Companion.hashOf(element)
 
     /**
      * @param projectId 本地项目 ID（sourceJson 来自项目库，模型不能另传书源）
@@ -367,7 +414,7 @@ class ReaderWebSourceSync(
             mismatchedFields = mismatched,
             projectId = null,
             message = if (confirmed) {
-                "已写入阅读并回读确认全部字段一致；下一步用 reader_web_verify 做阅读端检验"
+                "已写入阅读并回读确认全部字段一致；下一步用 reader_web_debug 在阅读端真实调试（旧版阅读也可用）；阅读支持结构化检验时可再用 reader_web_verify"
             } else {
                 "已写入阅读并回读到该地址，但字段不一致（见 mismatchedFields）：自动调试仅针对阅读现存版本，不代表本地成品已生效；请核对保存结果"
             },
@@ -465,43 +512,6 @@ class ReaderWebSourceSync(
         if (a == null || b == null) return a == b
         // 比较的是「字段值」：整棵子树严格比较，元数据豁免只属于书源顶层
         return canonical(a, stripReaderMetadata = false) == canonical(b, stripReaderMetadata = false)
-    }
-
-    /** 递归规范化：对象键排序、数组保序；字符串/数字/布尔按字面值。 */
-    fun canonical(element: JsonElement?): String = canonical(element, stripReaderMetadata = true)
-
-    /**
-     * 只在**最外层**剔除阅读自动维护的元数据；嵌套对象（规则体、header 等）里即使出现
-     * `enabled`/`group` 这类同名键也严格参与比较——它们是书源内容，不是阅读元数据。
-     */
-    private fun canonical(element: JsonElement?, stripReaderMetadata: Boolean): String = when (element) {
-        null, is com.google.gson.JsonNull -> "null"
-        is JsonObject -> element.entrySet()
-            .filter { !(stripReaderMetadata && it.key in READER_METADATA) }
-            .sortedBy { it.key }
-            .joinToString(prefix = "{", postfix = "}", separator = ",") {
-                "\"${it.key}\":${canonical(it.value, stripReaderMetadata = false)}"
-            }
-        is JsonArray -> element.joinToString(prefix = "[", postfix = "]", separator = ",") {
-            canonical(it, stripReaderMetadata = false)
-        }
-        is JsonPrimitive -> when {
-            element.isBoolean -> if (element.asBoolean) "true" else "false"
-            element.isNumber -> element.asNumber.toString()
-            else -> "\"${element.asString.replace("\\", "\\\\").replace("\"", "\\\"")}\""
-        }
-        else -> element.toString()
-    }
-
-    /**
-     * 稳定短哈希（sha256 前 16 个十六进制字符），只用于报告「两侧是否相同」。
-     * 顶层阅读元数据（`lastUpdateTime`/`respondTime`/分组等）不参与：它们是阅读自己维护的，
-     * 本地成品与阅读内的同一书源在这些字段上本来就不同。
-     */
-    fun hashOf(element: JsonElement): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(canonical(element).toByteArray(StandardCharsets.UTF_8))
-        return digest.joinToString("") { "%02x".format(it) }.take(16)
     }
 
     private fun JsonObject.stringOrNull(key: String): String? =

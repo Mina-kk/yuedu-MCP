@@ -212,7 +212,8 @@ class ReaderWebUiPolicyTest {
         assertTrue(script.contains("h:60"))
         assertTrue(script.contains("v:70"))
         // 脚本自身限制遍历数量与文本长度，不把整页 DOM 交给模型
-        assertTrue(script.contains("if(out.length>=L.e)break;"))
+        assertTrue(script.contains("if(out.length>=L.e){capped=true;break;}"))
+        assertTrue(script.contains("capped:capped"))
         assertTrue(script.contains("text.substring(0,L.t)"))
         assertTrue(script.contains("JSON.stringify"))
     }
@@ -304,7 +305,51 @@ class ReaderWebUiPolicyTest {
         assertEquals(1, parsed.snapshot.elements.size)
         assertEquals("a{color:red}", parsed.snapshot.elements.first().selector)
         assertEquals("order 必须重新连续编号", 0, parsed.snapshot.elements.first().order)
-        assertTrue(parsed.snapshot.elementLimitReached)
+        assertFalse("过滤不可用节点不是扫描上限触顶", parsed.snapshot.elementLimitReached)
+    }
+
+    @Test fun filteredCandidatesDoNotCountAsScanLimit() {
+        // 页面只有少量可见元素，querySelectorAll 候选更多（隐藏/零尺寸）：不是扫描上限
+        assertFalse(
+            ReaderWebUiPolicy.scanLimitReached(
+                candidates = 20, exportedCount = 5, parsedCount = 5, maxElements = 80, capped = false,
+            ),
+        )
+        assertFalse(
+            ReaderWebUiPolicy.scanLimitReached(
+                candidates = 20, exportedCount = 5, parsedCount = 5, maxElements = 80, capped = null,
+            ),
+        )
+        assertTrue(
+            "JS 明确 capped 才是扫描触顶",
+            ReaderWebUiPolicy.scanLimitReached(
+                candidates = 200, exportedCount = 80, parsedCount = 80, maxElements = 80, capped = true,
+            ),
+        )
+        assertTrue(
+            "无 capped 的旧快照：导出量顶到上限且候选更多才算触顶",
+            ReaderWebUiPolicy.scanLimitReached(
+                candidates = 200, exportedCount = 80, parsedCount = 80, maxElements = 80, capped = null,
+            ),
+        )
+    }
+
+    @Test fun parseSnapshotHonorsJsCappedFlag() {
+        fun page(candidates: Int, capped: Boolean, count: Int): String {
+            val items = (0 until count).joinToString(",") { """{"tag":"a","selector":"a.item$it","text":"$it"}""" }
+            return jsString(
+                """{"ok":true,"href":"http://192.168.1.8:1122/","title":"t","path":"/","text":"x",
+                    "candidates":$candidates,"capped":$capped,"elements":[$items]}""",
+            )
+        }
+        val five = ReaderWebUiPolicy.parseSnapshot(page(20, capped = false, count = 5), lan)
+            as ReaderWebUiPolicy.SnapshotParse.Ok
+        assertEquals(5, five.snapshot.elements.size)
+        assertFalse(five.snapshot.elementLimitReached)
+        val capped = ReaderWebUiPolicy.parseSnapshot(page(200, capped = true, count = 80), lan)
+            as ReaderWebUiPolicy.SnapshotParse.Ok
+        assertEquals(80, capped.snapshot.elements.size)
+        assertTrue(capped.snapshot.elementLimitReached)
     }
 
     // ---- 隐私：敏感输入值不回显 ----

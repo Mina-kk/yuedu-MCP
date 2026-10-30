@@ -118,9 +118,9 @@ internal fun StudioMcpServer.registerCaptureTools(server: Server) {
             )))
         }.getOrElse { verificationAware(it, req.arguments) }
     }
-    server.tool("webview_eval", "用真实 WebView 打开 URL 并执行一段 JS，直接返回脚本值（不落快照、不分页）。script 两种形态都行：表达式（如 document.title、document.querySelectorAll('a').length）或函数体（末尾 return ...）；返回 null/undefined 会按 300ms 间隔轮询直到超时——异步等待页面就绪时返回 null 即可。脚本抛错回 __STUDIO_ERROR__ 失败。与 webview_render 的区别：render 拿整页 DOM 存 pageId 供后续规则调试，eval 只取一个值适合探测/断言。url 仅公网 http/https，重定向落点同校验（SSRF 与 webview_render 同级）。", ToolSchema(properties = buildJsonObject {
+    server.tool("webview_eval", "用真实 WebView 打开 URL 并执行一段 JS，直接返回脚本值（不落快照、不分页）。script 两种形态都行：表达式（如 document.title、document.querySelectorAll('a').length）或函数体（末尾 return ...）。非 Promise 返回 null/undefined 会按 300ms 间隔重跑脚本直到超时——异步等待页面就绪时返回 null 即可。脚本返回 Promise/thenable 时只执行一次，挂唯一 token 到页面，then/catch 持久状态，之后 300ms 轮询同一 token 不重跑：pending 视为未就绪，fulfilled 把原值转 String，reject 或脚本抛错回 __STUDIO_ERROR__。时间上限仍是 timeoutSec；页面跳转丢弃旧 token。与 webview_render 的区别：render 拿整页 DOM 存 pageId 供后续规则调试，其 webJs 对齐阅读端「返回 null 重跑」语义且不 unwrap Promise；eval 只取一个值适合探测/断言，并 unwrap Promise。url 仅公网 http/https，重定向落点同校验（SSRF 与 webview_render 同级）。", ToolSchema(properties = buildJsonObject {
         put("url", stringProp("WebView 加载的 HTTP/HTTPS URL（仅公网地址）"))
-        put("script", stringProp("要在页面上下文执行的 JS：纯表达式或函数体；返回 null 表示未就绪继续轮询。兼容别名 webJs（与 webview_render 同名参数）"))
+        put("script", stringProp("要在页面上下文执行的 JS：纯表达式或函数体。非 Promise 返回 null 表示未就绪继续重跑；返回 Promise 时只执行一次并轮询结算。兼容别名 webJs（与 webview_render 同名参数）"))
         put("webJs", stringProp("可选：script 的兼容别名（与 webview_render 的参数名对齐）；script 优先，二者都传时取 script"))
         putJsonObject("delayMs") { put("type", "integer"); put("description", "onPageFinished 后等待页面稳定的毫秒数，默认 800，最大 10000") }
         putJsonObject("timeoutSec") { put("type", "integer"); put("description", "加载+取值总超时，10..300 秒，默认 60") }
@@ -130,12 +130,11 @@ internal fun StudioMcpServer.registerCaptureTools(server: Server) {
             val script = req.arguments.str("script") ?: req.arguments.str("webJs")
                 ?: error("script 不能为空（也可用兼容别名 webJs 传入）")
             val ctxId = contextId(req.arguments)
-            val result = app.webViewLoader.load(
+            val result = app.webViewCapture.eval(
                 url = url,
-                webJs = script,
+                script = script,
                 delayMs = req.arguments.int("delayMs")?.toLong() ?: 800,
                 timeoutMs = (req.arguments.int("timeoutSec") ?: 60).coerceIn(10, 300) * 1000L,
-                html = null,
                 resourceRecorder = { m, reqUrl, headers ->
                     app.httpLogs.recordAsync(com.mina.legadostudio.network.HttpLogRecorder.Draft(
                         method = m, url = reqUrl, statusCode = 0, requestHeaders = headers,
@@ -143,14 +142,14 @@ internal fun StudioMcpServer.registerCaptureTools(server: Server) {
                     ))
                 },
             )
-            val value = result.html
+            val value = result.value
             ok(app.gson.toJson(mapOf(
                 "contextId" to ctxId,
                 "url" to url, "finalUrl" to result.finalUrl, "elapsedMs" to result.elapsedMs,
                 "valueChars" to value.length,
                 "value" to value.take(12000),
                 "truncated" to (value.length > 12000),
-                "hint" to "value 是脚本返回值转字符串（对象请先 JSON.stringify）；超 12000 字符截断，要完整 DOM 请用 webview_render 存 pageId 后 read_page。",
+                "hint" to "value 是脚本返回值转字符串（对象请先 JSON.stringify；Promise 已 unwrap 为 fulfilled 原值）。超 12000 字符截断，要完整 DOM 请用 webview_render 存 pageId 后 read_page。",
             )))
         }.getOrElse { verificationAware(it, req.arguments) }
     }

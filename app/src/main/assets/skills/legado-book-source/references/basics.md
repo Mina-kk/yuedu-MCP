@@ -88,13 +88,17 @@ class.odd.0@tag.a.0@text||tag.dd.0@tag.h1@text##全文阅读
 
 | 变量 | 说明 |
 |------|------|
-| `{{page}}` | Legado 内置分页变量，从 1 开始，搜索/发现 URL **必须包含** |
-| `{{key}}` | Legado 内置搜索关键词变量，搜索 URL **必须包含**，发现页带输入框时使用 |
+| `{{page}}` | 阅读内置分页变量，从 1 开始。**不是**搜索/发现 URL 的必填项。只有抓到真实后一页、且该书单与第一页不同，才写入；假分页（后一页相同、空列表、或站点根本不分页）不要写。第一页不带页参数时可用 `<,{{page}}>` 或 `{{page - 1 == 0 ? "": page}}` |
+| `{{key}}` | 阅读内置搜索关键词变量，搜索 URL **必须包含**，发现页带输入框时使用 |
 | `{{xxx}}` | 自定义变量，需通过 JS 定义，如 `source.put('bookId', '123')` |
 
-搜索 URL 例：`https://example.com/search?q={{key}}&page={{page}}`
+搜索 URL 例（已核实后一页书单不同）：`https://example.com/search?q={{key}}&page={{page}}`
 
-发现 URL 例：`https://example.com/top?page={{page}}`
+搜索 URL 例（无真实分页，不要硬加 page）：`https://example.com/search?q={{key}}`
+
+发现 URL 例（已核实分页）：`https://example.com/top?page={{page}}`
+
+核实方法：固定同一关键词/分类，分别取第一页与后一页的书籍列表，只有集合不同才算真分页。不要凭「URL 里有 page 参数」或页码按钮外观写入 `{{page}}`。沙箱缺页、超时不是改这条规则的依据，以阅读端搜索/发现实跑为准。
 
 ## URL 选项（常用）
 
@@ -107,3 +111,29 @@ URL 末尾以 `,{JSON}` 追加，格式如 `https://example.com/page,{"webView":
 | `charset: string` | 编码，如 utf-8、gbk |
 | `header: {key:val}` | 自定义请求头 |
 | `body: string` | POST 请求体 |
+
+## 目录下一页（nextTocUrl）
+
+阅读对 `nextTocUrl` 走 `getStringList(..., isUrl=true)`，并去掉等于当前页的地址，再按返回 URL **条数**分支（与正文 `nextContentUrl` 同构；目录并发页不再递归取下一页）：
+
+| 条数 | 阅读端行为 |
+|---|---|
+| 0 | 不分页，只用当前页章节 |
+| 1 | 串行跟随该 URL，直到空或已访问 |
+| 大于 1 | 把返回列表当完整页表**并发**抓取；这些页上不再跑 `nextTocUrl` |
+
+页码下拉用 `option@value`（不是 `select@value`）可一次给出全部页 URL，阅读端按「大于 1」并发。`getStringList` 遇到带换行的字符串会按行拆成多条 URL。不要把多条 URL 拼成一条请求地址。
+
+大于 1 时，第一页的 `nextTocUrl` 必须给出**完整页表**；并发页不会再翻页。验收以阅读端 `++目录URL` 日志为准：完整终止、页数与章节数、是否并发。沙箱条数/拼接差异登记为 `sandbox_divergent`，不为迁就沙箱改规则。沙箱不作规则标准。
+
+## 目录卷名与无链接条目（isVolume）
+
+阅读 `BookChapterList` 解析每条目录时（官方约 237–287 行）先取 `chapterName` / `chapterUrl` / `isVolume`。`isVolume` 规则为真时该条是卷名，常见于无 `href` 的分组标题。随后：
+
+| 条件 | 阅读端行为 |
+|---|---|
+| `chapterUrl` 空且 `isVolume` 为真 | 用 `title + index` 填 url（日志「一级目录未获取到url,使用标题替代」）。这是阅读内部占位，**不是**可请求的章节地址 |
+| `chapterUrl` 空且不是卷名 | 退回当前页 `baseUrl`（日志「未获取到url,使用baseUrl替代」） |
+| `chapterName` 空 | **不加入**目录列表 |
+
+目录验收要找真正可读章节（有有效 `chapterUrl` 的条目），不要把卷名占位地址当 `--章节URL`，也不要为迁就沙箱给卷名伪造 href。工坊不必伪装阅读那套 `title+index` url；沙箱把卷名 url 留空、后面章节 url 正常，仍以是否存在可读章节为准。若全部条目都没有有效章节地址，目录仍失败。

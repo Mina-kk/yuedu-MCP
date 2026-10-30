@@ -121,7 +121,7 @@ class TaskContextStore(
         val safeHeaders = result.headers.filterKeys { it.lowercase() in setOf("content-type", "cache-control") }.mapValues { it.value.take(1024) }
         val entry = Entry(UUID.randomUUID().toString(), "page", result.body, clock(), fingerprint,
             if (reusable && result.code in 200..299 && result.headers.none { it.key.equals("cache-control", true) && (it.value.contains("no-store", true) || it.value.contains("no-cache", true)) }) key else null,
-            result.copy(headers = safeHeaders, redirectChain = emptyList()))
+            result.copy(headers = safeHeaders))
         task.touched = clock()
         val hit = Hit(insert(task, entry), false)
         scheduleSnapshot()
@@ -265,6 +265,7 @@ class TaskContextStore(
                         id = e.id, kind = e.kind, text = e.text, created = e.created,
                         fingerprint = e.fingerprint, key = null,
                         code = e.page?.code, finalUrl = e.page?.finalUrl, elapsedMs = e.page?.elapsedMs,
+                        redirectChain = e.page?.redirectChain,
                     )
                 },
             )
@@ -286,6 +287,7 @@ class TaskContextStore(
                     if (e.kind == KIND_BINARY) return@forEach
                     val page = if (e.kind == "page") HttpFetcher.FetchResult(
                         e.code ?: 200, e.finalUrl.orEmpty(), emptyMap(), e.text, e.elapsedMs ?: 0L,
+                        redirectChain = e.redirectChain.orEmpty(),
                     ) else null
                     // 回拨 created：保证 metadata().stale == true，旧快照不会被当新鲜数据复用
                     task.entries[e.id] = Entry(e.id, e.kind, e.text, clock() - freshMs - 1, e.fingerprint, key = null, page = page)
@@ -295,9 +297,15 @@ class TaskContextStore(
         }
     }
     fun metadata(e: Entry): Map<String, Any> {
+        val now = clock()
+        val ageMs = (now - e.created).coerceAtLeast(0)
+        val expiresInMs = runCatching {
+            val touched = tasks.values.firstOrNull { it.entries.containsKey(e.id) }?.touched
+            if (touched == null) 0L else (idleMs - (now - touched)).coerceAtLeast(0)
+        }.getOrDefault(idleMs)
         val base = mutableMapOf<String, Any>("id" to e.id, "kind" to e.kind,
-            "totalChars" to e.text.length, "sha256" to digest(e.text), "ageMs" to (clock() - e.created).coerceAtLeast(0),
-            "stale" to (clock() - e.created >= freshMs), "url" to (e.page?.finalUrl ?: ""))
+            "totalChars" to e.text.length, "sha256" to digest(e.text), "ageMs" to ageMs,
+            "stale" to (ageMs >= freshMs), "expiresInMs" to expiresInMs, "url" to (e.page?.finalUrl ?: ""))
         if (e.kind == KIND_BINARY) {
             e.page?.rawBytes?.let {
                 base["binaryBytes"] = it.size
@@ -315,7 +323,10 @@ class TaskContextStore(
             require(query.isNotEmpty() && query.length <= 256) { "query 长度必须为 1..256" }
             e.text.indexOf(query, offset, ignoreCase = true)
         }
-        if (start < 0) return metadata(e) + mapOf("found" to false, "body" to "", "offset" to offset)
+        if (start < 0) return metadata(e) + mapOf(
+            "found" to false, "body" to "", "offset" to offset,
+            "hint" to "query 是字面原文片段搜索（大小写不敏感），不是正则或语义关键词；未命中说明正文不含该子串，请改用日志/结果里实际出现的原文片段。",
+        )
         val end = (start + limit).coerceAtMost(e.text.length)
         return metadata(e) + mapOf("found" to true, "body" to e.text.substring(start, end), "offset" to start,
             "nextOffset" to end, "hasMore" to (end < e.text.length), "snapshot" to true)

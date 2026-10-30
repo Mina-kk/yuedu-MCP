@@ -105,7 +105,7 @@ class ReaderWebSyncTest {
             assertTrue(result.written)
             assertTrue(result.confirmed)
             assertEquals(url, result.bookSourceUrl)
-            assertEquals("reader_web_verify", result.toPayload()["nextAction"])
+            assertEquals("reader_web_debug", result.toPayload()["nextAction"])
             assertTrue(result.mismatchedFields.isEmpty())
 
             val paths = generateSequence { server.takeRequest(1, TimeUnit.MILLISECONDS) }.map { it.path!! }.toList()
@@ -129,7 +129,7 @@ class ReaderWebSyncTest {
             // 只有一次预检请求，没有 POST
             assertEquals(1, server.requestCount)
             // 已确认内容一致：可以直接进入阅读端检验
-            assertEquals("reader_web_verify", result.toPayload()["nextAction"])
+            assertEquals("reader_web_debug", result.toPayload()["nextAction"])
         }
     }
 
@@ -155,6 +155,11 @@ class ReaderWebSyncTest {
             val text = payload.toString()
             assertFalse("不得回显书源规则内容", text.contains("reader.test/s"))
             assertFalse("不得回显书源规则内容", text.contains("本地名字"))
+            assertEquals(
+                "新别名与旧字段同值",
+                payload["differentTopLevelFields"],
+                payload["changedVsPreviousTopLevelFields"],
+            )
         }
     }
 
@@ -168,6 +173,15 @@ class ReaderWebSyncTest {
             assertTrue(result.written)
             assertTrue(result.confirmed)
             assertTrue(result.differentTopLevelFields.contains("bookSourceName"))
+            val payload = result.toPayload()
+            assertEquals(true, payload["written"])
+            assertEquals(true, payload["confirmed"])
+            assertEquals(
+                "写入成功时仍保留与上一版的差异，不是没写进去",
+                payload["differentTopLevelFields"],
+                payload["changedVsPreviousTopLevelFields"],
+            )
+            assertTrue((payload["changedVsPreviousTopLevelFields"] as List<*>).contains("bookSourceName"))
             val save = generateSequence { server.takeRequest(1, TimeUnit.MILLISECONDS) }
                 .firstOrNull { it.path == "/saveBookSource" }
             assertEquals("新名字", JsonParser.parseString(save!!.body.readUtf8()).asJsonObject.get("bookSourceName").asString)
@@ -228,7 +242,7 @@ class ReaderWebSyncTest {
             assertTrue(result.confirmed)
             assertTrue(result.differentTopLevelFields.isEmpty())
             assertEquals(1, server.requestCount)
-            assertEquals("reader_web_verify", result.toPayload()["nextAction"])
+            assertEquals("reader_web_debug", result.toPayload()["nextAction"])
         }
     }
 

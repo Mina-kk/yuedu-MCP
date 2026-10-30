@@ -237,12 +237,14 @@ class McpResponsePayloadsContractTest {
     @Test fun resultReferencePayloadMatchesGolden() {
         val text = "x".repeat(15000)
         val metadata = mapOf<String, Any>("id" to "r1", "kind" to "result", "totalChars" to 15000)
-        val expected = metadata + mapOf("contextId" to "ctx", "resultId" to "r1",
+        val expected = metadata + mapOf("contextId" to "ctx", "resultId" to "r1", "resultContextId" to "ctx",
             "preview" to text.take(3000), "previewIsRawString" to true, "resultChars" to text.length,
             "nextOffset" to 3000, "hasMore" to true,
-            "hint" to "结果已完整保存，调用 read_result，不要重复执行原工具。preview 是原始文本的硬截断片段，不是有效JSON，不要对它做 JSON 解析。")
+            "hint" to "结果已完整保存，调用 read_result(resultId, contextId=resultContextId)，不要重复执行原工具。resultContextId 是本连接任务上下文，不是 cap: 抓包会话 id。preview 是原始文本的硬截断片段，不是有效JSON，不要对它做 JSON 解析。")
         val actual = McpResponsePayloads.resultReferencePayload(metadata, "ctx", "r1", text)
         assertSamePayload(expected, actual, "resultReference")
+        assertEquals("ctx", actual["resultContextId"])
+        assertEquals(actual["contextId"], actual["resultContextId"])
     }
 
     @Test fun inlineFallbackTextMatchesGolden() {
@@ -252,5 +254,33 @@ class McpResponsePayloadsContractTest {
         assertEquals(expected, McpResponsePayloads.inlineFallbackText(text))
         // UTF-16 边界：前 12000 code unit + 固定尾缀 "\n…[" + note + "]"
         assertEquals(12000 + 3 + note.length + 1, McpResponsePayloads.inlineFallbackText(text).length)
+    }
+
+    @Test fun httpLogQueryFiltersUrlAndFinalUrlCaseInsensitively() {
+        assertTrue(httpLogUrlMatchesQuery("https://book.washai.net/book/searchByPage", "", "searchbypage"))
+        assertTrue(httpLogUrlMatchesQuery("https://cdn/app.js", "https://book.washai.net/book/listBookCategory", "/BOOK/"))
+        assertFalse(httpLogUrlMatchesQuery("https://cdn/app.js", "https://cdn/app.css", "searchByPage"))
+        assertTrue(httpLogUrlMatchesQuery("https://cdn/app.js", "https://cdn/app.js", ""))
+        assertTrue(httpLogUrlMatchesQuery("https://cdn/app.js", "https://cdn/app.js", "  "))
+        val urls = listOf(
+            "https://cdn/a.js",
+            "https://api/searchByPage",
+            "https://cdn/b.css",
+            "https://api/listBookCategory",
+            "https://api/searchByPage?q=2",
+        )
+        val filtered = urls.filter { httpLogUrlMatchesQuery(it, "", "searchByPage") }
+        assertEquals(2, filtered.size)
+        assertEquals(listOf("https://api/searchByPage"), filtered.drop(0).take(1))
+        assertEquals(listOf("https://api/searchByPage?q=2"), filtered.drop(1).take(1))
+    }
+
+    @Test fun capQueryContextIsNotUsableForResultStore() {
+        assertNull(usableResultStoreContextId("cap:cb0deeaa-ffff"))
+        assertNull(usableResultStoreContextId("cap:"))
+        assertNull(usableResultStoreContextId(null))
+        assertNull(usableResultStoreContextId("  "))
+        assertEquals("5f2a1b3c-real-uuid", usableResultStoreContextId("5f2a1b3c-real-uuid"))
+        assertEquals("5f2a1b3c-real-uuid", usableResultStoreContextId("  5f2a1b3c-real-uuid  "))
     }
 }

@@ -10,3 +10,7 @@ build-logs/
 *.env
 work/
 .kotlin/
+__pycache__/
+*.py[cod]
+*.apk
+mapping.txt

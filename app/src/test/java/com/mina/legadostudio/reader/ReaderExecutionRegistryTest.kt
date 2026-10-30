@@ -89,6 +89,60 @@ class ReaderExecutionRegistryTest {
         assertEquals(1, ReaderExecutionRegistry.summary("$url#probeUA", 4)!!["searchHits"])
     }
 
+    @Test fun evidenceCannotCrossContentOrConfigAndNewFailureWins() {
+        val success = ReaderExecutionRegistry.Record("verify", 10, true, verifyStatus = "passed",
+            sourceHash = "source-a", configFingerprint = "config-a", complete = true)
+        ReaderExecutionRegistry.record(url, success, 10)
+        assertTrue(ReaderExecutionRegistry.passed(ReaderExecutionRegistry.summary(url, 11, "source-a", "config-a")))
+        assertFalse(ReaderExecutionRegistry.passed(ReaderExecutionRegistry.summary(url, 11, "source-b", "config-a")))
+        assertFalse(ReaderExecutionRegistry.passed(ReaderExecutionRegistry.summary(url, 11, "source-a", "config-b")))
+        ReaderExecutionRegistry.record(url, success.copy(at = 20, verifyStatus = "failed"), 20)
+        ReaderExecutionRegistry.record(url, success.copy(at = 15), 21)
+        val latest = ReaderExecutionRegistry.summary(url, 22, "source-a", "config-a")!!
+        assertEquals("failed", latest["verifyStatus"])
+        assertFalse(ReaderExecutionRegistry.passed(latest))
+    }
+
+    @Test fun laterIncompleteAttemptCannotReuseOldSuccessfulEvidence() {
+        ReaderExecutionRegistry.record(url, ReaderExecutionRegistry.Record("verify", 10, true,
+            verifyStatus = "passed", sourceHash = "a", configFingerprint = "b", complete = true), 10)
+        ReaderExecutionRegistry.record(url, ReaderExecutionRegistry.Record("debug", 20, false,
+            status = "TIMEOUT", sourceHash = "a", configFingerprint = "b"), 20)
+        val summary = ReaderExecutionRegistry.summary(url, 21, "a", "b")!!
+        assertFalse(ReaderExecutionRegistry.passed(summary))
+        assertEquals(false, summary["complete"])
+        assertEquals(false, summary["executed"])
+    }
+
+    @Test fun reachedStagesDoNotProveSuccessAndGlobalSearchDoesNotCertifyContent() {
+        ReaderExecutionRegistry.record(url, ReaderExecutionRegistry.Record("debug", 1, true,
+            stagesReached = ReaderExecutionRegistry.REQUIRED_STAGES, sourceHash = "a", configFingerprint = "b", complete = true), 1)
+        assertFalse(ReaderExecutionRegistry.passed(ReaderExecutionRegistry.summary(url, 2, "a", "b")))
+        ReaderExecutionRegistry.record(url, ReaderExecutionRegistry.Record("search", 3, true,
+            searchHits = 1, configFingerprint = "b", complete = true), 3)
+        assertEquals(false, ReaderExecutionRegistry.summary(url, 4, "a", "b")!!["identityMatches"])
+    }
+
+    @Test fun debugRequiresNormalCloseTerminalAndUntruncatedLogs() {
+        val payload = mapOf<String, Any?>("closeCode" to 1000, "completionSignal" to true)
+        assertTrue(ReaderExecutionRegistry.debugComplete(payload))
+        assertFalse(ReaderExecutionRegistry.debugComplete(payload - "closeCode"))
+        assertFalse(ReaderExecutionRegistry.debugComplete(payload + ("closeCode" to 1006)))
+        assertFalse(ReaderExecutionRegistry.debugComplete(payload + ("truncated" to true)))
+        assertFalse(ReaderExecutionRegistry.debugComplete(payload + ("errorCode" to "TIMEOUT")))
+    }
+
+    @Test fun configurationRevisionAndCookieDefaultsArePartOfIdentityRules() {
+        val first = ReaderWebConfigStore.Config("http://127.0.0.1:1162", "token", 1)
+        assertFalse(ReaderExecutionRegistry.configFingerprintOf(first) == ReaderExecutionRegistry.configFingerprintOf(first.copy(revision = 2)))
+        assertFalse(ReaderExecutionRegistry.configFingerprintOf(first) == ReaderExecutionRegistry.configFingerprintOf(first.copy(token = "different")))
+        val source = com.google.gson.JsonObject().apply { addProperty("bookSourceUrl", url) }
+        val explicit = source.deepCopy().apply { addProperty("enabledCookieJar", true) }
+        assertEquals(ReaderExecutionRegistry.sourceHashOf(source), ReaderExecutionRegistry.sourceHashOf(explicit))
+        explicit.addProperty("enabledCookieJar", false)
+        assertFalse(ReaderExecutionRegistry.sourceHashOf(source) == ReaderExecutionRegistry.sourceHashOf(explicit))
+    }
+
     @Test fun searchByOriginKeepsProbeSeparateFromOfficialKey() {
         val payload = ReaderWebSearchClient.Outcome("completed", true, listOf(
             mapOf("origin" to "$url#probeUA", "name" to "探测"),

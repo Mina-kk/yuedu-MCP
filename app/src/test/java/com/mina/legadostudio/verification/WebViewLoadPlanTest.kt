@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 /**
  * java.webView(html,url,js) 交接路径的纯逻辑测试（不碰 android.webkit）：
@@ -148,5 +149,106 @@ class WebViewLoadPlanTest {
         // 通过 JSONObject.quote 转义，不会出现裸换行打断 JS 字符串
         assertFalse(script.contains("a\nb"))
         assertTrue(script.contains("\\n"))
+    }
+
+    @Test fun pollScriptDoesNotUnwrapPromise() {
+        // webview_render / java.webView 的 webJs 必须保持阅读端「null 重跑」：
+        // Promise 完成值会被 String(r) 成 [object Promise]，不能悄悄 then。
+        val script = WebViewLoadPlan.buildPollScript("return (async function(){return 1})()")
+        assertFalse(script.contains("typeof r.then"))
+        assertFalse(script.contains(WebViewLoadPlan.EVAL_TOKEN_PREFIX))
+        assertTrue(script.contains("return r==null?null:String(r)"))
+    }
+
+    @Test fun newEvalTokenIsUniqueAndPrefixed() {
+        val a = WebViewLoadPlan.newEvalToken()
+        val b = WebViewLoadPlan.newEvalToken()
+        assertTrue(a.startsWith(WebViewLoadPlan.EVAL_TOKEN_PREFIX))
+        assertTrue(b.startsWith(WebViewLoadPlan.EVAL_TOKEN_PREFIX))
+        assertTrue(a != b)
+        assertEquals(WebViewLoadPlan.EVAL_TOKEN_PREFIX.length + 32, a.length)
+    }
+
+    @Test fun evalPollScriptRejectsBlankScriptOrToken() {
+        assertTrue(runCatching { WebViewLoadPlan.buildEvalPollScript("  ", "t") }.exceptionOrNull() is IllegalArgumentException)
+        assertTrue(runCatching { WebViewLoadPlan.buildEvalPollScript("1", "  ") }.exceptionOrNull() is IllegalArgumentException)
+    }
+
+    @Test fun evalPollScriptBakesTokenAndChecksWindowFirst() {
+        val token = "__studio_eval_deadbeef"
+        val js = WebViewLoadPlan.buildEvalPollScript("Promise.resolve(1)", token)
+        // token 出现在 window[k] 判定之前，后续轮询同 token 不重跑
+        val tokenAt = js.indexOf("\"$token\"")
+        val windowAt = js.indexOf("window[k]")
+        val evalAt = js.indexOf("r=eval(")
+        assertTrue(tokenAt >= 0)
+        assertTrue(windowAt >= 0)
+        assertTrue(evalAt > windowAt)
+        assertTrue(js.indexOf("if(st)") < evalAt)
+    }
+
+    @Test fun evalPollScriptPendingFulfilledRejectAndCleanup() {
+        val js = WebViewLoadPlan.buildEvalPollScript("1", "__studio_eval_x")
+        assertTrue(js.contains("st.s==='p')return null"))
+        assertTrue(js.contains("return '__STUDIO_ERROR__'+st.v"))
+        assertTrue(js.contains("return String(st.v)"))
+        assertTrue(js.contains("delete window[k]"))
+        assertTrue(js.contains("st.h!==location.href"))
+    }
+
+    @Test fun evalPollScriptThenCatchPersistsStateWithoutRerun() {
+        val js = WebViewLoadPlan.buildEvalPollScript("return (async function(){return 1})()", "__studio_eval_p")
+        assertTrue(js.contains("typeof r.then==='function'"))
+        assertTrue(js.contains("window[k]={s:'p',h:location.href,i:id}"))
+        assertTrue(js.contains("r.then(function(v)"))
+        assertTrue(js.contains("c.i!==id"))
+        assertTrue(js.contains("{s:'f',v:v,h:location.href,i:id}"))
+        assertTrue(js.contains("{s:'r',v:e,h:location.href,i:id}"))
+        // pending 立刻 return null，不把 Promise 交给 String(r)
+        val thenAt = js.indexOf("r.then(")
+        val nonPromiseStringAt = js.lastIndexOf("return r==null?null:String(r)")
+        assertTrue(thenAt >= 0)
+        assertTrue(nonPromiseStringAt > thenAt)
+    }
+
+    @Test fun evalPollScriptKeepsNonPromiseNullRetryAndSyntaxErrorFallback() {
+        val js = WebViewLoadPlan.buildEvalPollScript("var a=1; return a+1", "__studio_eval_y")
+        assertTrue(js.contains("instanceof SyntaxError"))
+        assertTrue(js.contains("return r==null?null:String(r)"))
+        assertTrue(js.contains("'__STUDIO_ERROR__'"))
+        assertTrue(js.contains("var a=1; return a+1"))
+    }
+
+    @Test fun evalPollScriptQuotesUserSourceSafely() {
+        val js = WebViewLoadPlan.buildEvalPollScript("var t = \"a\nb\"; t", "__studio_eval_q")
+        assertFalse(js.contains("a\nb"))
+        assertTrue(js.contains("\\n"))
+    }
+
+    @Test fun mcpWebviewEvalWiresPromiseUnwrapAndLeavesRenderPoll() {
+        val mcp = listOf(
+            File("src/main/java/com/mina/legadostudio/mcp/McpCaptureTools.kt"),
+            File("app/src/main/java/com/mina/legadostudio/mcp/McpCaptureTools.kt"),
+        ).first { it.isFile }.readText()
+        val evalStart = mcp.indexOf("server.tool(\"webview_eval\"")
+        val evalEnd = mcp.indexOf("server.tool(\"list_captures\"")
+        assertTrue(evalStart >= 0 && evalEnd > evalStart)
+        val evalBlock = mcp.substring(evalStart, evalEnd)
+        assertTrue(evalBlock.contains("Promise"))
+        assertTrue(evalBlock.contains("token"))
+        assertTrue(evalBlock.contains("webViewCapture.eval"))
+        assertFalse(evalBlock.contains("webViewLoader.load"))
+
+        val renderStart = mcp.indexOf("server.tool(\"webview_render\"")
+        val renderBlock = mcp.substring(renderStart, evalStart)
+        assertTrue(renderBlock.contains("webViewLoader.load"))
+        assertFalse(renderBlock.contains("buildEvalPollScript"))
+
+        val engine = listOf(
+            File("src/main/java/com/mina/legadostudio/verification/WebViewCaptureEngine.kt"),
+            File("app/src/main/java/com/mina/legadostudio/verification/WebViewCaptureEngine.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue(engine.contains("WebViewLoadPlan.buildPollScript(webJs)"))
+        assertTrue(engine.contains("WebViewLoadPlan.buildEvalPollScript(script, token)"))
     }
 }
