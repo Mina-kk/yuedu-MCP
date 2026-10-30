@@ -4,10 +4,9 @@
 
 - 包名：`com.mina.legadostudio`
 - 当前版本：`1.3.9`（versionCode 200，以 `app/build.gradle.kts` 为准）
-- 本版边界：工坊与沙箱侧改动**未在真机或阅读客户端实测**；不以本机构建或沙箱结果声称阅读端通过。交付仍以阅读 Web 单源调试与页面核对为准。
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
-- 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（已对外发布版本附带已签名 APK）
+- 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
 
 ## 界面
 
