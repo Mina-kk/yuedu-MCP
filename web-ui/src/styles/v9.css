@@ -1,0 +1,112 @@
+/* =========================================================================
+   v9 — 一个可见区域矩形，键盘只计算一次
+   - native.js 把 native.visibleHeight / visualViewport / innerHeight 收敛成
+     --usable-bottom；浮层从 0 铺到该底边，不再靠几百 px 的 safe-bottom 顶起。
+   - 键盘弹出时 IME 自己占住导航栏，sheet 底部只留 10–11px。
+   - 聊天输入统一成整宽自定义皮肤，去掉原生 resize 手柄。
+   - 主题色板改为真正的 SVG 圆形双色渐变。
+   ========================================================================= */
+
+.sheet-layer {
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: auto;
+  height: var(--usable-bottom, 100dvh);
+}
+
+.sheet,
+.models-sheet,
+.import-sheet {
+  max-height: calc(100% - var(--safe-top) - 10px);
+}
+
+/* 对话面板使用当前可见区域的全部高度，输入框和被压缩的结果区共享剩余空间。 */
+.chat-sheet {
+  max-height: calc(100% - var(--safe-top) - 8px);
+}
+
+html[data-keyboard="1"] .sheet-foot {
+  /* 键盘可见时 IME 拥有底部导航区，不再叠加系统栏 inset。 */
+  padding-bottom: 11px;
+}
+
+html[data-keyboard="1"] .chat-foot {
+  padding-bottom: 10px;
+}
+
+/* ---------------------------------------------------------------- 对话输入 */
+
+.field.chat-field {
+  margin-bottom: 0;
+  flex: none;
+}
+
+.chat-input,
+.field .chat-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 84px;
+  max-height: 30dvh;
+  padding: 10px 12px;
+  line-height: 1.55;
+  resize: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sheet-body.chat-body {
+  min-height: 0;
+  overflow-y: auto;
+  gap: 12px;
+}
+
+.chat-result {
+  min-height: 0;
+}
+
+/* 键盘弹出时收紧头部，但不隐藏模型名 / 错误 / 回复。 */
+html[data-keyboard="1"] .chat-sheet .sheet-handle {
+  display: none;
+}
+
+html[data-keyboard="1"] .chat-sheet .sheet-head {
+  padding-top: 6px;
+  padding-bottom: 10px;
+}
+
+html[data-keyboard="1"] .chat-sheet .chat-model-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+html[data-keyboard="1"] .chat-sheet .chat-placeholder {
+  padding: 12px;
+}
+
+/* ---------------------------------------------------------------- 主题色板 */
+
+/* SVG 自带圆形几何与 1px 描边；不要旧 span 的 border / inset 阴影。 */
+.swatch {
+  display: block;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  aspect-ratio: 1 / 1;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.swatch circle {
+  stroke: rgba(0, 0, 0, 0.16);
+}
+
+[data-mode="dark"] .swatch circle {
+  stroke: rgba(255, 255, 255, 0.22);
+}

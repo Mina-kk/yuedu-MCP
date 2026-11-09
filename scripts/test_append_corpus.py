@@ -297,6 +297,101 @@ class BaseValidationTest(unittest.TestCase):
             ac.load_and_validate_base(self.base)
 
 
+class PathSafetySemanticsTest(unittest.TestCase):
+    """路径守卫的纯语义锁：只算路径，不建目录、不写文件、不碰 /ROOT。
+
+    平台事实：`os.path.normcase` 在 POSIX 上是恒等函数（不折叠大小写），在 Windows 上
+    才 lower + 反斜杠化。所以「大小写别名」只有在 normcase 真的折叠时才成立，不能无条件
+    断言；POSIX 下真正等价的只有「同一路径的不同写法」（`.`/`..`/重复分隔符），
+    而大小写不同的路径在 Linux 上就是**不同路径**，生产代码也不得 lower() 掩盖这一点。
+    """
+
+    def setUp(self):
+        # 纯字符串路径，不创建任何目录
+        self.base = os.path.join(os.sep, 'srv', 'corpus', 'base')
+        self.src = os.path.join(os.sep, 'srv', 'corpus', 'incoming.json')
+        self.out = os.path.join(os.sep, 'srv', 'out')
+        self.report = os.path.join(os.sep, 'srv', 'reports', 'r.json')
+
+    def test_canon_is_normcase_realpath(self):
+        self.assertEqual(ac._canon(self.base),
+                         os.path.normcase(os.path.realpath(self.base)))
+
+    def test_equivalent_spellings_are_rejected(self):
+        # 同一路径的写法差异（. / .. / 重复分隔符）在任何平台都等价，必须拒绝
+        spellings = [
+            self.base + os.sep + '.',
+            self.base + os.sep + 'sub' + os.sep + '..',
+            os.path.join(os.sep, 'srv', 'corpus', '.', 'base'),
+            self.base.replace(os.sep, os.sep + os.sep, 1),
+        ]
+        for out in spellings:
+            with self.assertRaises(ValueError, msg='out=%r' % out):
+                ac._check_path_safety(self.base, self.src, out, None)
+
+    def test_report_equivalent_spelling_inside_base_rejected(self):
+        report = os.path.join(self.base, 'sub', '..', 'report.json')
+        with self.assertRaises(ValueError):
+            ac._check_path_safety(self.base, self.src, self.out, report)
+
+    def test_case_alias_follows_normcase_semantics(self):
+        # 大小写别名：仅当本平台 normcase 真的折叠大小写（Windows）时才等价。
+        # 用纯路径判定，不依赖任何大写目录真实存在。
+        upper_out = os.path.join(self.base.upper(), 'o6')
+        folds_case = os.path.normcase('A') == os.path.normcase('a')
+        if folds_case:
+            with self.assertRaises(ValueError):
+                ac._check_path_safety(self.base, self.src, upper_out, None)
+        else:
+            # POSIX：大小写不同 = 不同路径，守卫放行（真实 Linux 语义，不 lower()）
+            self.assertNotEqual(os.path.normcase(upper_out), os.path.normcase(self.base))
+            ac._check_path_safety(self.base, self.src, upper_out, None)
+
+    def test_windows_normcase_semantics_are_mocked_not_assumed(self):
+        # 显式模拟 Windows 路径语义（不依赖运行平台、不写盘）：normcase 折叠大小写后
+        # 大写别名必须被识别为「在 base 内」而拒绝。
+        # POSIX 上 `C:\...` 不是绝对路径（realpath 会拼 cwd、commonpath 直接返回 ''），
+        # 所以这里把被测语义收敛到「normcase 折叠大小写」一条：realpath 恒等，路径用 POSIX
+        # 绝对写法，只有大小写不同——正是原 Windows 断言想验证的那一点。
+        def win_normcase(path):
+            return path.lower()
+
+        real_normcase, real_realpath = os.path.normcase, os.path.realpath
+        os.path.normcase, os.path.realpath = win_normcase, (lambda p: p)
+        try:
+            base = os.path.join(os.sep, 'srv', 'Corpus', 'Base')
+            src = os.path.join(os.sep, 'srv', 'Corpus', 'incoming.json')
+            self.assertEqual(ac._canon(base), base.lower())
+            with self.assertRaises(ValueError):
+                ac._check_path_safety(base, src, os.path.join(base.lower(), 'o6'), None)
+            with self.assertRaises(ValueError):
+                ac._check_path_safety(base, src, base.upper(), None)
+            # 真正不同的路径仍放行
+            ac._check_path_safety(base, src, os.path.join(os.sep, 'srv', 'Corpus', 'Out'), None)
+        finally:
+            os.path.normcase, os.path.realpath = real_normcase, real_realpath
+
+    def test_distinct_paths_pass_on_posix(self):
+        # POSIX「不同路径」纯校验：大小写不同的兄弟目录、完全不同的目录都放行
+        for out in (os.path.join(os.sep, 'srv', 'corpus', 'BASE'),
+                    os.path.join(os.sep, 'srv', 'corpus', 'base2'),
+                    os.path.join(os.sep, 'srv', 'out')):
+            ac._check_path_safety(self.base, self.src, out, None)
+            ac._check_path_safety(self.base, self.src, self.out, self.report)
+
+    def test_guards_are_pure_no_dirs_created(self):
+        # 守卫只算路径：对不存在的目录跑完全部拒绝分支后，父目录仍不存在
+        ghost = os.path.join(tempfile.gettempdir(), 'append_corpus_ghost_%d' % os.getpid())
+        self.assertFalse(os.path.exists(ghost))
+        with self.assertRaises(ValueError):
+            ac._check_path_safety(ghost, self.src, os.path.join(ghost, 'o'), None)
+        with self.assertRaises(ValueError):
+            ac._check_path_safety(self.base, self.src, self.out,
+                                  os.path.join(self.base, 'report.json'))
+        self.assertFalse(os.path.exists(ghost))
+        self.assertFalse(os.path.exists(self.base))
+
+
 class AppendFlowTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -503,12 +598,8 @@ class AppendFlowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ac.append_corpus(
                 self.base, src, os.path.join(self.base, 'o5'))
-        # case-insensitive alias: BASE vs base on Windows normcase
-        upper = os.path.join(self.base.upper(), 'o6')
-        with self.assertRaises(ValueError):
-            ac.append_corpus(self.base, src, upper)
         # none of the refused runs created an out dir
-        for name in ('o1', 'o2', 'o3', 'o4', 'o5', 'o6'):
+        for name in ('o1', 'o2', 'o3', 'o4', 'o5'):
             self.assertFalse(os.path.exists(os.path.join(self.tmp, name)))
             self.assertFalse(os.path.exists(os.path.join(self.base, name)))
         self.assertFalse(os.path.exists(

@@ -1,0 +1,599 @@
+/* =========================================================================
+   v8 Vue additions
+   - 启动 / 自动更新状态 / 折叠余额
+   - 胶囊与次级操作面：轻半透明 + 细微渐变（10 套主题、亮暗通用）
+   ========================================================================= */
+
+/* Keep the requested swatches; darken only white-text primary actions for AA. */
+[data-theme="pink"] .btn-primary,
+[data-theme="crimson"] .btn-primary,
+[data-theme="porcelain"] .btn-primary {
+  background-color: color-mix(in srgb, var(--c1) 90%, #000000);
+}
+
+#app,
+.app {
+  min-height: 100dvh;
+}
+
+body.sheet-open {
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- 启动页 */
+
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(24px + var(--safe-top)) max(20px, var(--safe-left))
+    calc(24px + var(--safe-bottom)) max(20px, var(--safe-right));
+  background: var(--bg);
+}
+
+.boot-card {
+  width: min(400px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 28px 22px 24px;
+  border-radius: 24px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-strong);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  box-shadow: var(--shadow-pop);
+}
+
+.boot-brand {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  text-align: left;
+  margin-bottom: 26px;
+}
+
+.boot-title {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+
+.boot-sub {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.boot-spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 14px;
+  border-radius: 50%;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 16%, rgba(255, 255, 255, 0.7)),
+    color-mix(in srgb, var(--c1) 5%, rgba(255, 255, 255, 0.5))
+  );
+  border: 1px solid color-mix(in srgb, var(--c1) 26%, var(--line));
+  color: var(--text);
+}
+
+[data-mode="dark"] .boot-spinner {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 18%, rgba(28, 28, 34, 0.7)),
+    rgba(28, 28, 34, 0.55)
+  );
+}
+
+.spin.big {
+  width: 24px;
+  height: 24px;
+  border-width: 2.5px;
+}
+
+.boot-message {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-soft);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.boot-hint {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.boot-error-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  height: 50px;
+  margin-bottom: 12px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  color: var(--bad);
+}
+
+.boot-error-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.boot-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* ---------------------------------------------------------------- 自动更新状态 */
+
+.auto-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--c1) 20%, var(--line));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 8%, rgba(255, 255, 255, 0.8)),
+    rgba(255, 255, 255, 0.56)
+  );
+  box-shadow: var(--shadow-sm);
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+[data-mode="dark"] .auto-bar {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 14%, rgba(28, 28, 34, 0.72)),
+    rgba(28, 28, 34, 0.55)
+  );
+  border-color: color-mix(in srgb, var(--c1) 26%, var(--line));
+  color: var(--text-soft);
+}
+
+.auto-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 14%, transparent);
+  flex: none;
+}
+
+.auto-bar.paused .auto-dot {
+  background: #c99524;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #c99524 16%, transparent);
+}
+
+[data-mode="dark"] .auto-bar.paused .auto-dot {
+  background: #e8b84b;
+}
+
+.auto-text {
+  font-weight: 650;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auto-time {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.auto-refresh {
+  flex: none;
+  margin-left: 2px;
+}
+
+.auto-bar:not(.paused) .auto-dot {
+  animation: auto-pulse 2.8s ease-in-out infinite;
+}
+
+@keyframes auto-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ---------------------------------------------------------------- 折叠卡片余额 */
+
+.entry-balance {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-soft);
+}
+
+.entry-balance .ico {
+  flex: none;
+  opacity: 0.9;
+}
+
+.entry-balance.ok .ico {
+  color: var(--ok);
+}
+
+.entry-balance.bad .ico {
+  color: var(--bad);
+}
+
+.entry-balance.stale .ico {
+  color: #b07a12;
+}
+
+[data-mode="dark"] .entry-balance.stale .ico {
+  color: #e8b84b;
+}
+
+.entry-balance-text {
+  font-weight: 600;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry-balance.bad .entry-balance-text {
+  color: var(--text);
+}
+
+.entry-balance-time {
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+  flex: none;
+}
+
+.balance-footnote {
+  margin: 22px 2px 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- 胶囊 / 次级面 */
+
+/* 浅半透明 + 6–12% 主题色渐变；深色模式用深玻璃 + 10–16% 主题色。 */
+.model-chip {
+  height: 31px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--c1) 20%, var(--line-strong));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 9%, rgba(255, 255, 255, 0.82)),
+    color-mix(in srgb, var(--c1) 4%, rgba(255, 255, 255, 0.66))
+  );
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34);
+}
+
+[data-mode="dark"] .model-chip {
+  border-color: color-mix(in srgb, var(--c1) 30%, var(--line-strong));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 15%, rgba(32, 32, 39, 0.72)),
+    rgba(28, 28, 34, 0.58)
+  );
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.model-chip.bad {
+  border-color: color-mix(in srgb, var(--bad) 34%, var(--line-strong));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--bad) 9%, rgba(255, 255, 255, 0.8)),
+    rgba(255, 255, 255, 0.6)
+  );
+}
+
+[data-mode="dark"] .model-chip.bad {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--bad) 16%, rgba(32, 32, 39, 0.72)),
+    rgba(28, 28, 34, 0.58)
+  );
+}
+
+.model-chip .chip-hit {
+  border-radius: 999px;
+  padding-left: 10px;
+}
+
+.model-chip .chip-hit:hover {
+  background: color-mix(in srgb, var(--c1) 11%, transparent);
+}
+
+[data-mode="dark"] .model-chip .chip-hit:hover {
+  background: color-mix(in srgb, var(--c1) 18%, transparent);
+}
+
+.model-chip .lat {
+  color: var(--text-soft);
+  font-weight: 600;
+  opacity: 1;
+}
+
+.model-chip .chip-chat,
+.model-chip .chip-zap {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  color: var(--text-soft);
+}
+
+.model-chip .chip-chat:hover,
+.model-chip .chip-zap:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--c1) 14%, transparent);
+  color: var(--text);
+}
+
+/* 次级按钮 / 状态胶囊同样使用轻渐变，主按钮保持明确的主题色。 */
+.check-all,
+.icon-btn.big,
+.btn-ghost,
+.segmented,
+.auto-bar {
+  background-image: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 6%, rgba(255, 255, 255, 0.7)),
+    rgba(255, 255, 255, 0.42)
+  );
+}
+
+[data-mode="dark"] .check-all,
+[data-mode="dark"] .icon-btn.big,
+[data-mode="dark"] .btn-ghost,
+[data-mode="dark"] .segmented {
+  background-image: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 10%, rgba(30, 30, 36, 0.62)),
+    rgba(24, 24, 29, 0.5)
+  );
+}
+
+.btn-ghost {
+  border-color: color-mix(in srgb, var(--c1) 16%, var(--line-strong));
+}
+
+.btn-ghost.danger {
+  border-color: color-mix(in srgb, var(--bad) 26%, var(--line-strong));
+}
+
+/* 已选分段：仍是轻渐变，避免整块高饱和。 */
+.seg.on {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 13%, rgba(255, 255, 255, 0.92)),
+    color-mix(in srgb, var(--c1) 5%, rgba(255, 255, 255, 0.8))
+  );
+  border-color: color-mix(in srgb, var(--c1) 30%, var(--line));
+  color: var(--text);
+}
+
+[data-mode="dark"] .seg.on {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 20%, rgba(255, 255, 255, 0.07)),
+    rgba(255, 255, 255, 0.05)
+  );
+  border-color: color-mix(in srgb, var(--c1) 34%, var(--line-strong));
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------- 余额面板补充 */
+
+.bal-stale {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #c99524 32%, transparent);
+  background: color-mix(in srgb, #c99524 10%, transparent);
+  color: #8a6407;
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+[data-mode="dark"] .bal-stale {
+  color: #f0c465;
+  border-color: color-mix(in srgb, #e8b84b 36%, transparent);
+  background: color-mix(in srgb, #e8b84b 14%, transparent);
+}
+
+.bal-source {
+  margin: 7px 0 0;
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.balance-panel .bal-foot {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+/* ---------------------------------------------------------------- 导入预览 */
+
+.import-sheet {
+  max-height: min(90dvh, calc(100dvh - var(--safe-top) - 10px));
+}
+
+.import-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.import-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 46dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.import-row {
+  padding: 9px 10px;
+  border-radius: 13px;
+  border: 1px solid var(--line);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 6%, rgba(255, 255, 255, 0.72)),
+    rgba(255, 255, 255, 0.46)
+  );
+}
+
+[data-mode="dark"] .import-row {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--c1) 11%, rgba(30, 30, 36, 0.64)),
+    rgba(26, 26, 31, 0.52)
+  );
+}
+
+.import-foot {
+  justify-content: flex-end;
+}
+
+/* 主操作按钮：保持主题色，但白字色板使用略深的实色背景保证 4.5:1。 */
+:root {
+  --danger-bg: #c6433c;
+}
+
+[data-mode="dark"] {
+  --danger-bg: #b45c56;
+}
+
+.btn-primary {
+  background: var(--action-bg, var(--c1));
+  border-color: color-mix(in srgb, var(--action-bg, var(--c1)) 62%, #000 14%);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--action-bg, var(--c1));
+  border-color: var(--action-bg, var(--c1));
+}
+
+.btn-danger,
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+  border-color: color-mix(in srgb, var(--danger-bg) 72%, #000 10%);
+}
+
+/* ---------------------------------------------------------------- 收尾 */
+
+/* 瓷白 / 奶油白主题不能出现浅底白字头像：主题会注入更稳的 avatar 变量。 */
+.avatar {
+  background: var(--avatar-bg, var(--c2));
+  color: var(--avatar-fg, var(--c1));
+}
+
+.settings-sheet .file-input {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.version-note {
+  text-align: center;
+  padding-bottom: 4px;
+}
+
+/* 键盘弹起时使用 visualViewport 的真实高度，保证底部保存按钮可点。 */
+.sheet {
+  max-height: min(92dvh, calc(var(--vvh, 100dvh) - var(--safe-top) - 8px));
+}
+
+.models-sheet {
+  max-height: min(88dvh, calc(var(--vvh, 100dvh) - var(--safe-top) - 8px));
+}
+
+.import-sheet {
+  max-height: min(90dvh, calc(var(--vvh, 100dvh) - var(--safe-top) - 10px));
+}
+
+@media (max-width: 420px) {
+  .auto-bar {
+    gap: 7px;
+    padding-right: 8px;
+  }
+
+  .auto-time {
+    font-size: 10.5px;
+  }
+
+  .import-list {
+    max-height: 40dvh;
+  }
+}
+
+@media (max-width: 360px) {
+  .auto-bar {
+    flex-wrap: wrap;
+    border-radius: 16px;
+  }
+
+  .auto-time {
+    margin-left: 15px;
+    width: 100%;
+  }
+
+  .auto-refresh {
+    margin-left: auto;
+  }
+
+  .head-actions {
+    gap: 5px;
+  }
+
+  .check-label {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auto-bar:not(.paused) .auto-dot {
+    animation: none;
+  }
+}

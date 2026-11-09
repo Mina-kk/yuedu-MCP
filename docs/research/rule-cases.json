@@ -1,0 +1,684 @@
+{
+  "schema": "yuedu-rule-cases/v1",
+  "purpose": "确定性离线 TDD 用例候选：输入与规则均为内联字面量，不联网、不执行网上书源 JS。expected 依据固定 commit 上游源码推导；无法确定的写 unknown，不造值。",
+  "upstream_baseline": {
+    "repo": "LegadoTeam/legado",
+    "commit": "330e606c4d57e08adc056ff8ab7a4132c784da9a",
+    "blob_prefix": "https://github.com/LegadoTeam/legado/blob/330e606c4d57e08adc056ff8ab7a4132c784da9a/",
+    "note": "Team 为主基线；跨分支差异在 profile_diff 字段标注。"
+  },
+  "project_entries": {
+    "engine": "app/src/main/java/io/legado/app/model/analyzeRule/LegadoRuleEngine.kt",
+    "jsoup": "app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSoup.kt",
+    "xpath": "app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeByXPath.kt",
+    "jsonpath": "app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSonPath.kt",
+    "regex": "app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeByRegex.kt",
+    "stringRule": "app/src/main/java/com/mina/legadostudio/runtime/LegadoStringRule.kt",
+    "runtime": "app/src/main/java/com/mina/legadostudio/runtime/EmbeddedLegadoRuntime.kt",
+    "jsTemplates": "app/src/main/java/com/mina/legadostudio/domain/JsTemplates.kt"
+  },
+  "cases": [
+    {
+      "id": "css-index-negative",
+      "title": "CSS 默认选择器负索引",
+      "kind": "css",
+      "input": "<ul><li>a</li><li>b</li><li>c</li></ul>",
+      "rule": "li.-1@text",
+      "expected": [
+        "c"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:326-331（负索引 it+len）、:224-232（text 取值器）",
+      "current_diff": "无差异（本项目 AnalyzeByJSoup.kt:310-314 同逻辑）",
+      "entry": "engine.extract(html, \"li.-1@text\")",
+      "severity": "none",
+      "status": "covered-by-existing-test"
+    },
+    {
+      "id": "css-index-slice-step",
+      "title": "CSS 区间切片 start:end:step",
+      "kind": "css",
+      "input": "<ul><li>0</li><li>1</li><li>2</li><li>3</li><li>4</li></ul>",
+      "rule": "li.0:4:2@text",
+      "expected": [
+        "0",
+        "2",
+        "4"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:334-365（区间展开 start..end step step）",
+      "current_diff": "无差异",
+      "entry": "engine.extract(html, \"li.0:4:2@text\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "css-index-bracket-negative",
+      "title": "[] 索引写法负索引 + 区间",
+      "kind": "css",
+      "input": "<ul><li>0</li><li>1</li><li>2</li><li>3</li></ul>",
+      "rule": "li[-1,0:1]@text",
+      "expected": [
+        "3",
+        "0",
+        "1"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:413-476（[] 解析）、:321-376（indexSet 插入序）",
+      "current_diff": "无差异；注意 indexSet 是 Set，重复索引只保留一次",
+      "entry": "engine.extract(html, \"li[-1,0:1]@text\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "css-exclude-bang",
+      "title": "! 排除索引",
+      "kind": "css",
+      "input": "<ul><li>a</li><li>b</li><li>c</li></ul>",
+      "rule": "li!1@text",
+      "expected": [
+        "a",
+        "c"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:381-385（Team deselect 倒序）",
+      "current_diff": "本项目 AnalyzeByJSoup.kt:365-371 用 removeAt 倒序，结果等价；Max/Rimchars/NG/T 用写 null + removeAll，对 Elements.outerHtml 有副作用差异",
+      "entry": "engine.extract(html, \"li!1@text\")",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "css-attr-dedup-and-blank",
+      "title": "属性取值器丢弃空串与重复值",
+      "kind": "css",
+      "input": "<div><a href=\"/x\">1</a><a href=\"/x\">2</a><a>3</a></div>",
+      "rule": "a@href",
+      "expected": [
+        "/x"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:265-272（isBlank 与 contains 去重）",
+      "current_diff": "无差异（本项目 :249-256 同逻辑）",
+      "entry": "engine.extract(html, \"a@href\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "css-or-first-nonempty-breaks",
+      "title": "|| 第一个非空即停止，不合并",
+      "kind": "css",
+      "input": "<div><span class='name'>书名</span><span class='author'>作者</span></div>",
+      "rule": ".name@text||.author@text",
+      "expected": [
+        "书名"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:100-103（elementsType==|| 时 break）",
+      "current_diff": "无差异（已有测试 LegadoRuleEngineTest.kt:31 覆盖）",
+      "entry": "engine.extract(html, \".name@text||.author@text\")",
+      "severity": "none",
+      "status": "covered-by-existing-test"
+    },
+    {
+      "id": "css-and-concat",
+      "title": "&& 顺序拼接",
+      "kind": "css",
+      "input": "<div><span class='name'>书名</span><span class='author'>作者</span></div>",
+      "rule": ".name@text&&.author@text",
+      "expected": [
+        "书名",
+        "作者"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:114-118（addAll）",
+      "current_diff": "无差异（已有测试 :32 覆盖）",
+      "entry": "engine.extract(html, \".name@text&&.author@text\")",
+      "severity": "none",
+      "status": "covered-by-existing-test"
+    },
+    {
+      "id": "css-percent-interleave",
+      "title": "%% 以第一段下标交错合并",
+      "kind": "css",
+      "input": "<div><a class='n'>n1</a><a class='n'>n2</a><p class='a'>a1</p><p class='a'>a2</p></div>",
+      "rule": ".n@text%%.a@text",
+      "expected": [
+        "n1",
+        "a1",
+        "n2",
+        "a2"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:106-113（for i in results[0].indices）",
+      "current_diff": "无差异（本项目 :106-113 同）",
+      "entry": "engine.extract(html, \".n@text%%.a@text\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "css-percent-shorter-first-truncates",
+      "title": "%% 第一段更短时后续段尾部被丢弃",
+      "kind": "css",
+      "input": "<div><a class='n'>n1</a><p class='a'>a1</p><p class='a'>a2</p><p class='a'>a3</p></div>",
+      "rule": ".n@text%%.a@text",
+      "expected": [
+        "n1",
+        "a1"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:107（results[0].indices 为外循环）",
+      "current_diff": "无差异；这是上游的真实行为，用例用于锁定",
+      "entry": "engine.extract(html, \".n@text%%.a@text\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "leading-minus-is-not-upstream-syntax",
+      "title": "- 前缀在上游不存在（本项目自造反转）",
+      "kind": "css",
+      "input": "<ul><li>a</li><li>b</li><li>c</li></ul>",
+      "rule": "-li@text",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeRule.kt:662-696（SourceRule.init 无 '-' 分支）；-li 会落到 else 由 jsoup 解析并抛 Could not parse query",
+      "current_diff": "S1-1：本项目 LegadoRuleEngine.kt:23-24/:34 反转列表返回 [c,b,a]；上游应抛异常或空。expected 写 unknown 是因为上游异常类型/是否被上层 catch 取决于调用点（AnalyzeByJSoup.getString 不 catch，AnalyzeRule.getString 不 catch）",
+      "entry": "engine.extract(html, \"-li@text\")",
+      "severity": "S1",
+      "status": "must-fix"
+    },
+    {
+      "id": "css-subprefix-in-or-is-invalid-upstream",
+      "title": "@css: 子前缀只在整段 @CSS: 时合法",
+      "kind": "css",
+      "input": "<div><a class='b' href='/p/1'>标题</a></div>",
+      "rule": "a@text||@css:.b@href",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeByJSoup.kt:90（只判 sourceRule.isCss，无子前缀判断）；@css:.b@href 会作为 CSS 选择器交给 temp.select，jsoup 抛 Could not parse query",
+      "current_diff": "S1-2：本项目 AnalyzeByJSoup.kt:90/:138/:141 支持子前缀并返回 ['标题','/p/1']；上游抛异常。expected 写 unknown 因异常是否被上层吞掉取决于调用点",
+      "entry": "engine.extract(html, \"a@text||@css:.b@href\")",
+      "severity": "S1",
+      "status": "must-fix"
+    },
+    {
+      "id": "css-prefix-without-last-rule-throws",
+      "title": "@CSS: 段无取值器时上游抛异常",
+      "kind": "css",
+      "input": "<div class='x'>文本</div>",
+      "rule": "@CSS:.x",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeByJSoup.kt:91-95（lastIndexOf('@') 为 -1，take(-1) 抛 IllegalArgumentException）",
+      "current_diff": "S2-3：本项目 :93-94 判断 lastIndex>0 后默认取值器 text，返回 ['文本']",
+      "entry": "engine.extract(html, \"@CSS:.x\")",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "css-textnodes-join",
+      "title": "textNodes 每元素内文本节点 trim 后换行连接",
+      "kind": "css",
+      "input": "<div class='c'> 甲 <b>乙</b> 丙 </div>",
+      "rule": ".c@textNodes",
+      "expected": [
+        "甲\n丙"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:234-246（textNodes() 逐个 trim，joinToString(\"\\n\")）",
+      "current_diff": "无差异（本项目 :218-230 同）",
+      "entry": "engine.extract(html, \".c@textNodes\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "css-html-strips-script-style",
+      "title": "html 取值器移除 script/style",
+      "kind": "css",
+      "input": "<div class='c'><script>x</script><style>y</style><p>正文</p></div>",
+      "rule": ".c@html",
+      "expected": [
+        "<div class=\"c\"><p>正文</p></div>"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:255-262（select script/style remove 后 outerHtml）",
+      "current_diff": "无差异（本项目 :239-246 同）",
+      "entry": "engine.extract(html, \".c@html\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "xpath-text-join-newline",
+      "title": "XPath getString 用换行连接",
+      "kind": "xpath",
+      "input": "<div><a>甲</a><a>乙</a></div>",
+      "rule": "@XPath://a/text()",
+      "expected": "甲\n乙",
+      "source_evidence": "AnalyzeByXPath.kt:133-154（TextUtils.join(\"\\n\", it)）",
+      "current_diff": "无差异；本项目 LegadoRuleEngine.extract 返回 values 列表，getString 语义由调用方 join",
+      "entry": "engine.extract(html, \"@XPath://a/text()\").values",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "xpath-string-does-not-split-percent",
+      "title": "XPath getString 不切 %%",
+      "kind": "xpath",
+      "input": "<div><a>甲</a><b>乙</b></div>",
+      "rule": "@XPath://a/text()%%//b/text()",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeByXPath.kt:135（只切 && ||）；%% 会原样进入 XPath 表达式，JXDocument 解析失败返回 null → getString 返回 null",
+      "current_diff": "无差异（本项目 :135 同）；expected 写 unknown 因 JXDocument 对非法表达式的具体返回未在本快照内验证",
+      "entry": "engine.extract(html, rule)",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "xpath-leading-slash-detected",
+      "title": "/ 开头自动判 XPath",
+      "kind": "xpath",
+      "input": "<div><a>甲</a></div>",
+      "rule": "//a/text()",
+      "expected": [
+        "甲"
+      ],
+      "source_evidence": "AnalyzeRule.kt:690-693（startsWith(\"/\") → Mode.XPath）",
+      "current_diff": "无差异（本项目 LegadoRuleEngine.kt:119）",
+      "entry": "engine.extract(html, \"//a/text()\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "json-list-string-join",
+      "title": "JSONPath getString 列表用换行连接",
+      "kind": "jsonpath",
+      "input": "{\"books\":[{\"name\":\"甲\"},{\"name\":\"乙\"}]}",
+      "rule": "$.books[*].name",
+      "expected": "甲\n乙",
+      "source_evidence": "AnalyzeByJSonPath.kt:47-52（List joinToString(\"\\n\")）",
+      "current_diff": "无差异（本项目 :47-52 同）",
+      "entry": "engine.extract(json, \"$.books[*].name\").values",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "json-relative-key-on-json-content",
+      "title": "JSON content 下无前缀字段规则是键值直接访问",
+      "kind": "jsonpath",
+      "input": "{\"data\":{\"list\":[{\"name\":\"甲\",\"id\":\"1\"}]}}",
+      "rule": "name",
+      "expected": "甲",
+      "source_evidence": "AnalyzeRule.kt:337-340（LinkedTreeMap 时 result[ruleList.first().rule]）、:325-336（NativeObject 时 result[rule]）",
+      "current_diff": "S1-3：本项目 LegadoRuleEngine.kt:94-99 把 JSON content 的无前缀规则判为 JSON_PATH，jayway 自动补 $. 后结果恰好相同；但 @put/{{}}/## 的执行顺序与 NativeObject 特例不同",
+      "entry": "engine.extract(item, \"name\")",
+      "severity": "S1",
+      "status": "must-fix"
+    },
+    {
+      "id": "json-embedded-rule-in-string",
+      "title": "{$.rule} 内嵌规则替换",
+      "kind": "jsonpath",
+      "input": "{\"a\":{\"b\":\"值\"}}",
+      "rule": "$.a<js>'{'+result+'}'</js>.b",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeByJSonPath.kt:43（innerRule(\"{$.\") 仅对字符串内 {$.x} 生效）；本用例的 { } 由 JS 生成，不在规则串里，不触发 innerRule，因此应作为 JsonPath 字面量解析失败",
+      "current_diff": "本项目 :43 同；expected unknown 因 jayway 对含 JS 结果的路径解析结果未在本快照内验证",
+      "entry": "engine.extract(json, rule)",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "regex-colon-prefix-first-match",
+      "title": ": 前缀正则取第一个匹配",
+      "kind": "regex",
+      "input": "xx标题三yy",
+      "rule": ":标题三",
+      "expected": "标题三",
+      "source_evidence": "AnalyzeRule.kt:599-602（allInOne 且首字符 : → Mode.Regex）；AnalyzeByRegex.kt:9-30（getElement 只取首个）",
+      "current_diff": "无差异（已有测试 LegadoRuleEngineTest.kt:25-27）",
+      "entry": "engine.extract(text, \":标题三\")",
+      "severity": "none",
+      "status": "covered-by-existing-test"
+    },
+    {
+      "id": "regex-groups-preserved-in-elements",
+      "title": "正则分组在 getElements 中保留",
+      "kind": "regex",
+      "input": "第12章 起风了\n第13章 落雨了",
+      "rule": ":第(\\d+)章",
+      "expected": [
+        [
+          "第12章",
+          "12"
+        ],
+        [
+          "第13章",
+          "13"
+        ]
+      ],
+      "source_evidence": "AnalyzeByRegex.kt:32-59（末级返回含 group0 的 List<List<String>>）",
+      "current_diff": "S1-6：本项目 LegadoRuleEngine.kt:59 mapNotNull{it.firstOrNull()} 只保留 group0，返回 [\"第12章\",\"第13章\"]",
+      "entry": "engine.elementList(text, \":第(\\\\d+)章\")",
+      "severity": "S1",
+      "status": "must-fix"
+    },
+    {
+      "id": "regex-multilevel-append",
+      "title": "多级正则逐级把全部匹配拼接",
+      "kind": "regex",
+      "input": "<i>甲1</i><i>乙2</i>",
+      "rule": ":<i>(\\w+?)</i>&&:.*?(\\d)",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeByRegex.kt:52-58（每级 append 全部 group() 再递归）",
+      "current_diff": "本项目 :32/:59 只调用单级 getElements(arrayOf(normalized))，不切 && 级联；expected unknown 因多级正则的最终分组形状依赖两级拼接结果",
+      "entry": "engine.elementList(text, rule)",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "replace-all-vs-first",
+      "title": "## 全部替换 vs ### 首个匹配",
+      "kind": "replace",
+      "input": "abc123def456",
+      "rule": "##\\d+##N###",
+      "expected": "N",
+      "source_evidence": "AnalyzeRule.kt:549-560（replaceFirst 取 group(0) 后 replaceFirst；无匹配返回 \"\"）",
+      "current_diff": "无差异（已有测试 LegadoStringRuleTest.kt:25-29 覆盖；本项目 LegadoStringRule.kt:69-81 同）",
+      "entry": "LegadoStringRule.replace(\"abc123def456\", LegadoStringRule.split(\"##\\\\d+##N###\").single())",
+      "severity": "none",
+      "status": "covered-by-existing-test"
+    },
+    {
+      "id": "replace-all-occurrences",
+      "title": "## 无 ### 时替换全部出现",
+      "kind": "replace",
+      "input": "广告甲广告乙",
+      "rule": "##广告##",
+      "expected": "甲乙",
+      "source_evidence": "AnalyzeRule.kt:561-567（result.replace(regex, replacement)）",
+      "current_diff": "无差异（本项目 LegadoStringRule.kt:76-80）",
+      "entry": "LegadoStringRule.replace(\"广告甲广告乙\", LegadoStringRule.split(\"##广告##\").single())",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "replace-invalid-regex-literal-fallback",
+      "title": "正则非法时退化为字面量替换",
+      "kind": "replace",
+      "input": "a[b]c",
+      "rule": "##[b##X##",
+      "expected": "aXc",
+      "source_evidence": "AnalyzeRule.kt:563-567（regex 为 null 时 result.replace(replaceRegex, replacement)）；注意 [b 是非法正则",
+      "current_diff": "无差异（本项目 LegadoStringRule.kt:78-80 同）",
+      "entry": "LegadoStringRule.replace(\"a[b]c\", LegadoStringRule.split(\"##[b##X##\").single())",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "put-then-get-variable",
+      "title": "@put 存变量后 @get 回填",
+      "kind": "variable",
+      "input": "<div class='n'>书名</div><div class='a'>作者</div>",
+      "rule": ".n@text@put:{n:'.n@text'}&&@get:{n}-@get:{a}",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeRule.kt:516-539（splitPutRule 抽 @put）、:507-511（putRule 先求值再存）、:814-816（@get 从变量池取）、:875-891（get 顺序 local→bookName/title→chapter→book→ruleData→source）",
+      "current_diff": "S1-7：本项目完全未实现 @put/@get，整串会被当选择器；expected unknown 因 @put 的 JSON 值必须用规则串求值、而 @get:{a} 未定义时返回空串，拼接结果依赖段切分，需实现后按上游逐段验证",
+      "entry": "RuleStringParser（待建）/ EmbeddedLegadoRuntime.extractAll",
+      "severity": "S1",
+      "status": "must-fix"
+    },
+    {
+      "id": "double-brace-js-template",
+      "title": "{{}} 模板表达式",
+      "kind": "variable",
+      "input": "<div class='n'>书名</div>",
+      "rule": ".n@text##^##{{java.base64Encode(result)}}",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeRule.kt:723-726（{{}} → jsRuleType）、:794-812（evalJS 求值）；evalPattern 非贪婪匹配 {{...}}",
+      "current_diff": "S1-7：本项目 extractAll 不处理 {{}}（只在 hasJs 检测），整段会被当选择器；expected unknown 因 base64Encode 的输入是上一段结果还是整个 result 取决于 makeUpRule 的 result 参数，需实现后对齐",
+      "entry": "RuleStringParser（待建）",
+      "severity": "S1",
+      "status": "must-fix"
+    },
+    {
+      "id": "dollar-group-reference",
+      "title": "$1 分组引用把段提升为正则",
+      "kind": "variable",
+      "input": "第12章 起风了",
+      "rule": ":第(\\d+)章$1",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeRule.kt:744-771（regexPattern \\$\\d{1,2} 命中则 mode=Regex）、:783-791（makeUpRule 从 result 列表取第 n 项）",
+      "current_diff": "S1-8：本项目无 $n 处理，$1 会作为正则字面量；expected unknown 因 $1 取的是 getElements 结果的第 1 项还是 getString 结果的字符，取决于入口（getString 下 result 是 String，makeUpRule 的 List 分支不命中，保留字面量）",
+      "entry": "RuleStringParser（待建）",
+      "severity": "S1",
+      "status": "must-fix"
+    },
+    {
+      "id": "js-block-then-replace",
+      "title": "<js> 段后 ## 替换是两段",
+      "kind": "js",
+      "input": "<div class='n'>广告书名</div>",
+      "rule": ".n@text<js>String(result)</js>##广告##",
+      "expected": "书名",
+      "source_evidence": "AnalyzeRule.kt:607-617（<js> 切段）、:341-364（逐段 replaceRegex）",
+      "current_diff": "无差异（已有测试 LegadoStringRuleTest.kt:50-57 覆盖切分；替换本身同）",
+      "entry": "LegadoStringRule.split + replace",
+      "severity": "none",
+      "status": "covered-by-existing-test"
+    },
+    {
+      "id": "js-result-string-vs-list",
+      "title": "链式 @js 的 result 在 getString 是 String、getStringList 是 List",
+      "kind": "js",
+      "input": "<ul><li>a</li><li>b</li></ul>",
+      "rule": "li@text@js:result.length",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeRule.kt:341-364（getString 链 result 为上一段结果对象）、:249-275（getStringList 链 result 为列表）",
+      "current_diff": "本项目 EmbeddedLegadoRuntime.kt:630-637 用 listMode 区分 evaluate/evaluateRaw，方向一致；expected unknown 因 getString 下 result 是 \"a\\nb\" 字符串（length=3）还是 List（length=2）需按入口分别断言，不能合并",
+      "entry": "EmbeddedLegadoRuntime.extractAll(listMode=false/true)",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "atcss-whole-string",
+      "title": "整段 @CSS: 前缀合法",
+      "kind": "css",
+      "input": "<div id='play_0'><ul><li><a href='/w/1.html'>第一章</a></li></ul></div>",
+      "rule": "@CSS:#play_0 ul a@href",
+      "expected": [
+        "/w/1.html"
+      ],
+      "source_evidence": "AnalyzeRule.kt:665-668（@CSS: 保留前缀）、AnalyzeByJSoup.kt:509-517（剥 5 字符置 isCss）、:91-95",
+      "current_diff": "无差异（本项目 :523-531 + :90-95）",
+      "entry": "engine.extract(html, \"@CSS:#play_0 ul a@href\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "atcss-uppercase-ignorecase",
+      "title": "@CSS: 前缀大小写不敏感",
+      "kind": "css",
+      "input": "<div class='x'>文本</div>",
+      "rule": "@css:.x@text",
+      "expected": [
+        "文本"
+      ],
+      "source_evidence": "AnalyzeByJSoup.kt:511（startsWith(\"@CSS:\", true)）",
+      "current_diff": "无差异（本项目 :525 同）",
+      "entry": "engine.extract(html, \"@css:.x@text\")",
+      "severity": "none",
+      "status": "candidate"
+    },
+    {
+      "id": "xpath-prefix-uppercase-variant",
+      "title": "@XPATH: 大小写变体应被识别",
+      "kind": "xpath",
+      "input": "<div><a>甲</a></div>",
+      "rule": "@XPATH://a/text()",
+      "expected": [
+        "甲"
+      ],
+      "source_evidence": "AnalyzeRule.kt:675-678（startsWith(\"@XPath:\", true)，大小写不敏感）",
+      "current_diff": "S3-1：本项目 LegadoRuleEngine.kt:126 removePrefix 大小写敏感，@XPATH: 不被剥除，XPath 解析失败",
+      "entry": "engine.extract(html, \"@XPATH://a/text()\")",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "selfclosing-anchor-team-only",
+      "title": "<a/> 自闭合解析（Team 独有 parseSourceHtml）",
+      "kind": "css",
+      "input": "<div><a/>甲<a/>乙</div>",
+      "rule": "a@text",
+      "expected": "unknown",
+      "source_evidence": "SourceHtmlParser.kt:12-19（TagSet.Html().onNewTag { set(Tag.SelfClose) }）；AnalyzeByJSoup.kt:26/:33 走 parseSourceHtml",
+      "current_diff": "S2-1：本项目 AnalyzeByJSoup.kt:33 直接 Jsoup.parse，<a/> 会吞掉后续兄弟；expected unknown 因 jsoup 1.21.2 的 HTML5 树构建结果需实测确认（快照未含 jsoup 版本）",
+      "entry": "engine.extract(html, \"a@text\")",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "getstringlist-string-split-newline",
+      "title": "getStringList 对 String 结果按换行拆分",
+      "kind": "contract",
+      "input": "<div class='c'>甲\n乙</div>",
+      "rule": ".c@text",
+      "expected": [
+        "甲",
+        "乙"
+      ],
+      "source_evidence": "AnalyzeRule.kt:278-281（result is String → split(\"\\n\")）",
+      "current_diff": "本项目 extractAll 返回 List<String>，单段时是 [\"甲\\n乙\"]，不再二次拆分；上游 getStringList 会拆成两项",
+      "entry": "EmbeddedLegadoRuntime.extractAll(listMode=true)",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "getstring-unescape-html4",
+      "title": "getString 默认 HTML4 反转义",
+      "kind": "contract",
+      "input": "<div class='c'>书名&amp;作者&nbsp;尾</div>",
+      "rule": ".c@text",
+      "expected": "书名&作者 尾",
+      "source_evidence": "AnalyzeRule.kt:369-373（StringEscapeUtils.unescapeHtml4）",
+      "current_diff": "S2-4：本项目 LegadoStringRule.kt:83-84 用 jsoup unescapeEntities(inAttribute=false)，&nbsp; 结果与 commons-text 可能有差异；expected 按 commons-text 语义",
+      "entry": "LegadoStringRule.unescapeHtml",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "elements-not-found-filter",
+      "title": "getElements 过滤 null 与 NOT_FOUND",
+      "kind": "contract",
+      "input": "<ul><li>a</li><li>b</li></ul>",
+      "rule": "li@text",
+      "expected": [
+        "a",
+        "b"
+      ],
+      "source_evidence": "AnalyzeRule.kt:477-501（List → 过滤 null/NOT_FOUND；其余 → 空 ArrayList）",
+      "current_diff": "本项目 LegadoRuleEngine.elementList 返回 List<Any>，未做 NOT_FOUND 过滤；JS 返回 undefined 时可能带出 null",
+      "entry": "engine.elementList(html, \"li@text\")",
+      "severity": "S2",
+      "status": "candidate"
+    },
+    {
+      "id": "put-nested-json-unsupported",
+      "title": "@put 值必须是字符串，嵌套对象不支持",
+      "kind": "variable",
+      "input": "<div class='n'>书名</div>",
+      "rule": ".n@text@put:{a:{b:'.n@text'}}",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeRule.kt:1027（putPattern @put:(\\{[^}]+?\\}) 不允许嵌套花括号）；嵌套时正则只匹配到 @put:{a:{b:'.n@text'，JSON 解析失败，putMap 为空",
+      "current_diff": "S1-7：本项目无 @put；expected unknown 因匹配失败后剩余串如何被当选择器处理需实现后验证",
+      "entry": "RuleStringParser（待建）",
+      "severity": "S1",
+      "status": "candidate"
+    },
+    {
+      "id": "webjs-explicit-unsupported",
+      "title": "@webJs: 沙箱应显式报不支持",
+      "kind": "unsupported",
+      "input": "<div>甲</div>",
+      "rule": "@webJs:document.body.innerText",
+      "expected": "unknown",
+      "source_evidence": "AnalyzeRule.kt:618-628（WebJS_PATTERN → Mode.WebJs → BackstageWebView）",
+      "current_diff": "S3-3：本项目无 @webJs: 识别，会被当选择器；建议返回结构化 unsupported 而非静默取空",
+      "entry": "RuleStringParser（待建）",
+      "severity": "S3",
+      "status": "candidate"
+    },
+    {
+      "id": "json-content-heuristic-false-positive",
+      "title": "以 { 开头的 HTML 被误判 JSON",
+      "kind": "contract",
+      "input": "{not json}<div>甲</div>",
+      "rule": "div@text",
+      "expected": [
+        "甲"
+      ],
+      "source_evidence": "AnalyzeRule.kt:107-110（content.toString().isJson()，非 Node 才判）",
+      "current_diff": "S3-4：本项目 LegadoRuleEngine.isJsonContent（:83-88）只看首尾字符，{not json} 会被判 true 并走 JsonPath；上游 isJson 会解析失败返回 false，仍走 JSoup",
+      "entry": "LegadoRuleEngine.detect(rule, content)",
+      "severity": "S3",
+      "status": "candidate"
+    }
+  ],
+  "profile_diff": {
+    "parseSourceHtml": {
+      "team": true,
+      "hapelee": false,
+      "max": false,
+      "rimchars": false,
+      "ng": false,
+      "t": false,
+      "huaji": false
+    },
+    "nativeObjectJsBranch": {
+      "team": true,
+      "hapelee": true,
+      "max": false,
+      "rimchars": true,
+      "ng": false,
+      "t": false,
+      "huaji": false
+    },
+    "getResultListClear": {
+      "team": false,
+      "hapelee": true,
+      "max": true,
+      "rimchars": true,
+      "ng": true,
+      "t": true,
+      "huaji": true
+    },
+    "excludeViaDeselect": {
+      "team": true,
+      "hapelee": false,
+      "max": false,
+      "rimchars": false,
+      "ng": false,
+      "t": false,
+      "huaji": false
+    },
+    "jsonPathImpl": {
+      "team": "jayway",
+      "hapelee": "jayway",
+      "max": "jayway",
+      "rimchars": "jayway",
+      "ng": "jayway",
+      "t": "jayway",
+      "huaji": "rjpath"
+    },
+    "xpathImpl": {
+      "team": "JsoupXpath/JXDocument",
+      "hapelee": "JsoupXpath/JXDocument",
+      "max": "JsoupXpath/JXDocument",
+      "rimchars": "JsoupXpath/JXDocument",
+      "ng": "JsoupXpath/JXDocument",
+      "t": "JsoupXpath/JXDocument",
+      "huaji": "ksoup selectXpath"
+    },
+    "regexTimeout": {
+      "team": null,
+      "hapelee": null,
+      "max": null,
+      "rimchars": null,
+      "ng": null,
+      "t": null,
+      "huaji": 3000
+    }
+  },
+  "counts": {
+    "total": 41,
+    "must_fix": 7,
+    "candidate": 28,
+    "covered_by_existing_test": 6,
+    "unknown_expected": 13
+  }
+}

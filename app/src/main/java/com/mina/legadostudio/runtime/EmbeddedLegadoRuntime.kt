@@ -34,7 +34,16 @@ class EmbeddedLegadoRuntime(
     suspend fun inspectSnapshot(request: LegadoRuntime.InspectRequest, response: HttpFetcher.FetchResult) = withContext(Dispatchers.Default) {
         val origin = HttpOrigin(sourceAnchor = request.sourceAnchor, contextId = request.contextId, originKind = "inspect_rule")
         val values = request.rule.takeIf { it.isNotBlank() }
-            ?.let { extractAll(response.body, it, response.finalUrl, origin = origin) }
+            ?.let { rule ->
+                // inspect 也走规则核：与 debug 字段抽取同一份 getString 语义（src/result、@put/@get、{{}}）
+                val session = ruleSession(
+                    response.body,
+                    response.finalUrl,
+                    mapOf(RhinoEvaluator.BINDING_SOURCE_ANCHOR to request.sourceAnchor.orEmpty()),
+                    origin,
+                )
+                session.getStringList(rule).orEmpty()
+            }
             .orEmpty()
         val output = values.takeIf { it.isNotEmpty() }?.let { LegadoRuleEngine.Output(it, it.firstOrNull(), it.size) }
         val elementRule = request.rule.takeIf { it.isNotBlank() && !hasJs(it) }
@@ -69,18 +78,25 @@ class EmbeddedLegadoRuntime(
         origin: HttpOrigin?,
     ): LegadoRuntime.DebugReport = withContext(Dispatchers.IO) {
         val root = JsonParser.parseString(sourceJson).asJsonObject
-        val state = hashMapOf<String, String>()
-        // 官方 jsLib：纯 JS 片段才装载进 Rhino 作用域；http(s) URL 形态是外部库引用，
-        // 沙箱不做网络加载（安全与可复现性），记一条诊断行让书源作者知情。
+        val sourceAnchorUrl = root.text("bookSourceUrl").orEmpty()
+        // 一次 debug 一份运行状态：变量层（chapter→book→ruleData→source）、jsLib 装载结果、诊断。
+        // 不同 MCP 任务各自新建，天然不串。
+        val runtimeState = ReaderRuntimeState(sourceAnchorUrl, origin)
+        val state = runtimeState.sourceVariables
+        // jsLib：内联片段直接进作用域；JSON 映射里的 http(s) 值是远程库，经受限 fetcher 下载
+        // （上游 SharedJsScope.evaluateJsLib 同语义）。下载能力不可用时抛 ReaderRuntimeEnvironmentException，
+        // 不再静默跳过——跳过会让依赖该库的规则报 ReferenceError 并被误判成书源错误。
         val rawJsLib = root.text("jsLib")?.takeIf { it.isNotBlank() }
         var jsLibNote: String? = null
-        val jsLib: String? = when {
-            rawJsLib == null -> null
-            rawJsLib.trim().startsWith("http://") || rawJsLib.trim().startsWith("https://") -> {
-                jsLibNote = "jsLib 为外部 URL（${rawJsLib.trim().take(120)}），沙箱不加载网络库，已按内联 JS 之外的声明跳过；阅读端会下载并加载该远程库，依赖它的报错属验收环境限制，非书源错误，保留原写法"
-                null
-            }
-            else -> rawJsLib
+        if (rawJsLib != null) {
+            val loaded = ReaderRequestTemplate.loadJsLib(
+                raw = rawJsLib,
+                sourceUrl = sourceAnchorUrl,
+                fetcher = { url -> fetchJsLibSource(url, origin) },
+            )
+            runtimeState.jsLibSources = loaded.inlineSources
+            runtimeState.jsLibDiagnostics += loaded.diagnostics
+            jsLibNote = loaded.diagnostics.takeIf { it.isNotEmpty() }?.joinToString("；")
         }
         // 书源级 enabledCookieJar（官方默认 true；本字段为 false 时该源全部请求不走自动 Cookie jar——
         // 不回带也不吸收 Set-Cookie；用户显式 Cookie 头/验证中心注入不受此开关影响）。
@@ -100,30 +116,60 @@ class EmbeddedLegadoRuntime(
         val jsLogLines = mutableListOf<String>()
         val bindings = mutableMapOf<String, Any?>(
             RhinoEvaluator.BINDING_USE_COOKIE_JAR to sourceCookieJar,
-            RhinoEvaluator.BINDING_SOURCE_ANCHOR to root.text("bookSourceUrl").orEmpty(),
+            RhinoEvaluator.BINDING_SOURCE_ANCHOR to sourceAnchorUrl,
+            RhinoEvaluator.BINDING_VARIABLES to runtimeState.variables(),
             "cache" to cacheProbe,
             RhinoEvaluator.BINDING_JS_LOG to { line: String ->
                 while (jsLogLines.size >= 200) jsLogLines.removeAt(0)
                 jsLogLines += line.take(500)
             },
         )
-        if (jsLib != null) bindings[RhinoEvaluator.BINDING_JSLIB] = { jsLib }
+        runtimeState.jsLibSources?.let { sources -> bindings[RhinoEvaluator.BINDING_JSLIB] = { sources.joinToString("\n") } }
         val report = when {
-            entry.startsWith("--") -> debugContent(root, entry.removePrefix("--"), state, cacheFetch, origin, bindings, book)
-            entry.startsWith("++") -> debugToc(root, entry.removePrefix("++"), state, cacheFetch, origin, bindings, book)
+            entry.startsWith("--") -> debugContent(root, entry.removePrefix("--"), state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
+            entry.startsWith("++") -> debugToc(root, entry.removePrefix("++"), state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
             entry.contains("::") -> {
                 val parts = entry.split("::", limit = 2)
-                debugList(root, root.getAsJsonObject("ruleExplore"), requestValue(parts[1], root, mapOf("page" to 1, "source" to state, "book" to book) + bindings, origin), "发现", parts[1], state, cacheFetch, origin, bindings, book, jsLibNote)
+                debugList(root, root.getAsJsonObject("ruleExplore"), requestValue(parts[1], root, mapOf("page" to 1, "source" to state, "book" to book) + bindings, origin, runtimeState), "发现", parts[1], state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
             }
-            entry.startsWith("http://") || entry.startsWith("https://") -> debugInfo(root, entry, state, cacheFetch, origin, bindings, book, jsLibNote)
+            entry.startsWith("http://") || entry.startsWith("https://") -> debugInfo(root, entry, state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
             else -> {
                 val search = root.text("searchUrl").orEmpty()
                 require(search.isNotBlank()) { "书源没有 searchUrl" }
-                val value = requestValue(search, root, mapOf("key" to entry, "page" to 1, "source" to state, "book" to book) + bindings, origin)
-                debugList(root, root.getAsJsonObject("ruleSearch"), value, "搜索", entry, state, cacheFetch, origin, bindings, book, jsLibNote)
+                val value = requestValue(search, root, mapOf("key" to entry, "page" to 1, "source" to state, "book" to book) + bindings, origin, runtimeState)
+                debugList(root, root.getAsJsonObject("ruleSearch"), value, "搜索", entry, state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
             }
         }
-        return@withContext enrichReport(report, jsLogLines, cacheProbe)
+        return@withContext enrichReport(report, jsLogLines + runtimeState.jsLibDiagnostics, cacheProbe)
+    }
+
+    /**
+     * 远程 jsLib 的受限下载：与规则请求同一 HttpFetcher（大小/超时/取消/日志口径一致），
+     * 只放行 http(s)、拒绝内嵌凭据，正文上限 [ReaderRequestTemplate.MAX_JS_LIB_BYTES]。
+     * 失败由 [ReaderRequestTemplate.loadJsLib] 包装成 environment 异常。
+     */
+    private fun fetchJsLibSource(url: String, origin: HttpOrigin?): String {
+        val parsed = url.toHttpUrlOrNull()
+            ?: throw ReaderRuntimeEnvironmentException("jsLib 远程库 URL 无法解析：${ReaderRequestTemplate.redactUrl(url)}")
+        if (parsed.username.isNotEmpty() || parsed.password.isNotEmpty()) {
+            throw ReaderRuntimeEnvironmentException("jsLib 远程库 URL 不允许内嵌用户名/密码：${ReaderRequestTemplate.redactUrl(url)}")
+                .withCapability("remote_js_lib")
+        }
+        val result = fetcher.fetch(
+            HttpFetcher.FetchRequest(
+                url = url,
+                method = "GET",
+                timeoutSec = JS_LIB_TIMEOUT_SEC,
+                maxBodyBytes = ReaderRequestTemplate.MAX_JS_LIB_BYTES.toLong(),
+                origin = origin?.copy(originKind = "js_lib"),
+            ),
+        )
+        if (result.code !in 200..299) {
+            throw ReaderRuntimeEnvironmentException(
+                "jsLib 远程库 HTTP ${result.code}：${ReaderRequestTemplate.redactUrl(url)}",
+            ).withCapability("remote_js_lib")
+        }
+        return result.body
     }
 
     /** 把 jsLogs/cacheSnapshot/recentCachePuts 附到报告上（null 字段 = 无记录，JSON 不输出旧字段之外的噪音）。 */
@@ -146,9 +192,9 @@ class EmbeddedLegadoRuntime(
 
     override fun validate(sourceJson: String) = validator.validate(sourceJson)
 
-    private suspend fun debugInfo(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null): LegadoRuntime.DebugReport {
+    private suspend fun debugInfo(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null, runtimeState: ReaderRuntimeState? = null): LegadoRuntime.DebugReport {
         val jsNotes = mutableListOf<String>()
-        val response = fetchValue(value, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)
+        val response = fetchValue(value, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root, runtimeState), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)
         val rules = root.getAsJsonObject("ruleBookInfo") ?: JsonObject()
         val fieldErrors = mutableListOf<String>()
         // 官方详情阶段：book.bookUrl 指向详情页地址；逐字段抽取后写回 book，
@@ -156,6 +202,12 @@ class EmbeddedLegadoRuntime(
         book.bookUrl = response.finalUrl
         book.origin = root.text("bookSourceUrl").orEmpty().ifBlank { book.origin }
         book.originName = root.text("bookSourceName").orEmpty().ifBlank { book.originName }
+        // 详情阶段变量层：上游 put 走 chapter→book→ruleData→source，详情没有 chapter，落在 book。
+        runtimeState?.apply {
+            beginItem()
+            writeLayer = ReaderRuntimeState.Layer.BOOK
+            bookName = book.name
+        }
         val bindings = mapOf("source" to state, "book" to book, "fromBookInfo" to true) + jsLibBindings
         val fields = linkedMapOf<String, String?>()
         listOf("name", "author", "kind", "wordCount", "lastChapter", "intro", "coverUrl", "tocUrl").forEach { field ->
@@ -171,6 +223,7 @@ class EmbeddedLegadoRuntime(
                 "lastChapter" -> book.latestChapterTitle = fields[field].orEmpty()
                 else -> {}
             }
+            if (field == "name") runtimeState?.bookName = book.name
         }
         // 官方 BookInfo.analyzeBookInfo：tocUrl 规则取空时 book.tocUrl = baseUrl（详情页 URL）。
         // 工坊更严：只在源未配置 tocUrl 规则、存在 ruleToc.chapterList、详情 HTTP 2xx 时回填；
@@ -187,7 +240,7 @@ class EmbeddedLegadoRuntime(
         return LegadoRuntime.DebugReport("详情", value, listOf("HTTP ${response.code} ${response.finalUrl}", "页面 ${response.body.length} 字符") + listOfNotNull(jsLibNote) + jsNotes + fieldErrors + fields.map { "${it.key}: ${it.value.orEmpty()}" }, fields, fieldErrors = fieldErrors.takeIf { it.isNotEmpty() })
     }
 
-    private suspend fun debugToc(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null): LegadoRuntime.DebugReport {
+    private suspend fun debugToc(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null, runtimeState: ReaderRuntimeState? = null): LegadoRuntime.DebugReport {
         val rules = root.getAsJsonObject("ruleToc") ?: error("缺少 ruleToc")
         val fieldErrors = mutableListOf<String>()
         val listRule = rules.text("chapterList").orEmpty()
@@ -205,7 +258,7 @@ class EmbeddedLegadoRuntime(
             if (fetched >= MAX_TOC_PAGES) return emptyList()
             if (!visited.add(target)) return emptyList()
             fetched++
-            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)
+            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root, runtimeState), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)
             if (fetched == 1) book.tocUrl = response.finalUrl
             visited.add(response.finalUrl)
             val pageBindings = mapOf("source" to state, "book" to book, "page" to fetched) + jsLibBindings
@@ -217,6 +270,13 @@ class EmbeddedLegadoRuntime(
                     this.bookUrl = book.bookUrl
                     this.baseUrl = response.finalUrl
                 }
+                // 目录阶段变量层：上游 put 落在 chapter（有 chapter 时 chapter 优先）
+                runtimeState?.apply {
+                    beginItem()
+                    writeLayer = ReaderRuntimeState.Layer.CHAPTER
+                    this.bookName = book.name
+                    chapterTitle = null
+                }
                 val bindings = pageBindings + ("chapter" to chapter)
                 val name = extract(html, rules.text("chapterName"), response.finalUrl, bindings, origin = origin, field = "ruleToc.chapterName", fieldErrors = fieldErrors).orEmpty()
                 val chapterUrl = extract(html, rules.text("chapterUrl"), response.finalUrl, bindings, origin = origin, field = "ruleToc.chapterUrl", fieldErrors = fieldErrors).orEmpty()
@@ -224,6 +284,7 @@ class EmbeddedLegadoRuntime(
                     extract(html, rules.text("isVolume"), response.finalUrl, bindings, origin = origin, field = "ruleToc.isVolume", fieldErrors = fieldErrors),
                 )
                 chapter.title = name
+                runtimeState?.chapterTitle = name
                 // 官方空 href：卷名改写成 title+index，非卷名回退 baseUrl。沙箱不合成，避免把卷名伪造成可抓正文的 URL。
                 chapter.url = resolve(response.finalUrl, chapterUrl)
                 chapters += mapOf("index" to index, "name" to name, "url" to chapter.url, "isVolume" to isVolume)
@@ -302,7 +363,7 @@ class EmbeddedLegadoRuntime(
         }
     }
 
-    private suspend fun debugContent(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null): LegadoRuntime.DebugReport {
+    private suspend fun debugContent(root: JsonObject, value: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null, runtimeState: ReaderRuntimeState? = null): LegadoRuntime.DebugReport {
         val rules = root.getAsJsonObject("ruleContent") ?: error("缺少 ruleContent")
         val fieldErrors = mutableListOf<String>()
         val contentRule = rules.text("content").orEmpty()
@@ -320,10 +381,16 @@ class EmbeddedLegadoRuntime(
             baseUrl = value
         }
         lines += "该通道无下一章上下文（mNextChapterUrl 为空），分页可能越界；已限制最多 ${MAX_CONTENT_PAGES} 页"
+        // 正文阶段变量层：上游 put 落在 chapter（正文有 chapter）
+        runtimeState?.apply {
+            beginItem()
+            writeLayer = ReaderRuntimeState.Layer.CHAPTER
+            this.bookName = book.name
+        }
         for (page in 0 until MAX_CONTENT_PAGES) {
             val target = current ?: break
             if (!visited.add(target)) { endReason = "cycle"; break }
-            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add) { rawCode, reportedCode, transport, cacheUsed ->
+            val response = fetchValue(target, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root, runtimeState), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add) { rawCode, reportedCode, transport, cacheUsed ->
                 pageDiags += mapOf("page" to page + 1, "httpStatus" to rawCode, "reportedStatus" to reportedCode, "transport" to transport, "cacheUsed" to cacheUsed)
             }
             val bindings = mapOf("source" to state, "book" to book, "chapter" to chapter, "title" to "", "nextChapterUrl" to "") + jsLibBindings
@@ -366,12 +433,12 @@ class EmbeddedLegadoRuntime(
         ), contentLength = cleaned.length, contentPreview = preview, fieldErrors = fieldErrors.takeIf { it.isNotEmpty() })
     }
 
-    private suspend fun debugList(root: JsonObject, rules: JsonObject?, requestValue: String, type: String, entry: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null): LegadoRuntime.DebugReport {
+    private suspend fun debugList(root: JsonObject, rules: JsonObject?, requestValue: String, type: String, entry: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null, runtimeState: ReaderRuntimeState? = null): LegadoRuntime.DebugReport {
         requireNotNull(rules) { "缺少 ${if (type == "搜索") "ruleSearch" else "ruleExplore"}" }
         val ruleKey = if (type == "搜索") "ruleSearch" else "ruleExplore"
         val fieldErrors = mutableListOf<String>()
         val jsNotes = mutableListOf<String>()
-        val response = fetchValue(requestValue, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)
+        val response = fetchValue(requestValue, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root, runtimeState), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)
         val listRule = rules.text("bookList").orEmpty()
         val elements = extractElements(response.body, listRule, response.finalUrl, mapOf("source" to state, "book" to book) + jsLibBindings, origin)
         val books = elements.take(200).map { html ->
@@ -382,9 +449,14 @@ class EmbeddedLegadoRuntime(
                 this.originName = book.originName
                 this.type = book.type
             }
+            // 条目级变量层：清空上一条目的变量，source 级保留（上游 setRuleData 换 ruleData 实例）
+            runtimeState?.apply {
+                beginItem()
+                writeLayer = ReaderRuntimeState.Layer.BOOK
+            }
             val bindings = mapOf("source" to state, "book" to itemBook) + jsLibBindings
             linkedMapOf(
-                "name" to extract(html, rules.text("name"), response.finalUrl, bindings, origin = origin, field = "$ruleKey.name", fieldErrors = fieldErrors).orEmpty().also { itemBook.name = it },
+                "name" to extract(html, rules.text("name"), response.finalUrl, bindings, origin = origin, field = "$ruleKey.name", fieldErrors = fieldErrors).orEmpty().also { itemBook.name = it; runtimeState?.bookName = it },
                 "author" to extract(html, rules.text("author"), response.finalUrl, bindings, origin = origin, field = "$ruleKey.author", fieldErrors = fieldErrors).orEmpty().also { itemBook.author = it },
                 "bookUrl" to resolve(response.finalUrl, extract(html, rules.text("bookUrl"), response.finalUrl, bindings, origin = origin, field = "$ruleKey.bookUrl", fieldErrors = fieldErrors).orEmpty()).also { itemBook.bookUrl = it },
                 "coverUrl" to resolve(response.finalUrl, extract(html, rules.text("coverUrl"), response.finalUrl, bindings, origin = origin, field = "$ruleKey.coverUrl", fieldErrors = fieldErrors).orEmpty()).also { itemBook.coverUrl = it },
@@ -451,15 +523,18 @@ class EmbeddedLegadoRuntime(
             else observer?.invoke(result.code, result.code, "http", false)
             fetcher.requireNoJsChallenge(result)
         }
-        // 对齐真机 AnalyzeUrl：每次拿到响应后先执行书源 loginCheckJs（纯 JS，result 为响应对象），
-        // JS 可改写/接管响应；返回值按 StrResponse 语义接管（字符串替换 body，对象取 body()/headers()）。
-        loginCheckJs?.takeIf { it.isNotBlank() }?.let { js ->
-            response = applyLoginCheckJs(js, response, jsLibBindings, requestOrigin, jsLog)
-        }
+        // 上游顺序（SANDBOX_REVIEW_NOTES 第 2 条）：bodyJs 在 AnalyzeUrl.getStrResponseAwait 内
+        // （548-551，响应一拿到就执行），loginCheckJs 在 WebBook 各阶段外层（77-82 等）。
+        // 因此必须先 bodyJs 再 loginCheckJs；旧实现顺序相反，loginCheckJs 看到的是未改写的正文。
         parsed.bodyJs?.takeIf { it.isNotBlank() }?.let { js ->
             val transformed = rhino.evaluate(js, response.finalUrl, response.body, jsLibBindings, origin = requestOrigin)
             transformed.value?.let { response = response.copy(body = it) }
             transformed.logs.forEach { jsLog?.invoke("bodyJs: $it") }
+        }
+        // 对齐真机 AnalyzeUrl：拿到响应后执行书源 loginCheckJs（纯 JS，result 为响应对象），
+        // JS 可改写/接管响应；返回值按 StrResponse 语义接管（字符串替换 body，对象取 body()/headers()）。
+        loginCheckJs?.takeIf { it.isNotBlank() }?.let { js ->
+            response = applyLoginCheckJs(js, response, jsLibBindings, requestOrigin, jsLog)
         }
         return response
     }
@@ -507,45 +582,38 @@ class EmbeddedLegadoRuntime(
     /** bindings 里的书源级 Cookie jar 开关（缺省 true）；false = 仅对自动 jar 禁用，显式用户 cookie 语义不动。 */
     private fun cookieJar(bindings: Map<String, Any?>): Boolean = bindings[RhinoEvaluator.BINDING_USE_COOKIE_JAR] as? Boolean ?: true
 
-    private fun requestValue(template: String, root: JsonObject, bindings: Map<String, Any?>, origin: HttpOrigin? = null): String {
-        if (template.startsWith("@js:")) {
-            return rhino.evaluate(template.removePrefix("@js:"), root.text("bookSourceUrl").orEmpty(), null, bindings, origin = origin).value.orEmpty()
+    /**
+     * URL 模板求值，严格按上游 `AnalyzeUrl.initUrl` 175-183 的顺序：
+     * `analyzeJs`（`@js:`/`<js>` 段 + `@result` 拼接）→ `replaceKeyPageJs`（先 `{{表达式}}` 再 `<a,b,c>`）
+     * → `analyzeUrl`（切 `,{` 选项、绝对化、`option.js`、query 编码）。
+     *
+     * - `option.js` 的 `baseUrl` 是站点根（上游 analyzeUrl 里已归一），`result` 是完整 URL；
+     * - `key` 的编码交给 query 编码阶段（RFC3986，已编码片段不二次编码），不再在模板里预编码；
+     * - 返回 `url,{option}` 形态，选项原文原样透传给 [fetchValue] 解析。
+     */
+    private fun requestValue(template: String, root: JsonObject, bindings: Map<String, Any?>, origin: HttpOrigin? = null, runtimeState: ReaderRuntimeState? = null): String {
+        val sourceUrl = root.text("bookSourceUrl").orEmpty()
+        val page = (bindings["page"] as? Number)?.toInt() ?: bindings["page"]?.toString()?.toIntOrNull()
+        val evalJs: (String, Any?) -> Any? = { script, result ->
+            rhino.evaluateRaw(script, sourceUrl, result, bindings, origin = origin).value
         }
-        var result = template
-            .replace("{{key}}", java.net.URLEncoder.encode(bindings["key"]?.toString().orEmpty(), "UTF-8"))
-            .replace("{{page}}", bindings["page"]?.toString() ?: "1")
-        JsTemplates.findAll(result).asReversed().forEach { match ->
-            val value = rhino.evaluate(match.expression, root.text("bookSourceUrl").orEmpty(), null, bindings, origin = origin).value.orEmpty()
-            result = result.replaceRange(match.range, value)
+        val afterJs = ReaderRequestTemplate.analyzeJs(template, evalJs)
+        val afterTemplates = ReaderRequestTemplate.replaceTemplates(afterJs, page, evalJs)
+        val split = ReaderRequestTemplate.splitUrlOption(afterTemplates)
+        var absolute = ReaderRequestTemplate.absoluteUrl(sourceUrl, split.urlPart)
+        // 上游 292-296：option.js 在 URL 绝对化之后执行；其作用域里 baseUrl = 站点根，result = 完整 url。
+        val optionObject = split.optionText?.let { text ->
+            runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
         }
-        val parsed = LegadoUrlOptions.parse(result)
-        val absolute = resolve(root.text("bookSourceUrl").orEmpty(), parsed.url)
-        if (parsed.url == result) return absolute
-        val optionText = result.substring(result.lastIndexOf(",{") + 1)
-        return "$absolute,$optionText"
-    }
-
-    private fun extractElements(content: Any, rule: String, baseUrl: String, bindings: Map<String, Any?>, origin: HttpOrigin? = null): List<Any> {
-        val parts = LegadoStringRule.split(rule)
-        if (parts.isEmpty()) return emptyList()
-        if (parts.size == 1 && parts[0].mode == LegadoStringRule.Mode.Default) {
-            // 保留原始节点：子规则（如裸 @href）必须在元素自身上求值，序列化成 HTML 重解析会把上下文换成文档根节点
-            return if (parts[0].rule.isBlank()) emptyList() else engine.elementList(content, parts[0].rule)
+        optionObject?.get("js")?.takeIf { it.isJsonPrimitive }?.asString?.let { js ->
+            val siteBase = ReaderRequestTemplate.siteBaseUrl(absolute)
+            val jsBindings = bindings + mapOf("baseUrl" to siteBase)
+            rhino.evaluateRaw(js, siteBase, absolute, jsBindings, origin = origin).value
+                ?.toString()?.takeIf { it.isNotBlank() }?.let { absolute = it }
         }
-        var current: Any? = content
-        for (part in parts) {
-            current = when (part.mode) {
-                LegadoStringRule.Mode.Js -> rhino.evaluateRaw(part.rule, baseUrl, current, bindings, origin = origin).value
-                LegadoStringRule.Mode.Default -> {
-                    val html = when (current) {
-                        is String -> current
-                        else -> toElementHtml(current).joinToString("")
-                    }
-                    if (part.rule.isBlank()) current else engine.elementList(html, part.rule)
-                }
-            }
-        }
-        return toElementList(current)
+        val option = optionObject?.let { UrlOption.from(it) } ?: UrlOption()
+        val encoded = ReaderRequestTemplate.encodeRequestUrl(absolute, option)
+        return if (split.optionText == null) encoded else "$encoded,${split.optionText}"
     }
 
     private fun toElementHtml(value: Any?): List<String> = when (value) {
@@ -564,51 +632,14 @@ class EmbeddedLegadoRuntime(
         else -> listOf(value.toString())
     }
 
-    private fun toElementList(value: Any?): List<Any> = when (value) {
-        null -> emptyList()
-        is org.jsoup.nodes.Element -> listOf(value)
-        is org.jsoup.select.Elements -> value.toList()
-        is org.htmlunit.corejs.javascript.NativeArray -> (0 until value.length.toInt()).flatMap { index ->
-            toElementList(com.script.rhino.RhinoScriptEngine.unwrapReturnValue(value.get(index, value)))
-        }
-        is Iterable<*> -> value.filterNotNull()
-        is Array<*> -> value.filterNotNull()
-        else -> listOf(value)
-    }
-
-    private fun asText(value: Any): String = when (value) {
-        is String -> value
-        is org.jsoup.nodes.Element -> value.outerHtml()
-        is Map<*, *>, is List<*> -> LegadoRuleEngine.toJson(value)
-        else -> value.toString()
-    }
-
-    private fun toStringList(value: Any?): List<String> = when (value) {
-        null -> emptyList()
-        is String -> listOf(value)
-        is org.jsoup.nodes.Element -> listOf(value.outerHtml())
-        is org.jsoup.select.Elements -> value.map { it.outerHtml() }
-        is org.htmlunit.corejs.javascript.NativeArray -> (0 until value.length.toInt()).mapNotNull { index ->
-            com.script.rhino.RhinoScriptEngine.unwrapReturnValue(value.get(index, value))?.let { asText(it) }
-        }
-        is Iterable<*> -> value.mapNotNull { item -> item?.let { asText(it) } }
-        is Array<*> -> value.mapNotNull { item -> item?.let { asText(it) } }
-        else -> listOf(asText(value))
-    }
-
     /**
      * 字段级取值。`field` 非空时（如 `ruleSearch.bookUrl`），规则解析异常带上字段名与规则原文
      * 写入 `fieldErrors`，不再只抛出无上下文的底层异常文本。
+     *
+     * 解析走 [ReaderRuleSession]（上游 AnalyzeRule 核）：`src` 是原始内容、`result` 是链中当前段，
+     * `@put/@get/{{}}/$n/##替换` 与阅读端同一实现。
      */
-    private fun extract(content: Any, rule: String?, baseUrl: String, bindings: Map<String, Any?> = emptyMap(), unescape: Boolean = true, origin: HttpOrigin? = null, field: String? = null, fieldErrors: MutableList<String>? = null): String? =
-        extractAll(content, rule, baseUrl, bindings, unescape, origin, field, fieldErrors, listMode = false).takeIf { it.isNotEmpty() }?.joinToString("\n")
-
-    /**
-     * [listMode]=false：阅读 `getString`，链式 `@js` 的 `result` 是 String。
-     * [listMode]=true：阅读 `getStringList`，链式 `@js` 的 `result` 是 List。
-     * 两种模式都是逐元素套 `##正则##`，与阅读一致。
-     */
-    private fun extractAll(
+    private fun extract(
         content: Any,
         rule: String?,
         baseUrl: String,
@@ -617,59 +648,59 @@ class EmbeddedLegadoRuntime(
         origin: HttpOrigin? = null,
         field: String? = null,
         fieldErrors: MutableList<String>? = null,
-        listMode: Boolean = true,
-    ): List<String> {
-        if (rule.isNullOrBlank()) return emptyList()
-        var result: Any? = content
-        val onError: ((Exception) -> Unit)? = if (field != null && fieldErrors != null) { e -> recordFieldError(fieldErrors, field, rule, e) } else null
-        for (part in LegadoStringRule.split(rule)) {
-            if (result == null) continue
-            if (part.rule.isNotBlank() || part.replaceRegex.isEmpty()) {
-                result = try {
-                    when (part.mode) {
-                        LegadoStringRule.Mode.Js -> {
-                            val previous = if (listMode) result else asText(result)
-                            if (listMode) rhino.evaluateRaw(part.rule, baseUrl, previous, bindings, origin = origin).value
-                            else rhino.evaluate(part.rule, baseUrl, previous, bindings, origin = origin).value
-                        }
-                        LegadoStringRule.Mode.Default -> if (part.rule.isBlank()) result else {
-                            val values = engine.extract(result, part.rule, onError = onError).values.takeIf { it.isNotEmpty() }
-                            if (listMode) values else values?.joinToString("\n")
-                        }
-                    }
-                } catch (e: Exception) {
-                    if (field == null || e is kotlinx.coroutines.CancellationException || e is FieldRuleException) throw e
-                    throw FieldRuleException(fieldErrorText(field, part.rule, part.mode, e), e)
-                }
-            }
-            if (result != null && part.replaceRegex.isNotEmpty()) {
-                val replaced = toStringList(result).map { LegadoStringRule.replace(it, part) }
-                result = if (listMode) replaced else replaced.joinToString("\n")
-            }
+    ): String? {
+        if (rule.isNullOrBlank()) return null
+        val onError: ((Exception) -> Unit)? =
+            if (field != null && fieldErrors != null) { e -> recordFieldError(fieldErrors, field, rule, e) } else null
+        val session = ruleSession(content, baseUrl, bindings, origin).also { it.onError = onError }
+        return try {
+            session.getString(rule, null, false, unescape).takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            if (field == null || e is kotlinx.coroutines.CancellationException || e is FieldRuleException) throw e
+            throw FieldRuleException(fieldErrorText(field, rule, LegadoStringRule.Mode.Default, e), e)
         }
-        if (result == null) return emptyList()
-        val texts = toStringList(result)
-        return if (unescape) texts.map { LegadoStringRule.unescapeHtml(it) } else texts
     }
 
     /**
-     * `nextContentUrl` / `nextTocUrl`：官方 `getStringList(..., isUrl=true)`。
-     * 链式 `@js` 的 `result` 是 List；空串跳过（阅读会把空串解析成当前页 URL，`--` 通道没有下一章哨兵时会打穿全书）。
-     * 相对路径在此转绝对并去重，但不跳过当前页——正文自链要靠 visited 标 cycle；目录在 debugToc 里再滤 visited。
+     * 规则核会话：`java.*` 与规则链共用同一实例（上游 `bindings["java"] = this`）。
+     *
+     * - `src` = 本次内容（原始页面/条目 HTML），`result` = 链中当前段；
+     * - `java.put/get` 走 [ReaderRuntimeState] 的 chapter→book→ruleData→source 层级；
+     * - `java.getString/getStringList/getElement/getElements/setContent` 与规则链同一实现。
      */
-    private fun extractUrlList(content: Any, rule: String, baseUrl: String, bindings: Map<String, Any?>, origin: HttpOrigin?, notes: MutableList<String>, emptyNote: String = "nextContentUrl <empty> (skipped)"): List<String> {
-        val items = extractAll(content, rule, baseUrl, bindings, unescape = true, origin = origin, listMode = true)
-        val urls = ArrayList<String>(items.size)
-        for (item in items) {
-            val trimmed = item.trim()
-            if (trimmed.isEmpty()) {
-                notes += emptyNote
-                continue
-            }
-            val abs = resolve(baseUrl, trimmed)
-            if (abs.isNotEmpty() && abs !in urls) urls += abs
-        }
-        return urls
+    private fun ruleSession(
+        content: Any,
+        baseUrl: String,
+        bindings: Map<String, Any?>,
+        origin: HttpOrigin?,
+    ): ReaderRuleSession {
+        val state = bindings[RhinoEvaluator.BINDING_VARIABLES] as? ReaderRuntimeVariables
+        val context = ReaderRuntimeContext(
+            content = content,
+            baseUrl = baseUrl,
+            engine = engine,
+            evaluator = { script, result, src ->
+                rhino.evaluateRaw(
+                    script,
+                    baseUrl,
+                    result,
+                    bindings + (RhinoEvaluator.BINDING_SOURCE_CONTENT to src),
+                    origin = origin,
+                ).value
+            },
+            variables = state ?: ReaderRuntimeVariables({ "" }, { _, _ -> }),
+        )
+        return context.session
+    }
+
+    /**
+     * 列表/元素抽取走规则核 `getElements`（上游 AnalyzeRule.getElements 453-502）：
+     * 非列表结果返回空列表、regex capture 保留 typed List、JSON 元素保留 Map。
+     */
+    private fun extractElements(content: Any, rule: String, baseUrl: String, bindings: Map<String, Any?>, origin: HttpOrigin? = null): List<Any> {
+        if (rule.isBlank()) return emptyList()
+        val session = ruleSession(content, baseUrl, bindings, origin)
+        return session.getElements(rule)
     }
 
     /** 字段规则执行失败：message 带字段名、规则类型与规则原文，原始异常放 cause。 */
@@ -699,14 +730,41 @@ class EmbeddedLegadoRuntime(
         if (text !in sink) sink += text
     }
 
-    private fun sourceHeaders(root: JsonObject): Map<String, String> {
+    /**
+     * 书源 `header`（上游 `BaseSource.getHeaderMap` 197-222）：
+     * - 纯 JS（整串就是一个 `@js:`/`<js></js>` 段）先求值，结果按 JSON 解析；
+     * - 否则直接当 JSON 解析（字符串或对象形态都接受）。
+     *
+     * header JS 的 `baseUrl` 是书源 URL（上游 BaseSource.evalJS 用 getKey()）。
+     * 解析/执行失败不静默：写一条诊断进报告（[headerNotes]），避免作者以为配置生效。
+     */
+    private fun sourceHeaders(root: JsonObject, runtimeState: ReaderRuntimeState? = null, headerNotes: MutableList<String>? = null): Map<String, String> {
         val value = root.get("header") ?: return emptyMap()
-        val obj = when {
-            value.isJsonObject -> value.asJsonObject
-            value.isJsonPrimitive -> runCatching { JsonParser.parseString(value.asString).asJsonObject }.getOrNull()
-            else -> null
-        } ?: return emptyMap()
-        return obj.entrySet().associate { it.key to it.value.asString }
+        val raw = when {
+            value.isJsonObject -> value.toString()
+            value.isJsonPrimitive -> value.asString
+            else -> return emptyMap()
+        }
+        val bindings = runtimeState?.let {
+            mapOf(
+                RhinoEvaluator.BINDING_VARIABLES to it.variables(),
+                RhinoEvaluator.BINDING_SOURCE_ANCHOR to it.sourceUrl,
+            )
+        }.orEmpty()
+        return ReaderRequestTemplate.resolveHeaders(
+            rawHeader = raw,
+            sourceUrl = root.text("bookSourceUrl").orEmpty(),
+            evalJs = { script, result ->
+                rhino.evaluateRaw(
+                    script,
+                    root.text("bookSourceUrl").orEmpty(),
+                    result,
+                    bindings,
+                    origin = runtimeState?.origin,
+                ).value
+            },
+            onError = { note -> headerNotes?.add(note) ?: Unit },
+        )
     }
 
     private fun hasJs(rule: String) = rule.contains("<js>") || rule.startsWith("@js:") || rule.contains("{{")

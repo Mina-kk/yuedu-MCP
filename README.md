@@ -1,5 +1,7 @@
 # 阅读书源 MCP
 
+> **本分支为 2.0.0 重构开发快照，尚未完成验收，不是可安装发布版。** Rust/WASM + Vue 界面和阅读规则运行时仍在集成；构建、单元测试与 APK 打包转到 GitHub-hosted Actions。只有全部检查通过才上传 Debug APK，失败运行不提供可用性结论。`main` 与既有 Releases 不受此分支影响。
+
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`

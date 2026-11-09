@@ -1,0 +1,380 @@
+{
+  "schema": "yuedu-mcp/js-network-cases@1",
+  "baseline": "e129d35e7cba08f8dcacc2cf05dc3e626b5965dd",
+  "note": "全部为候选定义；status=candidate 可离线复现，unknown=预期未确认，unsupported=需 Android/联网/WebView，不得假通过。本次未运行任何测试。",
+  "counts": {
+    "total": 25,
+    "candidate": 19,
+    "unknown": 4,
+    "unsupported": 2
+  },
+  "cases": [
+    {
+      "id": "url-query-rfc3986",
+      "stage": "URL",
+      "input": {
+        "searchUrl": "https://a.com/s?q={{key}}&p={{page}}",
+        "key": "剑 来",
+        "page": 2
+      },
+      "expected": "q=%E5%89%91%20%E6%9D%A5&p=2（空格 %20，非 +）",
+      "source": [
+        "LegadoTeam/legado@330e606 AnalyzeUrl.kt:329-345",
+        "AnalyzeUrl.kt:819-820 queryEncoder"
+      ],
+      "capability": "pure-string",
+      "status": "candidate"
+    },
+    {
+      "id": "url-template-double-int",
+      "stage": "URL",
+      "input": {
+        "searchUrl": "https://a.com/{{page*10}}/list",
+        "page": 3
+      },
+      "expected": "https://a.com/30/list（Double 整型 %.0f）",
+      "source": [
+        "AnalyzeUrl.kt:221-229"
+      ],
+      "capability": "rhino",
+      "status": "candidate"
+    },
+    {
+      "id": "url-page-segment",
+      "stage": "URL",
+      "input": {
+        "searchUrl": "https://a.com/s/<1,2,3>.html",
+        "page": 5
+      },
+      "expected": "https://a.com/s/3.html（越界取 last）",
+      "source": [
+        "AnalyzeUrl.kt:232-242"
+      ],
+      "capability": "pure-string",
+      "status": "candidate"
+    },
+    {
+      "id": "url-js-mid-result-concat",
+      "stage": "URL",
+      "input": {
+        "searchUrl": "https://a.com/{{key}}@js:baseUrl.split('/')[2]",
+        "key": "x"
+      },
+      "expected": "unknown：@result 拼接顺序需实测",
+      "source": [
+        "AnalyzeUrl.kt:188-211"
+      ],
+      "capability": "rhino",
+      "status": "unknown"
+    },
+    {
+      "id": "url-option-space-before-brace",
+      "stage": "URL",
+      "input": {
+        "searchUrl": "https://a.com/api , {\"method\":\"POST\",\"body\":{\"q\":\"x\"}}"
+      },
+      "expected": "识别 URL + 选项，body 序列化 {\"q\":\"x\"}",
+      "source": [
+        "AnalyzeUrl.kt:248-259",
+        "AnalyzeUrl.kt:953-966"
+      ],
+      "capability": "pure-parse",
+      "status": "candidate",
+      "note": "沙箱 lastIndexOf(\",{\") 会失败"
+    },
+    {
+      "id": "url-option-js-override",
+      "stage": "URL",
+      "input": {
+        "url": "https://a.com/a,{\"js\":\"baseUrl + '/b'\"}",
+        "baseUrl": "https://a.com/a"
+      },
+      "expected": "最终 url=https://a.com/a/b",
+      "source": [
+        "AnalyzeUrl.kt:292-296"
+      ],
+      "capability": "rhino",
+      "status": "candidate",
+      "note": "沙箱缺 option.js"
+    },
+    {
+      "id": "url-charset-escape",
+      "stage": "URL",
+      "input": {
+        "url": "https://a.com/x,{\"charset\":\"escape\"}",
+        "query": "q=中文"
+      },
+      "expected": "q=%u4E2D%u6587",
+      "source": [
+        "AnalyzeUrl.kt:333-339",
+        "AnalyzeUrl.kt:384-385"
+      ],
+      "capability": "pure-string",
+      "status": "candidate"
+    },
+    {
+      "id": "js-page-is-number",
+      "stage": "JS",
+      "input": {
+        "js": "@js: page + 1",
+        "page": 3
+      },
+      "expected": "4",
+      "source": [
+        "AnalyzeUrl.kt:401"
+      ],
+      "capability": "rhino",
+      "status": "candidate"
+    },
+    {
+      "id": "js-key-binding",
+      "stage": "JS",
+      "input": {
+        "js": "@js: key",
+        "key": "剑来"
+      },
+      "expected": "剑来",
+      "source": [
+        "AnalyzeUrl.kt:402"
+      ],
+      "capability": "rhino",
+      "status": "candidate",
+      "note": "沙箱仅 search/explore 传 key；MD3/Max/Rimchars 无 key"
+    },
+    {
+      "id": "js-infomap-explore",
+      "stage": "JS",
+      "input": {
+        "js": "@js: typeof infoMap === 'undefined' ? 'none' : JSON.stringify(infoMap)",
+        "stage": "Explore"
+      },
+      "expected": "{\"class\":\"玄幻\"}",
+      "source": [
+        "AnalyzeUrl.kt:411",
+        "WebBook.kt:149"
+      ],
+      "capability": "rhino",
+      "status": "candidate",
+      "note": "沙箱缺 infoMap"
+    },
+    {
+      "id": "js-var-cross-eval",
+      "stage": "JS",
+      "input": {
+        "eval1": "var g=1;",
+        "eval2": "typeof g"
+      },
+      "expected": "unknown：shared scope 下 number，无 shared 时 undefined",
+      "source": [
+        "AnalyzeRule.kt:916-931"
+      ],
+      "capability": "rhino",
+      "status": "unknown"
+    },
+    {
+      "id": "jslib-single-exec",
+      "stage": "jsLib",
+      "input": {
+        "jsLib": "var n=0; n++; function f(){return n}",
+        "js": "@js: f()"
+      },
+      "expected": "unknown：预期 jsLib 只执行一次，两次求值均返回 1",
+      "source": [
+        "BaseSource.kt:94",
+        "BaseSource.kt:394-401"
+      ],
+      "capability": "rhino",
+      "status": "unknown",
+      "note": "getShareScope 文件未取到"
+    },
+    {
+      "id": "header-js",
+      "stage": "header",
+      "input": {
+        "header": "@js: JSON.stringify({Referer: baseUrl})"
+      },
+      "expected": "请求带 Referer = 书源 URL",
+      "source": [
+        "BaseSource.kt:197-222"
+      ],
+      "capability": "rhino",
+      "status": "candidate",
+      "note": "沙箱不执行 header JS"
+    },
+    {
+      "id": "header-default-ua",
+      "stage": "header",
+      "input": {
+        "header": "{\"X\":\"1\"}"
+      },
+      "expected": "自动补 User-Agent",
+      "source": [
+        "BaseSource.kt:214-216"
+      ],
+      "capability": "pure-parse",
+      "status": "candidate"
+    },
+    {
+      "id": "logincheckjs-strresponse",
+      "stage": "loginCheckJs",
+      "input": {
+        "loginCheckJs": "result.body().includes('登录') ? java.connect('https://a.com/login').body() : result"
+      },
+      "expected": "官方返回 StrResponse 被强转；沙箱按 String/Map 接管",
+      "source": [
+        "WebBook.kt:77-82",
+        "EmbeddedLegadoRuntime.kt:474-502"
+      ],
+      "capability": "rhino",
+      "status": "candidate",
+      "note": "语义差异，需按官方 StrResponse 强转"
+    },
+    {
+      "id": "bodyjs-vs-logincheck-order",
+      "stage": "order",
+      "input": {
+        "bodyJs": "result + '!'",
+        "loginCheckJs": "result"
+      },
+      "expected": "unknown：官方先 bodyJs 后 loginCheckJs",
+      "source": [
+        "AnalyzeUrl.kt:548-551",
+        "WebBook.kt:77-82"
+      ],
+      "capability": "rhino",
+      "status": "unknown",
+      "note": "沙箱顺序相反"
+    },
+    {
+      "id": "toc-empty-url-volume",
+      "stage": "Toc",
+      "input": {
+        "chapterUrl": "",
+        "isVolume": "true",
+        "title": "第一卷",
+        "index": 2
+      },
+      "expected": "url = 第一卷2",
+      "source": [
+        "BookChapterList.kt:262-276"
+      ],
+      "capability": "pure-logic",
+      "status": "candidate",
+      "note": "沙箱不合成"
+    },
+    {
+      "id": "toc-dedupe",
+      "stage": "Toc",
+      "input": {
+        "pages": [
+          "a.html",
+          "a.html"
+        ]
+      },
+      "expected": "LinkedHashSet 去重后 1 条",
+      "source": [
+        "BookChapterList.kt:129"
+      ],
+      "capability": "pure-logic",
+      "status": "candidate"
+    },
+    {
+      "id": "toc-formatjs",
+      "stage": "Toc",
+      "input": {
+        "formatJs": "'第'+(index)+'章 '+title"
+      },
+      "expected": "标题被改写",
+      "source": [
+        "BookChapterList.kt:139-157"
+      ],
+      "capability": "rhino",
+      "status": "candidate",
+      "note": "沙箱缺"
+    },
+    {
+      "id": "content-format-keep-img",
+      "stage": "Content",
+      "input": {
+        "content": "<p>a</p><p>b</p>"
+      },
+      "expected": "a\nb（formatKeepImg 后 unescapeHtml4）",
+      "source": [
+        "BookContent.kt:242-258"
+      ],
+      "capability": "jsoup",
+      "status": "candidate"
+    },
+    {
+      "id": "content-unescape-false",
+      "stage": "Content",
+      "input": {
+        "content": "&amp;"
+      },
+      "expected": "getString(unescape=false) 保留 &amp;，formatKeepImg 后 unescapeHtml4 → &",
+      "source": [
+        "BookContent.kt:242",
+        "BookContent.kt:253-255"
+      ],
+      "capability": "jsoup",
+      "status": "candidate"
+    },
+    {
+      "id": "content-replace-after-merge",
+      "stage": "Content",
+      "input": {
+        "pages": 2,
+        "replaceRegex": "\\s+## "
+      },
+      "expected": "先合并再逐行 trim 再 replace",
+      "source": [
+        "BookContent.kt:169-178"
+      ],
+      "capability": "pure-logic",
+      "status": "candidate"
+    },
+    {
+      "id": "content-title-rule",
+      "stage": "Content",
+      "input": {
+        "title": "@js: result.match(/《(.+)》/)[1]"
+      },
+      "expected": "chapter.title 被覆盖",
+      "source": [
+        "BookContent.kt:179-201"
+      ],
+      "capability": "rhino",
+      "status": "candidate",
+      "note": "沙箱缺"
+    },
+    {
+      "id": "webview-default-delay",
+      "stage": "webView",
+      "input": {
+        "webView": true,
+        "webJs": "document.title",
+        "webViewDelayTime": null
+      },
+      "expected": "官方默认 0ms；沙箱默认 800ms",
+      "source": [
+        "AnalyzeUrl.kt:128",
+        "EmbeddedLegadoRuntime.kt:16"
+      ],
+      "capability": "android-webview",
+      "status": "unsupported"
+    },
+    {
+      "id": "ajax-cookie-jar",
+      "stage": "network",
+      "input": {
+        "js": "java.ajax('https://a.com/x')"
+      },
+      "expected": "依赖 enabledCookieJar + mergeCookies",
+      "source": [
+        "AnalyzeUrl.kt:752-774"
+      ],
+      "capability": "network",
+      "status": "unsupported"
+    }
+  ]
+}

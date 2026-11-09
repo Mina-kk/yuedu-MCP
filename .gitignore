@@ -14,3 +14,8 @@ __pycache__/
 *.py[cod]
 *.apk
 mapping.txt
+node_modules/
+**/target/
+web-ui/src/wasm/
+.tasks/
+reports/local/

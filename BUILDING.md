@@ -5,17 +5,26 @@
 - JDK 17 或兼容版本
 - Android SDK 36，Build Tools 35 或更高版本
 - 工程自带的 Gradle Wrapper（Gradle 8.13）
+- Node.js 22、npm（`web-ui/package-lock.json` 锁定前端依赖）
+- Rust stable、`wasm32-unknown-unknown` target、wasm-bindgen-cli 0.2.130（必须与 `ui-core/Cargo.lock` 一致）
 
 以下命令在仓库根目录运行。Windows 可将 `./gradlew` 替换为 `.\gradlew.bat`。
 
 ## 调试构建与测试
 
+本重构分支默认使用 GitHub-hosted Actions（`ubuntu-latest`）运行构建。服务器资源受限时不要在本机执行下述重型命令：推送 `refactor/rust-vue-reader-semantics` 自动触发，或 `gh workflow run ci.yml --ref refactor/rust-vue-reader-semantics` 手动触发。CI 将 Python 契约、Rust/Vue 与 Android 单测分开执行，全部成功后才打包并校验 APK，产物保存在对应 run 的 Artifacts，不自动发布 Release。
+
+Debug APK 使用 CI 调试签名，不等于正式发布签名，不能据此承诺覆盖既有正式安装或保留其数据。以下手动命令供具有足够资源的开发机使用。
+
 ```bash
 export ANDROID_HOME=/path/to/android-sdk
+bash scripts/build-web.sh
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-APK 输出至 `app/build/outputs/apk/debug/app-debug.apk`，测试报告位于 `app/build/reports/tests/testDebugUnitTest/`。
+`scripts/build-web.sh` 实际执行 Rust tests、WASM release 构建、Node WASM smoke、`npm ci`、Vue tests 与生产构建。Gradle 将 `web-ui/dist/` 同步到生成的 APK assets/web/，缺少 index 或 WASM 时拒绝打包；不会回退到远程开发服务器。
+
+APK 输出至 `app/build/outputs/apk/debug/app-debug.apk`，测试报告位于 `app/build/reports/tests/testDebugUnitTest/`。另跑 `python -m unittest discover -s tests -p 'test_*.py'` 检查构建契约。`legacy-ui/` 仅保留旧 UI 迁移资料，不进入 APK 编译。
 
 GitHub Actions 配置见 `.github/workflows/ci.yml`，运行单元测试并构建 Debug APK，不使用 Release 签名凭据。
 

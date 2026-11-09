@@ -44,7 +44,7 @@ abstract class StudioDatabase : RoomDatabase() {
         fun get(context: Context): StudioDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, StudioDatabase::class.java, "studio-v1.db")
                 .addMigrations(MIGRATION_11_12, MIGRATION_12_13)
-                .fallbackToDestructiveMigrationOnDowngrade()
+                // A version mismatch must fail closed rather than erase saved sources.
                 .build().also { instance = it }
         }
     }

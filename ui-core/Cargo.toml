@@ -1,0 +1,23 @@
+[package]
+name = "studio-ui-core"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Frontend domain core for the Legado Source Studio web UI (JSON string boundary)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "studio_ui_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+wasm-bindgen = "=0.2.130"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,86 @@
+{
+  "DandanLLab/mr": {
+    "commit": "033e3537d8b458cd2be4a3732c74a194f6076dbf",
+    "stargazers_count": 111,
+    "commit_date": "2026-09-12T06:15:22Z",
+    "license": "MIT"
+  },
+  "ssnangua/ColorTxt": {
+    "commit": "0e54e3aebedb61f2b6de16f8b40cd92da488275a",
+    "stargazers_count": 1976,
+    "commit_date": "2026-10-16T09:50:18Z",
+    "license": "MPL-2.0"
+  },
+  "huajideshutiao/legado": {
+    "commit": "83657e54829b7603aa392bf072283805769ad385",
+    "stargazers_count": 333,
+    "commit_date": "2026-11-02T17:55:51Z",
+    "license": "GPL-3.0"
+  },
+  "HapeLee/legado-with-MD3": {
+    "commit": "2e2c63c3a7d2786719919fd0b11a197af9cf29bd",
+    "stargazers_count": 6917,
+    "commit_date": "2026-11-08T19:05:23Z",
+    "license": "GPL-3.0"
+  },
+  "Suml-1/Legado_Max": {
+    "commit": "b3864087588ba624cb376e9f04772be2b6385656",
+    "stargazers_count": 426,
+    "commit_date": "2026-11-07T15:25:24Z",
+    "license": "GPL-3.0"
+  },
+  "LegadoTeam/legado": {
+    "commit": "330e606c4d57e08adc056ff8ab7a4132c784da9a",
+    "stargazers_count": 1870,
+    "commit_date": "2026-11-01T09:01:53Z",
+    "license": "GPL-3.0"
+  },
+  "Kototoro-app/Kototoro": {
+    "commit": "7ca2734fba7b830d8008012e4b2de1a052c4bc43",
+    "stargazers_count": 677,
+    "commit_date": "2026-11-09T15:37:40Z",
+    "license": "Apache-2.0"
+  },
+  "CCSSNE/legadoC": {
+    "commit": "b3cb9f5405112d5ae1b99705bf62886b81a9d5f4",
+    "stargazers_count": 209,
+    "commit_date": "2026-08-30T00:00:00Z",
+    "license": "NOASSERTION"
+  },
+  "skybbk1001/legadoT": {
+    "commit": "b0c6067996a9467ed35c32b4de69171979a284de",
+    "stargazers_count": 152,
+    "commit_date": "2026-11-05T17:58:55Z",
+    "license": "GPL-3.0"
+  },
+  "rimvoid/legado": {
+    "commit": "e111bf666199505d783e6910d8609f0e5cb043e0",
+    "stargazers_count": 663,
+    "commit_date": "2026-09-24T15:31:30Z",
+    "license": "GPL-3.0"
+  },
+  "mgz0227/legado-Harmony": {
+    "commit": "7419807075b5e8ab33320ac06f36dac51d5da707",
+    "stargazers_count": 2249,
+    "commit_date": "2026-09-08T15:23:05Z",
+    "license": "GPL-3.0"
+  },
+  "dmzz-yyhyy/LightNovelReader": {
+    "commit": "49695ccfeab4207adf6ad476b1f48078f7bee2ac",
+    "stargazers_count": 2332,
+    "commit_date": "2026-10-25T16:17:34Z",
+    "license": "Apache-2.0"
+  },
+  "Luoyacheng/legado-E": {
+    "commit": "8b87c5aba4df91c39a3a0939a68a1180b9f2ee1c",
+    "stargazers_count": 3067,
+    "commit_date": "2026-08-01T05:07:58Z",
+    "license": "GPL-3.0"
+  },
+  "joestar817/legado_NG": {
+    "commit": "7b6087410f287511080f2a93b82795231f4b72fd",
+    "stargazers_count": 207,
+    "commit_date": "2026-11-05T17:57:12Z",
+    "license": "GPL-3.0"
+  }
+}

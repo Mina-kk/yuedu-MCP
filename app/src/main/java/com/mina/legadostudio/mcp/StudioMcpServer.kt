@@ -9,6 +9,7 @@ import com.mina.legadostudio.network.HttpOrigin
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ReadResourceResult
@@ -196,7 +197,17 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
     internal val destructive = ToolAnnotations(readOnlyHint = false, destructiveHint = true, idempotentHint = false, openWorldHint = false)
     internal val openDestructive = ToolAnnotations(readOnlyHint = false, destructiveHint = true, idempotentHint = false, openWorldHint = true)
 
-    fun create(): Server = Server(
+    fun create(): Server = create(registerSession = true)
+
+    /**
+     * 建立 Server。
+     *
+     * @param registerSession 是否登记为**网络** MCP 会话（[McpSessions]）。App 内 Web UI 的本地
+     *   工具实例传 `false`：仍走同一套 `Server.tool` 注册与 [dispatchToolCallInner] 链路
+     *   （logged/boundedResult/contextId 校验一致），但不进网络会话统计、不被会话回收器扫描，
+     *   也不污染 `tools/list` 之外的网络侧状态。默认 `true` 与旧路径逐字一致。
+     */
+    fun create(registerSession: Boolean = true): Server = Server(
         serverInfo = Implementation("legado-source-studio", BuildConfig.VERSION_NAME),
         options = ServerOptions(
             capabilities = ServerCapabilities(
@@ -213,7 +224,53 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
         registerTools(server)
         registerContextTools(server)
         registerCorpusTools(server)
-        McpSessions.register(server)
+        if (registerSession) McpSessions.register(server)
+    }
+
+    // --- 本地（App 内 Web UI）工具目录与调用 ---------------------------------
+
+    /**
+     * 本地调用登记表：`Server.tool` 注册时同步登记 wrapped handler。
+     * 与网络侧共用同一份注册过程，不复制任何工具实现。
+     */
+    private val localHandlers = java.util.concurrent.ConcurrentHashMap<String, suspend (CallToolRequest) -> CallToolResult>()
+
+    /**
+     * 本实例可见的工具目录（注册顺序）。条目直接取 [fullToolSpecs]——与
+     * `studio://tools/{name}` 读回的是同一份完整定义，不做二次裁剪或杜撰。
+     */
+    fun localTools(): List<io.modelcontextprotocol.kotlin.sdk.types.Tool> =
+        fullToolSpecs.values.toList()
+
+    fun localTool(name: String): io.modelcontextprotocol.kotlin.sdk.types.Tool? = fullToolSpecs[name]
+
+    fun hasLocalTool(name: String): Boolean = localHandlers.containsKey(name)
+
+    /**
+     * 本地派发：与网络侧 [dispatchToolCall] 同一条链路（usage 统计 + [dispatchToolCallInner]
+     * 的 logged / boundedResult / contextId 校验 / err 转换 / 取消透传）。
+     *
+     * 与网络路径的唯一差别：不调用 [McpSessions.touchToolCall]——本地实例没有网络会话，
+     * 触碰会话表只会凭空造出一条假会话。
+     *
+     * @throws IllegalArgumentException 工具不在本实例注册表内
+     */
+    suspend fun callLocalTool(name: String, arguments: JsonObject): CallToolResult {
+        val handler = localHandlers[name]
+            ?: throw IllegalArgumentException("未知工具：$name")
+        val request = CallToolRequest(CallToolRequestParams(name = name, arguments = arguments))
+        return try {
+            McpToolUsageRegistry.current.track(name) { dispatchToolCallInner(name, request, handler) }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: LinkageError) {
+            linkageFailure(error)
+        }
+    }
+
+    /** 释放本地实例：只清登记表，不触碰网络会话（本地实例从未登记）。 */
+    fun releaseLocal() {
+        localHandlers.clear()
     }
 
     /** 语料命中与知识/参考读取工具：做源前先 match_sources，可大幅减少抓网页与试错次数。 */
@@ -528,6 +585,8 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
         if (name == "debug_source") extra["refresh"] = buildJsonObject { put("type", "boolean"); put("description", "可选，true=不使用缓存") }
         if (name == "eval_js") extra["dumpVars"] = buildJsonObject { put("type", "boolean"); put("description", "可选 true=回包附 vars 快照：result/baseUrl 等内置变量当前值") }
         val contextualSchema = inputSchema.copy(properties = JsonObject(inputSchema.properties.orEmpty() + extra))
+        // 本地（App 内 Web UI）调用登记：与网络注册同一份 handler，不复制实现。
+        localHandlers[name] = handler
         // 本连接的完整定义目录：compact 模式下 tools/list 注册截断副本，原定义仍由此 map 经
         // studio://tools/{name} 读回；handler 不变，调用路径与默认模式一致。
         fullToolSpecs[name] = io.modelcontextprotocol.kotlin.sdk.types.Tool(

@@ -4,6 +4,8 @@ import androidx.annotation.Keep
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
+import org.jsoup.parser.Tag
+import org.jsoup.parser.TagSet
 import org.jsoup.select.Collector
 import org.jsoup.select.Elements
 import org.jsoup.select.Evaluator
@@ -23,14 +25,14 @@ class AnalyzeByJSoup(doc: Any) {
             return doc
         }
         if (doc is JXNode) {
-            return if (doc.isElement) doc.asElement() else Jsoup.parse(doc.toString())
+            return if (doc.isElement) doc.asElement() else parseSourceHtml(doc.toString())
         }
         kotlin.runCatching {
             if (doc.toString().startsWith("<?xml", true)) {
                 return Jsoup.parse(doc.toString(), Parser.xmlParser())
             }
         }
-        return Jsoup.parse(doc.toString())
+        return parseSourceHtml(doc.toString())
     }
 
     /**
@@ -76,7 +78,7 @@ class AnalyzeByJSoup(doc: Any) {
 
         if (sourceRule.elementsRule.isEmpty()) {
 
-            textS.add(element.data())
+            textS.add(element.data() ?: "")
 
         } else {
 
@@ -87,12 +89,13 @@ class AnalyzeByJSoup(doc: Any) {
             for (ruleStrX in ruleStrS) {
 
                 val temp: ArrayList<String>? =
-                    if (sourceRule.isCss || ruleStrX.startsWith("@css:", true)) {
-                        val body = if (sourceRule.isCss) ruleStrX else ruleStrX.substring(5)
-                        val lastIndex = body.lastIndexOf('@')
-                        val css = if (lastIndex > 0) body.take(lastIndex) else body
-                        val lastRule = if (lastIndex > 0) body.substring(lastIndex + 1) else "text"
-                        getResultLast(selectCss(element, css), lastRule)
+                    if (sourceRule.isCss) {
+                        // 上游 AnalyzeByJSoup.getStringList:90-95：`@CSS:` 整串模式下每段必须以 `@attr` 结尾
+                        val lastIndex = ruleStrX.lastIndexOf('@')
+                        getResultLast(
+                            element.select(ruleStrX.take(lastIndex)),
+                            ruleStrX.substring(lastIndex + 1)
+                        )
                     } else {
                         getResultList(ruleStrX)
                     }
@@ -135,10 +138,10 @@ class AnalyzeByJSoup(doc: Any) {
         val ruleStrS = ruleAnalyzes.splitRule("&&", "||", "%%")
 
         val elementsList = ArrayList<Elements>()
-        if (sourceRule.isCss || ruleStrS.any { it.startsWith("@css:", true) }) {
+        if (sourceRule.isCss) {
+            // 上游 AnalyzeByJSoup.getElements:138-145：`@CSS:` 整串模式直接 jsoup select，不走 legado 索引语法
             for (ruleStr in ruleStrS) {
-                val body = if (sourceRule.isCss) ruleStr else if (ruleStr.startsWith("@css:", true)) ruleStr.substring(5) else ruleStr
-                val tempS = if (sourceRule.isCss || ruleStr.startsWith("@css:", true)) selectCss(temp, body) else defaultElements(temp, body)
+                val tempS = temp.select(ruleStr)
                 elementsList.add(tempS)
                 if (tempS.isNotEmpty() && ruleAnalyzes.elementsType == "||") {
                     break
@@ -295,7 +298,15 @@ class AnalyzeByJSoup(doc: Any) {
                         "class" -> temp.getElementsByClass(rules[1])
                         "tag" -> temp.getElementsByTag(rules[1])
                         "id" -> Collector.collect(Evaluator.Id(rules[1]), temp)
-                        "text" -> temp.getElementsContainingOwnText(rules[1])
+                        // ADAPT: 上游此处是 `"text" -> temp.getElementsContainingOwnText(rules[1])`，
+                        // 但 `rules` 由 beforeRule.split(".") 得到，纯 `text` 规则下 rules.size == 1，
+                        // rules[1] 越界（上游同样会抛 IndexOutOfBoundsException）。这里取不到参数时
+                        // 返回空集合，避免把规则书写错误升级成崩溃；有参数时行为不变。
+                        "text" -> if (rules.size > 1) {
+                            temp.getElementsContainingOwnText(rules[1])
+                        } else {
+                            Elements()
+                        }
                         else -> temp.select(beforeRule)
                     }
                 }
@@ -510,16 +521,6 @@ class AnalyzeByJSoup(doc: Any) {
         return el
     }
 
-    private fun selectCss(root: Element, rule: String): Elements {
-        val css = rule.replace(Regex("^@css:", RegexOption.IGNORE_CASE), "").trim()
-        if (css.isEmpty()) return Elements()
-        return try {
-            root.select(css)
-        } catch (_: RuntimeException) {
-            Elements()
-        }
-    }
-
     internal inner class SourceRule(ruleStr: String) {
         var isCss = false
         var elementsRule: String = if (ruleStr.startsWith("@CSS:", true)) {
@@ -527,6 +528,19 @@ class AnalyzeByJSoup(doc: Any) {
             ruleStr.substring(5).trim { it <= ' ' }
         } else {
             ruleStr
+        }
+    }
+
+    companion object {
+        /**
+         * 上游 SourceHtmlParser.kt（同 commit）：旧书源依赖 HTML `<a/>` 自闭合语义，
+         * CSS 与 XPath 必须解析出同一个 DOM，否则 textNodes 语义漂移。
+         */
+        internal fun parseSourceHtml(html: String): org.jsoup.nodes.Document {
+            val tags = TagSet.Html().onNewTag { tag ->
+                if (tag.namespace() == Parser.NamespaceHtml) tag.set(Tag.SelfClose)
+            }
+            return Jsoup.parse(html, Parser.htmlParser().tagSet(tags))
         }
     }
 

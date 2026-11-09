@@ -52,6 +52,17 @@ class RhinoEvaluator(
             ?: (origin ?: originProvider())?.sourceAnchor ?: baseUrl
         @Suppress("UNCHECKED_CAST")
         val jsLogSink = bindings[BINDING_JS_LOG] as? (String) -> Unit
+        // 调用方显式传入的解析上下文（debug/规则链）：java.* 与规则核共用同一 session。
+        // 未传时（eval_js 等独立求值）按本次 previous/content 建一个临时上下文，
+        // java.getString 默认取该内容而不是空 Document。
+        val providedContext = bindings[BINDING_RUNTIME_CONTEXT] as? ReaderRuntimeContext
+        val runtimeContext = providedContext ?: ReaderRuntimeContext(
+            content = bindings[BINDING_SOURCE_CONTENT] ?: previous ?: "",
+            baseUrl = baseUrl,
+            evaluator = { script, result, src -> evaluateRaw(script, baseUrl, result, bindings + (BINDING_SOURCE_CONTENT to src), origin).value },
+            variables = (bindings[BINDING_VARIABLES] as? ReaderRuntimeVariables)
+                ?: ReaderRuntimeVariables({ "" }, { _, _ -> }),
+        )
         val api = StudioJsApi(
             fetcher, { line -> logs += line; jsLogSink?.invoke(line) }, webViewLoader, cookies, userAgentProvider, httpLogs,
             useCookieJar = bindings[BINDING_USE_COOKIE_JAR] as? Boolean ?: true,
@@ -59,6 +70,7 @@ class RhinoEvaluator(
             originProvider = { origin ?: originProvider() },
             verificationProvider = verificationProvider,
             browserAwaitProvider = browserAwaitProvider,
+            runtimeContext = runtimeContext,
         )
         val started = System.currentTimeMillis()
         // 每次求值挂一套全新标准对象作用域：var 声明与原型修改都不跨调用泄漏；
@@ -67,7 +79,9 @@ class RhinoEvaluator(
         scope.put("java", api)
         scope.put("result", previous)
         scope.put("baseUrl", baseUrl)
-        scope.put("src", previous)
+        // 上游 AnalyzeRule.evalJS 900-936：`src` 恒为 AnalyzeRule.content（原始内容），
+        // `result` 才是流经当前阶段的结果。旧实现把 src 也设成 previous，链式 JS 拿不到原页面。
+        scope.put("src", runtimeContext.srcForEvaluation())
         // 官方同名对象：cookie/cache/source。bindings 传入的 source 状态图包成 SourceJsApi，JS 写入回传调试流程
         scope.put("cookie", CookieJsApi(cookies))
         // bindings 指定 cache 实现时用同一个实例（debug 链路要共享一份观测缓存——
@@ -247,13 +261,33 @@ class RhinoEvaluator(
         const val BINDING_JS_LOG = "__legadoJsLog"
 
         /**
+         * bindings 内部保留键：值是 `ReaderRuntimeContext`，把规则核 session 交给 `java.*`。
+         * debug/规则链必须传，保证 `java.getString` 与规则链是同一份 content/baseUrl/变量层
+         * （上游 `bindings["java"] = this`，java 就是 AnalyzeRule 本身）。
+         */
+        const val BINDING_RUNTIME_CONTEXT = "__legadoRuntimeContext"
+
+        /**
+         * bindings 内部保留键：值是原始内容（上游 `AnalyzeRule.content`），用于 `src`。
+         * 不传时 `src` 取 [BINDING_RUNTIME_CONTEXT] 的 content；两者都没有时退到 previous。
+         */
+        const val BINDING_SOURCE_CONTENT = "__legadoSourceContent"
+
+        /**
+         * bindings 内部保留键：值是 [ReaderRuntimeVariables]，`java.put/get` 的层级变量实现
+         * （上游 AnalyzeRule.put/get 856-891）。不传时为空实现（读空、写丢弃）。
+         */
+        const val BINDING_VARIABLES = "__legadoVariables"
+
+        /**
          * 注入对象时单独处理/跳过的 bindings 保留键：source/book/chapter 包成官方同名 API 对象，
          * cache 取传入实例（debug 链路注入 SnapshottingCache 观测写入），
-         * jsLib/锚点/cookieJar 开关/日志汇出是内部传递键不进作用域。
+         * jsLib/锚点/cookieJar 开关/日志汇出/运行上下文是内部传递键不进作用域。
          */
         private val RESERVED_BINDING_KEYS = setOf(
             "source", "book", "chapter", "cache", BINDING_JSLIB, BINDING_SOURCE_ANCHOR,
-            BINDING_USE_COOKIE_JAR, BINDING_JS_LOG,
+            BINDING_USE_COOKIE_JAR, BINDING_JS_LOG, BINDING_RUNTIME_CONTEXT,
+            BINDING_SOURCE_CONTENT, BINDING_VARIABLES,
         )
         /**
          * htmlunit-core-js 对「方法不存在/签名不匹配」的固定报错文案。
@@ -285,12 +319,18 @@ class RhinoEvaluator(
         /** ReferenceError 未定义名：en `"url" is not defined` / zh_CN `“url” 未定义` */
         private val UNDEFINED_NAME = Regex("[\"“]?([A-Za-z_$][\\w$]*)[\"”]?\\s*(?:is not defined|未定义)")
         /**
-         * 沙箱曾注入、但官方阅读(Legado) 规则 JS 里不存在的变量名 → 修正提示。
-         * 规则问题而非沙箱差异：阅读端同样会报 ReferenceError。
+         * 沙箱本次求值里**没有注入**的常见变量名 → 定位提示。
+         *
+         * 这里只说「本次绑定上下文里没有这个变量」，不再断言「阅读端同样会报错」：
+         * 同名的合法用户定义（`var url = ...` 在上一段 JS 里声明、书源自己的 jsLib 里定义、
+         * 或某个分支确实注入了该变量）都可能存在，把 ReferenceError 一律判成规则错误会改坏正常书源。
+         * 阅读端是否同样失败取决于目标分支与该阶段，必须由作者在阅读端核对。
          */
         private val LEGADO_ABSENT_NAMES = mapOf(
-            "url" to "\n【规则错误】阅读(Legado) 规则 JS 中没有 `url` 变量，阅读端同样会报「url 未定义」；取当前页地址请改用 `baseUrl`（如 `@js:baseUrl`）。",
-            "isFromBookInfo" to "\n【规则错误】阅读(Legado) 规则 JS 中没有 `isFromBookInfo` 变量，阅读端同样会报未定义；请改用 `fromBookInfo`。",
+            "url" to "\n【绑定提示】本次求值的规则 JS 上下文没有注入 `url` 变量；取当前页地址请用 `baseUrl`（如 `@js:baseUrl`）。" +
+                "若该名字是你在前一段 JS 或 jsLib 里自己声明的，请检查声明是否在同一作用域内生效。",
+            "isFromBookInfo" to "\n【绑定提示】本次求值的规则 JS 上下文没有注入 `isFromBookInfo`；详情阶段标志在阅读端是 `fromBookInfo`。" +
+                "若该名字是你自定义的变量，请检查其声明。",
         )
         /** Rhino「找不到方法」消息里完整方法引用，如 “com.mina...StudioJsApi.get(...)”（zh_CN 带引号）/ Can't find method io.x.Y.z(...).（en 不带引号） */
         private val MISSING_API_METHOD = Regex("(?:[\"“]|Can't find method )([\\w.$]+\\([^\"”)]*\\))")
@@ -367,9 +407,15 @@ class StudioJsApi(
     private val verificationProvider: (suspend (String) -> String?)? = null,
     /**
      * 浏览器等待（java.startBrowserAwait）：入参验证页 URL 与可选交接 html，先在手机验证中心
-     * WebView 让用户过盾，完成后返回过盾页的整页源码（官方 StrResponse.body）。null=超时/取消。
+     * WebView 让用户过盾，完成后返回过盾页的整页源码（官方 StrResponse.body）。
      */
     private val browserAwaitProvider: (suspend (url: String, html: String?) -> String?)? = null,
+    /**
+     * 规则解析上下文：`java.getString/getStringList/getElement/getElements/setContent/put/get`
+     * 全部委托给它（上游 `bindings["java"] = this`，java 就是 AnalyzeRule 本身）。
+     * 为 null 时按本次求值内容建一个空上下文（eval_js 等独立求值路径）。
+     */
+    private val runtimeContext: ReaderRuntimeContext? = null,
 ) {
     /** 官方兼容：java.lang.Thread.sleep(ms)（沙箱仅放行这一个 java.lang 用法，其余包路径不可用） */
     @JvmField
@@ -484,6 +530,9 @@ class StudioJsApi(
         return StudioJsResponse(if (body == null) 0 else 200, url, body.orEmpty(), emptyMap(), System.currentTimeMillis() - started)
     }
     private var currentDocument: org.jsoup.nodes.Document? = null
+    /** 无运行上下文时（eval_js 独立求值）java.setContent 留下的内容与 baseUrl */
+    private var currentContent: Any? = null
+    private var currentBaseUrl: String = ""
     private val memoryStore = java.util.concurrent.ConcurrentHashMap<String, Any?>()
     /** 「真机 java.get/post 传 null headers 可能 NPE」警告每次求值只记一次 */
     private var nullHeadersWarned = false
@@ -493,15 +542,44 @@ class StudioJsApi(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, com.mina.legadostudio.network.QueryTTF>?): Boolean = size > 8
     }
 
-    fun setContent(html: Any?) {
-        currentDocument = org.jsoup.Jsoup.parse(html?.toString().orEmpty())
+    /**
+     * 官方 java.setContent(content, baseUrl?)：替换 `java` 自身的解析内容（上游 AnalyzeRule.setContent）。
+     * 之后无参 `java.getString(...)` 取的就是这份内容，而不是旧实现里留下的空 Document。
+     */
+    @JvmOverloads
+    fun setContent(html: Any?, baseUrl: String? = null): Any? {
+        val context = runtimeContext
+        if (context != null && html != null) {
+            context.setContent(html, baseUrl)
+            return context.session
+        }
+        currentContent = html
+        if (baseUrl != null) currentBaseUrl = baseUrl
+        return html
     }
 
+    /**
+     * 官方 java.put(key, value)：写入当前阶段变量层（chapter→book→ruleData→source，上游 AnalyzeRule.put）。
+     * 同一次 debug 的后续字段可见；不同任务各自的变量层互不可见。
+     */
     fun put(key: String, value: Any?): Any? {
+        val context = runtimeContext
+        if (context != null) {
+            context.put(key, value?.toString().orEmpty())
+            return value
+        }
         if (value == null) memoryStore.remove(key) else memoryStore[key] = value
         return value
     }
 
+    /**
+     * 官方 java.get(keyOrUrl, headers?)：
+     * - 一参且不是 URL 形态 → 变量查询（上游 AnalyzeRule.get，chapter→book→ruleData→source）；
+     * - URL 形态（http(s):// 或 `/` 开头）→ 网络 GET（上游 JsExtensions.get(url, headers)）。
+     *
+     * 上游两个 `get` 是不同类的不同签名，这里按「是否 URL 形态」分派，与旧行为一致；
+     * 变量查询不再落到与规则核无关的 memoryStore。
+     */
     @JvmOverloads
     fun get(keyOrUrl: String, headers: Any? = null): Any? {
         if (keyOrUrl.startsWith("http://", ignoreCase = true) ||
@@ -510,6 +588,8 @@ class StudioJsApi(
         ) {
             return request(keyOrUrl, "GET", null, headers, null)
         }
+        val context = runtimeContext
+        if (context != null) return context.get(keyOrUrl)
         return memoryStore[keyOrUrl]
     }
 
@@ -536,47 +616,52 @@ class StudioJsApi(
     fun head(url: String, headers: Any?, timeout: Any?): StudioJsResponse =
         request(url, "HEAD", null, headers, timeoutMillis(timeout))
 
+    /**
+     * 官方 java.getString(rule, content?, isUrl?)：与规则核同一实现（ReaderRuleSession.getString）。
+     * 不传 content 时取本次规则上下文的内容（原始内容），CSS 无匹配返回空串而不是整页 outerHtml。
+     */
     @JvmOverloads
-    fun getString(rule: String, content: Any? = null): String {
-        val root = resolveElement(content)
-        val (css, attr) = parseRuleParts(rule)
-        val target = if (css.isNotBlank()) root.select(css).firstOrNull() ?: root else root
-        return extractValue(target, attr)
+    fun getString(rule: String, content: Any? = null, isUrl: Boolean = false): String {
+        val context = runtimeContext
+        if (context != null) return context.getString(rule, content, isUrl)
+        return fallbackSession(content).getString(rule, null, isUrl)
     }
 
+    /** 官方 java.getString(rule, unescape)（RssJsExtensions 同签名） */
+    fun getString(rule: String, unescape: Boolean): String {
+        val context = runtimeContext
+        if (context != null) return context.session.getString(rule, null, false, unescape)
+        return fallbackSession(null).getString(rule, null, false, unescape)
+    }
+
+    /**
+     * 官方 java.getStringList(rule, content?, isUrl?)：最终 String 按 `\n` 拆行（上游 getStringList 286-288），
+     * 不再是「整串包成单项」。
+     */
     @JvmOverloads
-    fun getStringList(rule: String, content: Any? = null): List<String> {
-        val root = resolveElement(content)
-        val (css, attr) = parseRuleParts(rule)
-        val elements = if (css.isNotBlank()) root.select(css) else org.jsoup.select.Elements(root)
-        return elements.map { extractValue(it, attr) }
+    fun getStringList(rule: String, content: Any? = null, isUrl: Boolean = false): List<String> {
+        val context = runtimeContext
+        val list = if (context != null) context.getStringList(rule, content, isUrl)
+        else fallbackSession(content).getStringList(rule, null, isUrl)
+        return list.orEmpty()
     }
 
-    private fun resolveElement(content: Any?): org.jsoup.nodes.Element {
-        return when (content) {
-            is org.jsoup.nodes.Element -> content
-            null -> currentDocument?.body() ?: org.jsoup.Jsoup.parse("").body()
-            else -> org.jsoup.Jsoup.parse(content.toString()).body()
-        }
+    /** 官方 java.getElement(rule)：返回 typed 节点（Element / JXNode / Map / regex capture List） */
+    fun getElement(rule: String): Any? {
+        val context = runtimeContext ?: fallbackSession(null)
+        return context.getElement(rule)
     }
 
-    private fun parseRuleParts(rule: String): Pair<String, String> {
-        val trimmed = rule.trim()
-        if ('@' !in trimmed) return trimmed to "all"
-        val parts = trimmed.split('@').filter { it.isNotBlank() }
-        if (parts.size == 1) return "" to parts[0]
-        val css = parts.dropLast(1).joinToString(" ")
-        val attr = parts.last()
-        return css to attr
+    /** 官方 java.getElements(rule)：非列表结果返回空列表（上游 453-502） */
+    fun getElements(rule: String): List<Any> {
+        val context = runtimeContext ?: fallbackSession(null)
+        return context.getElements(rule)
     }
 
-    private fun extractValue(element: org.jsoup.nodes.Element, attr: String): String {
-        return when (attr.lowercase()) {
-            "text", "textnodes" -> element.text()
-            "html" -> element.html()
-            "all" -> element.outerHtml()
-            else -> element.attr(attr).ifBlank { element.text() }
-        }
+    /** 无显式运行上下文时（eval_js 等）按本次内容建一次性核，保证 java.getString 仍取真实内容 */
+    private fun fallbackSession(content: Any?): ReaderRuleSession {
+        val root = content ?: currentContent ?: currentDocument ?: ""
+        return ReaderRuleSession(content = root, baseUrl = currentBaseUrl)
     }
     @JvmOverloads
     fun encodeURI(value: String, charset: String = "UTF-8"): String = URLEncoder.encode(value, charset).replace("+", "%20")
