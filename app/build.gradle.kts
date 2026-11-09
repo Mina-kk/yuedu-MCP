@@ -138,9 +138,12 @@ val syncWebUiAssets = tasks.register<Sync>("syncWebUiAssets") {
         }
     }
 }
-android.sourceSets.getByName("main").assets.srcDir(generatedWebAssets)
+// A task-backed directory carries the producer dependency into merge AND lint tasks.
+android.sourceSets.getByName("main").assets.srcDir(syncWebUiAssets)
 tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("Assets")) dependsOn(syncWebUiAssets)
+    // AGP lint flattens source directories and drops the task provider dependency.
+    if (name.contains("Lint") || name.startsWith("lint")) dependsOn(syncWebUiAssets)
 }
 
 // 真实联网测试隔离：默认所有 Test 任务排除 LiveNetworkTest category，
@@ -148,6 +151,12 @@ tasks.configureEach {
 val liveNetworkTestCategory = "com.mina.legadostudio.testsupport.LiveNetworkTest"
 
 tasks.withType<Test>().configureEach {
+    // Bound test forks as well as Gradle: MockWebServer/coroutine pools otherwise exceed
+    // the task cgroup's thread budget although the heap and host have ample free RAM.
+    maxParallelForks = 1
+    jvmArgs("-XX:ActiveProcessorCount=2")
+    systemProperty("kotlinx.coroutines.io.parallelism", "16")
+    forkEvery = 30
     if (name != "liveTestDebug") {
         useJUnit { excludeCategories(liveNetworkTestCategory) }
     }

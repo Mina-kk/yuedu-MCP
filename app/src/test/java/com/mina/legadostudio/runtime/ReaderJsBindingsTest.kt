@@ -38,7 +38,7 @@ class ReaderJsBindingsTest {
             bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to html),
         )
         // result = 链中上一段（这里是规则串本身），src = 原始 HTML
-        assertEquals("#b@text|$html", raw.value.toString())
+        assertEquals("#a@text|#b@text|$html", raw.value.toString())
     }
 
     @Test fun srcIsOriginalContentForSecondJsSegmentInChain() {
@@ -164,10 +164,10 @@ class ReaderJsBindingsTest {
     @Test fun javaGetStringListSplitsNewlineJoinedString() {
         val html = "<div class='c'>a</div><div class='c'>b</div>"
         val raw = evaluator().evaluateRaw(
-            "java.getStringList('@js: \"x\\ny\"').length",
+            "java.getStringList('@js: \"x\\\\ny\"').length",
             bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to html),
         )
-        assertEquals("2", raw.value)
+        assertEquals(2, (raw.value as Number).toInt())
     }
 
     @Test fun javaGetElementAndElementsKeepTypedNodes() {
@@ -176,17 +176,17 @@ class ReaderJsBindingsTest {
             """
             var one = java.getElement('.c a');
             var all = java.getElements('.c a');
-            one.attr('href') + '|' + all.length + '|' + all[1].text()
+            one[0].attr('href') + '|' + all.length + '|' + all[1].text()
             """.trimIndent(),
             bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to html),
         )
         assertEquals("/1|2|二", raw.value)
     }
 
-    @Test fun javaGetStringWithoutContentUsesOriginalContentNotPreviousDocument() {
+    @Test fun javaSetContentRejectsNullLikeUpstream() {
         // 旧实现：setContent 之后 currentDocument 变空文档，后续无参 getString 取空。
         val html = "<div class='a'>A</div>"
-        val raw = evaluator().evaluateRaw(
+        val error = runCatching { evaluator().evaluateRaw(
             """
             java.setContent("<div class='b'>B</div>");
             var first = java.getString('.b@text');
@@ -194,8 +194,8 @@ class ReaderJsBindingsTest {
             first + '|' + java.getString('.a@text')
             """.trimIndent(),
             bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to html),
-        )
-        assertEquals("B|A", raw.value)
+        ) }.exceptionOrNull()
+        assertTrue(error?.message.orEmpty(), error != null)
     }
 
     // ------------------------------------------------------ diagnostics wording
@@ -207,8 +207,9 @@ class ReaderJsBindingsTest {
                 bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to "<div/>"),
             )
         }.exceptionOrNull()
-        // 绑定上下文里 url 本就未定义：JS 自身 typeof 分支能处理，不抛错
-        assertEquals(null, error)
+        // typeof 检测后在 true 分支再次读取未定义变量仍会抛 ReferenceError。
+        assertTrue(error != null)
+        assertFalse(error!!.message.orEmpty().contains("【API 提示】"))
     }
 
     @Test fun undefinedVariableMessageDoesNotClaimReaderAlsoFails() {
@@ -224,5 +225,44 @@ class ReaderJsBindingsTest {
         assertTrue(message, message.contains("baseUrl"))
         assertFalse("不得断言阅读端必然同样报错：$message", message.contains("阅读端同样会报"))
         assertFalse("不得把未定义一律归为规则错误：$message", message.contains("【规则错误】"))
+    }
+
+    // ------------------------------------------------- java.get 一参/两参 arity
+
+    /**
+     * 上游 `AnalyzeRule.get(key)` 与 `JsExtensions.get(url, headers)` 是**不同类的不同签名**，
+     * 靠参数个数区分。一参 `java.get('http://...')` 必须是变量查询（返回空串），
+     * 不能因为字符串像 URL 就静默发网络请求——旧实现按 URL 形态分派，与上游不符。
+     */
+    @Test fun oneArgJavaGetIsAlwaysVariableLookupEvenForUrlLikeKey() {
+        val raw = evaluator().evaluateRaw(
+            // 若退化成网络 GET，NoRouteToHost/连接失败会抛出而不是返回空串
+            "String(java.get('http://127.0.0.1:1/never'))",
+            baseUrl = "https://example.test/",
+            bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to "<div/>"),
+        )
+        assertEquals("", raw.value.toString())
+    }
+
+    /** 两参 `java.get(url, headers)` 才是网络 GET（上游 JsExtensions.get）。 */
+    @Test fun twoArgJavaGetIsNetworkRequest() {
+        val error = runCatching {
+            evaluator().evaluateRaw(
+                "java.get('http://127.0.0.1:1/never', null)",
+                baseUrl = "https://example.test/",
+                bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to "<div/>"),
+            )
+        }.exceptionOrNull()
+        assertTrue("两参 java.get 必须走网络（连接被拒应抛错），实际=$error", error != null)
+    }
+
+    /** 一参 `java.get` 的变量层与 `java.put` 同源：同一次求值内写后读得到。 */
+    @Test fun oneArgJavaGetReadsVariableWrittenByPut() {
+        val raw = evaluator().evaluateRaw(
+            "java.put('k', 'v'); String(java.get('k'))",
+            baseUrl = "https://example.test/",
+            bindings = mapOf(RhinoEvaluator.BINDING_SOURCE_CONTENT to "<div/>"),
+        )
+        assertEquals("v", raw.value.toString())
     }
 }

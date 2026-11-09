@@ -60,6 +60,7 @@ class ReaderRuleSession(
         private set
 
     private var isJSON: Boolean = false
+    private var isRegex: Boolean = false
     private var redirectUrl: URL? = null
 
     private var analyzeByXPath: AnalyzeByXPath? = null
@@ -69,7 +70,10 @@ class ReaderRuleSession(
     private val stringRuleCache = HashMap<String, List<ReaderRulePart>>()
     private val localBindings = HashMap<String, String>()
 
-    /** 解析过程中的错误回调；null 时异常按上游语义吞掉并返回空值 */
+    /**
+     * 解析过程中的错误回调；null 时异常按上游语义吞掉并返回空值。
+     * 上游把 onError 交给子分析器（AnalyzeByJSonPath），子分析器内部 `onError?.invoke(e) ?: e.printOnDebug()`。
+     */
     var onError: ((Exception) -> Unit)? = null
 
     init {
@@ -115,6 +119,8 @@ class ReaderRuleSession(
      *
      * @param isUrl 为 true 时只取首个 DOM 结果（getString0），空结果回退 [baseUrl]，否则拼绝对地址。
      * @param unescape 结果含 `&` 时做 HTML4 反转义。
+     *
+     * `Mode.Regex` 按上游 AnalyzeRule.kt:358 返回展开后的规则字面量，不二次正则提取。
      */
     @JvmOverloads
     fun getString(
@@ -163,8 +169,6 @@ class ReaderRuleSession(
                             ReaderRulePart.Mode.Js -> evalJsInternal(current, result)
                             ReaderRulePart.Mode.Json -> jsonAnalyzer(result).getString(current)
                             ReaderRulePart.Mode.XPath -> xpathAnalyzer(result).getString(current)
-                            // 上游 getString 的 when 不含 Regex（AnalyzeRule.kt:347-359）：`:正则` 规则在
-                            // getString 路径上原样返回规则字面量，不取首个匹配。见 implementation 文档差异表。
                             ReaderRulePart.Mode.Regex -> current
                             ReaderRulePart.Mode.Default -> if (isUrl) {
                                 jsoupAnalyzer(result).getString0(current)
@@ -200,6 +204,8 @@ class ReaderRuleSession(
 
     /**
      * 上游 AnalyzeRule.getStringList(205-296)。最终 String 按 `\n` 拆行；isUrl 时解析绝对地址并去重。
+     *
+     * `Mode.Regex` 返回展开后的规则字面量（AnalyzeRule.kt:263），最后按换行拆分。
      */
     @JvmOverloads
     fun getStringList(
@@ -250,10 +256,7 @@ class ReaderRuleSession(
                             ReaderRulePart.Mode.Js -> evalJsInternal(current, result)
                             ReaderRulePart.Mode.Json -> jsonAnalyzer(result).getStringList(current)
                             ReaderRulePart.Mode.XPath -> xpathAnalyzer(result).getStringList(current)
-                            ReaderRulePart.Mode.Regex -> AnalyzeByRegex.getElements(
-                                stringify(result),
-                                current.split("&&").filter { it.isNotBlank() }.toTypedArray(),
-                            )
+                            ReaderRulePart.Mode.Regex -> current
                             ReaderRulePart.Mode.Default -> jsoupAnalyzer(result).getStringList(current)
                         }
                     }
@@ -291,7 +294,11 @@ class ReaderRuleSession(
 
     // ---------------------------------------------------------------- getElement
 
-    /** 上游 AnalyzeRule.getElement(387-417)。空规则返回 null。 */
+    /**
+     * 上游 AnalyzeRule.getElement(387-417)。空规则返回 null。
+     *
+     * XPath/Default 按上游返回整组 typed 节点，不按方法名猜测为单节点。
+     */
     fun getElement(rule: String): Any? {
         if (rule.isEmpty()) return null
         var result: Any? = null
@@ -394,7 +401,10 @@ class ReaderRuleSession(
         // 仅首字符为 : 时为 AllInOne（上游 598-605）
         if (allInOne && ruleStr.startsWith(":")) {
             mMode = ReaderRulePart.Mode.Regex
+            isRegex = true
             start = 1
+        } else if (isRegex) {
+            mMode = ReaderRulePart.Mode.Regex
         }
         var tmp: String
         val jsMatcher = ReaderRulePart.JS_PATTERN.matcher(ruleStr)

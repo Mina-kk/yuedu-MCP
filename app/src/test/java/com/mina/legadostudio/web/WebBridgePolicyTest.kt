@@ -19,7 +19,7 @@ class WebBridgePolicyTest {
     @Test
     fun `pending request can be settled exactly once`() {
         val pending = WebBridgePending()
-        val id = pending.add("1")
+        val id = requireNotNull(pending.add("1"))
         assertEquals("1", id)
         assertEquals(1, pending.size)
         assertTrue(pending.remove(id))
@@ -141,7 +141,7 @@ class WebBridgePolicyTest {
             "http://192.168.1.9/x",
             "http://user:pw@site.example.com/",
             "",
-        ).forEach { assertFalse("$url must be refused", WebBridgePolicy.isVerificationUrlAllowed(it)) }
+        ).forEach { url -> assertFalse("$url must be refused", WebBridgePolicy.isVerificationUrlAllowed(url)) }
     }
 
     @Test
@@ -210,5 +210,122 @@ class WebBridgePolicyTest {
     @Test
     fun `clipboard ack shape is stable for every kind`() {
         assertEquals(setOf("copied"), WebBridgePolicy.copiedAck().keySet())
+    }
+
+    // --- 事件信封与前端一致 -----------------------------------------------
+
+    @Test
+    fun `event envelope uses payload key not detail`() {
+        val json = WebBridgeProtocol.event(WebBridgeProtocol.EVENT_INSETS, JsonParser.parseString("""{"top":0}"""))
+        val obj = JsonParser.parseString(json).asJsonObject
+        assertTrue("payload must be present", obj.has("payload"))
+        assertFalse("detail must not leak into bridge events", obj.has("detail"))
+        assertEquals(0, obj.getAsJsonObject("payload").get("top").asInt)
+    }
+
+    @Test
+    fun `null payload becomes an empty object`() {
+        val obj = JsonParser.parseString(WebBridgeProtocol.event(WebBridgeProtocol.EVENT_BACK, null)).asJsonObject
+        assertTrue(obj.getAsJsonObject("payload").entrySet().isEmpty())
+    }
+
+    // --- 主 WebView 导航与本地资源 ----------------------------------------
+
+    @Test
+    fun `host navigation allows only the trusted assets subtree`() {
+        assertEquals(
+            WebBridgePolicy.NavigationDecision.Allow,
+            WebBridgePolicy.hostNavigationDecision("https://appassets.androidplatform.net/assets/web/index.html"),
+        )
+        assertEquals(
+            WebBridgePolicy.NavigationDecision.Allow,
+            WebBridgePolicy.hostNavigationDecision("https://appassets.androidplatform.net/assets/web/index.html#/verification"),
+        )
+        for (bad in listOf(
+            "https://appassets.androidplatform.net.evil.com/assets/web/index.html",
+            "https://appassets.androidplatform.net:8443/assets/web/index.html",
+            "http://appassets.androidplatform.net/assets/web/index.html",
+            "https://user:pw@appassets.androidplatform.net/assets/web/index.html",
+            "https://appassets.androidplatform.net/assets/skills/x.json",
+            "https://appassets.androidplatform.net/assets/web/../skills/x.json",
+            "https://appassets.androidplatform.net/assets/web/%2e%2e/skills/x.json",
+            "https://appassets.androidplatform.net/assets/web/..%2fskills/x.json",
+            "intent://scan/#Intent;scheme=zxing;end",
+            "javascript:alert(1)",
+            "",
+        )) {
+            assertEquals("must block $bad", WebBridgePolicy.NavigationDecision.Block, WebBridgePolicy.hostNavigationDecision(bad))
+        }
+    }
+
+    @Test
+    fun `local resources outside assets web are denied instead of deferred to network`() {
+        assertEquals(
+            WebBridgePolicy.LocalResource.Serve,
+            WebBridgePolicy.localResourceDecision("https://appassets.androidplatform.net/assets/web/index.html"),
+        )
+        for (bad in listOf(
+            "https://appassets.androidplatform.net/assets/skills/legado.md",
+            "https://evil.example.com/assets/web/index.html",
+            "https://appassets.androidplatform.net/assets/web/%2e%2e/skills/x",
+            "file:///data/data/com.mina.legadostudio/files/x",
+            "https://appassets.androidplatform.net/",
+        )) {
+            assertEquals("must deny $bad", WebBridgePolicy.LocalResource.Deny, WebBridgePolicy.localResourceDecision(bad))
+        }
+    }
+
+    @Test
+    fun `verification page may load its own subresources but never the privileged origin`() {
+        assertEquals(
+            WebBridgePolicy.LocalResource.Serve,
+            WebBridgePolicy.verificationResourceDecision("https://challenge.example.com/cdn/app.js"),
+        )
+        assertEquals(
+            WebBridgePolicy.LocalResource.Serve,
+            WebBridgePolicy.verificationResourceDecision("data:image/png;base64,AAAA"),
+        )
+        for (bad in listOf(
+            "https://appassets.androidplatform.net/assets/web/index.html",
+            "file:///sdcard/secret.txt",
+            "content://com.android.providers.media/documents/1",
+            "intent://x",
+            "",
+        )) {
+            assertEquals("must deny $bad", WebBridgePolicy.LocalResource.Deny, WebBridgePolicy.verificationResourceDecision(bad))
+        }
+    }
+
+    // --- 完成会话的 finalUrl 来源 -----------------------------------------
+
+    @Test
+    fun `final url prefers the live observation then the saved value`() {
+        assertEquals(
+            "https://site.example.com/after",
+            StudioWebBridge.pickFinalUrl("https://site.example.com/after", "https://site.example.com/saved", "https://site.example.com/start"),
+        )
+        assertEquals(
+            "https://site.example.com/saved",
+            StudioWebBridge.pickFinalUrl(null, "https://site.example.com/saved", "https://site.example.com/start"),
+        )
+        assertEquals(
+            "https://site.example.com/start",
+            StudioWebBridge.pickFinalUrl("  ", "", "https://site.example.com/start"),
+        )
+    }
+
+    // --- SAF 严格 UTF-8 ---------------------------------------------------
+
+    @Test
+    fun `saf import decodes valid utf8 and rejects malformed bytes`() {
+        assertEquals("中文 ok", SafLauncher.decodeUtf8Strict("中文 ok".toByteArray(Charsets.UTF_8)))
+        val broken = byteArrayOf(0x7B, 0xC3.toByte(), 0x28, 0x7D)
+        val failure = runCatching { SafLauncher.decodeUtf8Strict(broken) }.exceptionOrNull()
+        assertTrue("malformed utf8 must fail, got $failure", failure is java.io.IOException)
+    }
+
+    @Test
+    fun `saf import cap matches the bridge request budget`() {
+        assertEquals(WebBridgeProtocol.MAX_REQUEST_BYTES, SafLauncher.MAX_IMPORT_BYTES)
     }
 }

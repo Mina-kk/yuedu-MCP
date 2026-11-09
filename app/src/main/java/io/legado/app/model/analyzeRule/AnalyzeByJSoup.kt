@@ -66,6 +66,11 @@ class AnalyzeByJSoup(doc: Any) {
 
     /**
      * 获取所有内容列表
+     *
+     * 上游 AnalyzeByJSoup.getStringList:87-104：`@CSS:` 整串模式下每段都以最后一个 `@` 切成
+     * `选择器@attr`；`||` 遇到首个非空段即停。
+     *
+     * 无效选择器按上游直接抛错；无命中与语法错误不能混淆。
      */
     internal fun getStringList(ruleStr: String): List<String> {
 
@@ -90,12 +95,8 @@ class AnalyzeByJSoup(doc: Any) {
 
                 val temp: ArrayList<String>? =
                     if (sourceRule.isCss) {
-                        // 上游 AnalyzeByJSoup.getStringList:90-95：`@CSS:` 整串模式下每段必须以 `@attr` 结尾
                         val lastIndex = ruleStrX.lastIndexOf('@')
-                        getResultLast(
-                            element.select(ruleStrX.take(lastIndex)),
-                            ruleStrX.substring(lastIndex + 1)
-                        )
+                        getResultLast(element.select(ruleStrX.take(lastIndex)), ruleStrX.substring(lastIndex + 1))
                     } else {
                         getResultList(ruleStrX)
                     }
@@ -139,7 +140,7 @@ class AnalyzeByJSoup(doc: Any) {
 
         val elementsList = ArrayList<Elements>()
         if (sourceRule.isCss) {
-            // 上游 AnalyzeByJSoup.getElements:138-145：`@CSS:` 整串模式直接 jsoup select，不走 legado 索引语法
+            // 上游 AnalyzeByJSoup.getElements:138-145：`@CSS:` 整串模式直接 jsoup select，不走 legado 索引语法。
             for (ruleStr in ruleStrS) {
                 val tempS = temp.select(ruleStr)
                 elementsList.add(tempS)
@@ -199,7 +200,6 @@ class AnalyzeByJSoup(doc: Any) {
             for (elt in elements) {
                 es.addAll(ElementsSingle().getElementsSingle(elt, rules[i]))
             }
-            elements.clear()
             elements = es
         }
         return if (elements.isEmpty()) null else getResultLast(elements, rules[last])
@@ -375,10 +375,9 @@ class AnalyzeByJSoup(doc: Any) {
              * */
             if (split == '!') { //排除
 
-                // Upstream assigns null then removes it; modern Jsoup/Kotlin exposes non-null Elements.
-                // Removing indexes in descending order preserves the same observable result.
+                // Deselect results only: Elements.removeAt also removes nodes from the source DOM.
                 for (pcInt in indexSet.sortedDescending()) {
-                    if (pcInt in elements.indices) elements.removeAt(pcInt)
+                    if (pcInt in elements.indices) elements.deselect(pcInt)
                 }
 
             } else if (split == '.') { //选择
@@ -515,7 +514,7 @@ class AnalyzeByJSoup(doc: Any) {
             for (et in el) {
                 es.addAll(getElements(et, rl))
             }
-            el.clear()
+            el.deselectAll()
             el.addAll(es)
         }
         return el

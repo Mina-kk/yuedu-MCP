@@ -247,7 +247,7 @@ class RhinoEvaluatorTest {
         val error = runCatching { evaluator.evaluate("url", baseUrl = "https://a.com/book/1") }.exceptionOrNull()
         assertTrue("expected failure, got success", error != null)
         val message = error!!.message.orEmpty()
-        assertTrue(message, message.contains("【规则错误】"))
+        assertTrue(message, message.contains("【绑定提示】"))
         assertTrue(message, message.contains("baseUrl"))
         assertEquals("https://a.com/book/1", evaluator.evaluate("baseUrl", baseUrl = "https://a.com/book/1").value)
     }

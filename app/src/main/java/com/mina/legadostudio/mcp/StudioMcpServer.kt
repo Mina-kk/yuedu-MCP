@@ -235,12 +235,19 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
      */
     private val localHandlers = java.util.concurrent.ConcurrentHashMap<String, suspend (CallToolRequest) -> CallToolResult>()
 
+    /** 工具注册顺序快照（`Server.tool` 注册时追加）：ConcurrentHashMap 不保证顺序。 */
+    private val toolOrder = java.util.concurrent.CopyOnWriteArrayList<String>()
+
     /**
-     * 本实例可见的工具目录（注册顺序）。条目直接取 [fullToolSpecs]——与
-     * `studio://tools/{name}` 读回的是同一份完整定义，不做二次裁剪或杜撰。
+     * 本实例可见的工具目录（注册顺序）。
+     *
+     * 条目直接取 [fullToolSpecs]——与 `studio://tools/{name}` 读回的是同一份完整定义，
+     * 不做二次裁剪或杜撰。`fullToolSpecs` 是 ConcurrentHashMap，`values` 的迭代顺序是
+     * 哈希顺序而不是注册顺序，因此这里按 [toolOrder] 快照重排；快照里缺失的名字
+     * （理论上不会发生）追加在末尾，保证不丢工具。
      */
     fun localTools(): List<io.modelcontextprotocol.kotlin.sdk.types.Tool> =
-        fullToolSpecs.values.toList()
+        ToolRegistryOrder.arrange(toolOrder.toList(), fullToolSpecs) { it.name }
 
     fun localTool(name: String): io.modelcontextprotocol.kotlin.sdk.types.Tool? = fullToolSpecs[name]
 
@@ -271,6 +278,7 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
     /** 释放本地实例：只清登记表，不触碰网络会话（本地实例从未登记）。 */
     fun releaseLocal() {
         localHandlers.clear()
+        toolOrder.clear()
     }
 
     /** 语料命中与知识/参考读取工具：做源前先 match_sources，可大幅减少抓网页与试错次数。 */
@@ -587,6 +595,7 @@ class StudioMcpServer(context: Context, internal val compact: Boolean = false) {
         val contextualSchema = inputSchema.copy(properties = JsonObject(inputSchema.properties.orEmpty() + extra))
         // 本地（App 内 Web UI）调用登记：与网络注册同一份 handler，不复制实现。
         localHandlers[name] = handler
+        ToolRegistryOrder.register(toolOrder, name)
         // 本连接的完整定义目录：compact 模式下 tools/list 注册截断副本，原定义仍由此 map 经
         // studio://tools/{name} 读回；handler 不变，调用路径与默认模式一致。
         fullToolSpecs[name] = io.modelcontextprotocol.kotlin.sdk.types.Tool(

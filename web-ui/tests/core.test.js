@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest'
 import { createCore } from '../src/lib/core.js'
 
 // Rust 核封装：真实 import 失败时必须如实报告不可用，禁止 JS 假替代后声称 Rust 在线。
+// 另：生产加载必须是静态可分析的 import('../wasm/studio_ui_core.js')，
+// 否则 Vite 不会把 wasm 打进 dist（旧实现用 new URL + @vite-ignore，生产包缺 wasm）。
 
 const fakeApi = {
   default: vi.fn(async () => {}),
@@ -62,5 +64,20 @@ describe('core (Rust WASM wrapper)', () => {
     const core = createCore({ loader: async () => ({ ...fakeApi, analyze_source_json: () => '<html>' }) })
     await core.load()
     expect(() => core.analyze('{}')).toThrow()
+  })
+
+  it('缺少必需导出时报告 failed 而不是部分可用', async () => {
+    const core = createCore({ loader: async () => ({ default: async () => {}, analyze_source_json: () => '{}' }) })
+    await core.load()
+    expect(core.status()).toBe('failed')
+    expect(core.error()).toMatch(/缺少导出/)
+  })
+
+  it('生产加载用静态 import 路径，不做 @vite-ignore 动态 URL', async () => {
+    const fs = await import('node:fs')
+    const src = fs.readFileSync(`${process.cwd()}/src/lib/core.js`, 'utf8')
+    expect(src).toMatch(/import\('\.\.\/wasm\/studio_ui_core\.js'\)/)
+    expect(src).not.toMatch(/import\s*\(\s*\/\*\s*@vite-ignore/)
+    expect(src).not.toMatch(/new URL\(WASM_MODULE/)
   })
 })

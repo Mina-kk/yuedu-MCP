@@ -33,6 +33,10 @@ class RuntimeCookieStore(context: Context, private val sessionJar: StudioCookieJ
 
     fun contextFingerprint(): String = com.mina.legadostudio.mcp.TaskContextStore.digest(prefs.all.toSortedMap().toString())
     fun headerFor(url: String): String? = prefs.getString(domain(url), null)
+    /** Native-only redaction inputs; never serialize this snapshot into the Web bridge. */
+    internal fun sensitiveValues(): List<String> = prefs.all.values.filterIsInstance<String>().flatMap { header ->
+        listOf(header) + header.split(';').mapNotNull { pair -> pair.substringAfter('=', "").takeIf { it.length >= 16 } }
+    }
     fun set(url: String, cookie: String) {
         require(cookie.contains('=')) { "Cookie 必须包含 name=value" }
         prefs.edit().putString(domain(url), cookie).apply()

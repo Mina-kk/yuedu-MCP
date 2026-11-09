@@ -14,8 +14,10 @@ class McpConfigStore(
     data class Config(val port: Int, val tokenRequired: Boolean, val token: String)
 
     fun load(): Config {
-        if (!prefs.getBoolean("v1SecurityInitialized", false)) {
-            prefs.edit().putBoolean("tokenRequired", true).putBoolean("v1SecurityInitialized", true).apply()
+        if (!prefs.getBoolean("v1SecurityInitialized", false) || !prefs.getBoolean("tokenRequired", true)) {
+            check(prefs.edit().putBoolean("tokenRequired", true).putBoolean("v1SecurityInitialized", true).commit()) {
+                "无法持久化 MCP 鉴权配置"
+            }
         }
         if (!prefs.getBoolean("v2DefaultPortMigrated", false)) {
             val storedPort = prefs.getInt("port", LEGACY_DEFAULT_PORT)
@@ -24,19 +26,24 @@ class McpConfigStore(
                 .putBoolean("v2DefaultPortMigrated", true)
                 .apply()
         }
-        val token = secure.get("token")
-            ?: prefs.getString("token", null)?.also { secure.put("token", it); prefs.edit().remove("token").apply() }
+        val token = secure.get("token")?.takeIf { it.isNotBlank() }
+            ?: prefs.getString("token", null)?.takeIf { it.isNotBlank() }?.also { secure.put("token", it); prefs.edit().remove("token").apply() }
             ?: generateToken().also { secure.put("token", it) }
         return Config(
             port = prefs.getInt("port", DEFAULT_PORT).takeIf { it in 1024..65530 } ?: DEFAULT_PORT,
-            tokenRequired = prefs.getBoolean("tokenRequired", true),
+            tokenRequired = true,
             token = token,
         )
     }
 
+    /** Every start/restart path must secure legacy configurations before binding a public listener. */
+    fun requireAuthentication(): Config = load().also {
+        check(it.tokenRequired && it.token.isNotBlank()) { "MCP 鉴权尚未就绪" }
+    }
+
     fun save(config: Config) {
         require(config.port in 1024..65530) { "端口必须在 1024..65530" }
-        require(!config.tokenRequired || config.token.isNotBlank()) { "启用访问令牌校验时，访问令牌不能为空" }
+        require(config.tokenRequired && config.token.isNotBlank()) { "MCP 必须启用非空访问令牌校验" }
         val oldToken = secure.get("token")
         prefs.edit().putInt("port", config.port).putBoolean("tokenRequired", config.tokenRequired).apply()
         secure.put("token", config.token)

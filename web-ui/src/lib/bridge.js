@@ -192,10 +192,13 @@ export function createWebRuntimeBridge({ endpoint, token, fetchImpl, timeoutMs }
   const doFetch = fetchImpl || ((...args) => (typeof fetch === 'function' ? fetch(...args) : Promise.reject(new Error('fetch unavailable'))))
   const listeners = new Set()
   let initialized = false
+  let initialization = null
+  let protocolReady = false
   let sessionId = ''
   let rpcId = 0
   let protocolVersion = '2024-11-05'
   let disposed = false
+  const activeRequests = new Set()
 
   if (!/^https?:\/\//i.test(base)) {
     // 允许在构造后 call 时再报错，但 describe 要如实。
@@ -208,65 +211,81 @@ export function createWebRuntimeBridge({ endpoint, token, fetchImpl, timeoutMs }
     }
     if (auth) h.Authorization = `Bearer ${auth}`
     if (sessionId) h['Mcp-Session-Id'] = sessionId
+    if (protocolReady) h['MCP-Protocol-Version'] = protocolVersion
     return h
   }
 
   async function rpc(method, params, { notification = false } = {}) {
     if (disposed) throw new BridgeError('host_gone', '连接已关闭')
-    if (!/^https?:\/\//i.test(base)) throw new BridgeError('bad_endpoint', '运行时地址必须是 http(s) URL')
+    let target
+    try { target = new URL(base) } catch { throw new BridgeError('bad_endpoint', '运行时地址必须是 http(s) URL') }
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) {
+      throw new BridgeError('bad_endpoint', '运行时地址必须是无内嵌凭据的 http(s) URL')
+    }
     const body = notification
       ? { jsonrpc: '2.0', method, params: params || {} }
       : { jsonrpc: '2.0', id: ++rpcId, method, params: params || {} }
-    let response
+    const controller = new AbortController()
+    activeRequests.add(controller)
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; controller.abort() }, timeoutMs || LONG_TIMEOUT_MS)
     try {
-      response = await doFetch(base, {
-        method: 'POST',
-        headers: headers(),
-        body: JSON.stringify(body)
+      const response = await doFetch(base, {
+        method: 'POST', headers: headers(), body: JSON.stringify(body),
+        signal: controller.signal, redirect: 'error'
       })
-    } catch (error) {
-      throw new BridgeError(
-        'network_error',
-        `无法连接运行时（可能是 CORS 或地址错误）：${(error && error.message) || 'network error'}`
-      )
-    }
-    const sid = response.headers && typeof response.headers.get === 'function' ? response.headers.get('Mcp-Session-Id') : null
-    if (sid) sessionId = sid
-    if (notification) return null
-    const text = typeof response.text === 'function' ? await response.text() : ''
-    if (!response.ok) {
-      const snippet = String(text || '').slice(0, 300)
-      throw new BridgeError(response.status === 401 ? 'unauthorized' : 'http_error', `运行时返回 HTTP ${response.status}${snippet ? `：${snippet}` : ''}`)
-    }
-    const contentType = (response.headers && typeof response.headers.get === 'function' ? response.headers.get('content-type') : '') || ''
-    let message = null
-    if (contentType.includes('text/event-stream')) {
-      const frames = parseSse(text)
-      message = frames.find((f) => f && f.id === body.id) || frames[frames.length - 1] || null
-    } else {
-      try {
-        message = text ? JSON.parse(text) : null
-      } catch {
-        throw new BridgeError('bad_response', '运行时返回的不是 JSON-RPC 消息')
+      if (!response.ok) {
+        throw new BridgeError(response.status === 401 ? 'unauthorized' : 'http_error', `运行时返回 HTTP ${response.status}`)
       }
+      const sid = response.headers?.get('Mcp-Session-Id')
+      if (sid) sessionId = sid
+      if (notification) return null
+      const text = typeof response.text === 'function' ? await response.text() : ''
+      const contentType = response.headers?.get('content-type') || ''
+      let message
+      if (contentType.includes('text/event-stream')) {
+        message = parseSse(text).find((frame) => frame && frame.id === body.id)
+      } else {
+        try { message = text ? JSON.parse(text) : null }
+        catch { throw new BridgeError('bad_response', '运行时返回的不是 JSON-RPC 消息') }
+      }
+      if (!message || message.jsonrpc !== '2.0' || message.id !== body.id) {
+        throw new BridgeError('bad_response', '运行时没有返回与本次 id 匹配的 JSON-RPC 结果')
+      }
+      if (message.error) throw new BridgeError('rpc_error', 'MCP 请求失败', { rpcCode: message.error.code })
+      if (!Object.prototype.hasOwnProperty.call(message, 'result')) {
+        throw new BridgeError('bad_response', '运行时结果缺少 result')
+      }
+      return message.result
+    } catch (error) {
+      if (disposed) throw new BridgeError('host_gone', '连接已关闭')
+      if (timedOut) throw new BridgeError('timeout', `运行时请求超时：${method}`)
+      if (error instanceof BridgeError) throw error
+      const reason = String(error?.message || 'network error').replaceAll(auth || '\u0000', '[已隐藏]')
+      throw new BridgeError('network_error', `无法连接运行时（可能是 CORS 或地址错误）：${reason.slice(0, 200)}`)
+    } finally {
+      clearTimeout(timer)
+      activeRequests.delete(controller)
     }
-    if (!message) throw new BridgeError('bad_response', '运行时没有返回 JSON-RPC 结果')
-    if (message.error) {
-      throw new BridgeError('rpc_error', message.error.message || 'MCP 错误', { rpcCode: message.error.code })
-    }
-    return message.result
   }
 
   async function ensureInitialized() {
     if (initialized) return
-    const result = await rpc('initialize', {
-      protocolVersion,
-      capabilities: {},
-      clientInfo: { name: 'yuedu-mcp-web', version: '2.0.0' }
-    })
-    if (result && result.protocolVersion) protocolVersion = result.protocolVersion
-    initialized = true
-    await rpc('notifications/initialized', {}, { notification: true })
+    if (initialization) return initialization
+    initialization = (async () => {
+      const result = await rpc('initialize', {
+        protocolVersion, capabilities: {}, clientInfo: { name: 'yuedu-mcp-web', version: '2.0.0' }
+      })
+      if (!result || typeof result.protocolVersion !== 'string') {
+        throw new BridgeError('bad_response', '初始化响应缺少协议版本')
+      }
+      protocolVersion = result.protocolVersion
+      protocolReady = true
+      await rpc('notifications/initialized', {}, { notification: true })
+      initialized = true
+    })()
+    try { await initialization }
+    finally { initialization = null }
   }
 
   async function call(method, params) {
@@ -317,6 +336,8 @@ export function createWebRuntimeBridge({ endpoint, token, fetchImpl, timeoutMs }
     },
     dispose() {
       disposed = true
+      for (const controller of activeRequests) controller.abort()
+      activeRequests.clear()
     },
     describe() {
       // 只描述形状，绝不包含 token。

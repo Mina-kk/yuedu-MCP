@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
 import android.os.Message
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -42,8 +41,16 @@ internal class VerificationBrowserView(
     @Volatile var lastObservedUrl: String = ""
         private set
 
-    val webView: WebView = WebView(context.applicationContext).apply {
-        layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+    /** 显式持有系统 CookieManager（与既有验证中心同一份 WebView cookie 库）。 */
+    private val cookieManager: CookieManager = CookieManager.getInstance()
+
+    // Remain blank until MainActivity attaches this object to the lease lifecycle.
+    val webView: WebView = WebView(context.applicationContext)
+    private var configured = false
+    private var destroyed = false
+
+    private fun configure() = webView.apply {
+        // Keep MainActivity's FrameLayout topMargin; toolbar must remain reachable.
         setBackgroundColor(android.graphics.Color.TRANSPARENT)
         settings.apply {
             javaScriptEnabled = true
@@ -56,13 +63,19 @@ internal class VerificationBrowserView(
             displayZoomControls = false
             mediaPlaybackRequiresUserGesture = true
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            // 验证页可能需要第三方 cookie（CF 挑战、登录态）；只允许 https 的第三方 cookie。
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                cookieManager.setAcceptThirdPartyCookies(this@apply, true)
-            }
+            // 外站页面绝不读本机文件/内容提供者：即使导航限制被绕过也拿不到本地数据。
+            allowFileAccess = false
+            allowContentAccess = false
+            setGeolocationEnabled(false)
+            javaScriptCanOpenWindowsAutomatically = false
+            setSupportMultipleWindows(false)
+
             // 不设置 userAgentString：沿用系统 WebView UA（与既有验证中心一致，避免指纹不一致导致挑战失败）。
+            // MainActivity waits for the public-IP-pinned proxy's applied callback before creating us.
+            check(WebProxyBoundary.active) { "验证网络隔离未启用" }
             blockNetworkLoads = false
         }
+        cookieManager.setAcceptThirdPartyCookies(this, true)
         cookieManager.setAcceptCookie(true)
         // 明确不挂任何 JS bridge：这里没有任何 addJavascriptInterface / addWebMessageListener。
         webViewClient = object : WebViewClient() {
@@ -71,6 +84,17 @@ internal class VerificationBrowserView(
 
             @Deprecated("兼容旧 WebView")
             override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean = !allowNavigation(url)
+
+            /**
+             * 子资源：只允许外站自己的 http(s) 与 data:/blob:；
+             * 指向 privileged origin 或 file:/content: 的一律拒绝（返回空 403，不回 null）。
+             */
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                if (WebBridgePolicy.verificationResourceDecision(request.url?.toString()) == WebBridgePolicy.LocalResource.Serve) null else BLOCKED_RESPONSE
+
+            @Deprecated("兼容旧 WebView")
+            override fun shouldInterceptRequest(view: WebView, url: String?): WebResourceResponse? =
+                if (WebBridgePolicy.verificationResourceDecision(url) == WebBridgePolicy.LocalResource.Serve) null else BLOCKED_RESPONSE
 
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 if (url != null) observe(url, view.title)
@@ -151,25 +175,43 @@ internal class VerificationBrowserView(
         return false
     }
 
+    /**
+     * 加载任务地址。
+     *
+     * 恢复上次页面状态只在**同一会话**内允许：状态里存的地址若不是公网 http(s)
+     * （例如被篡改成 privileged origin 或 file:），退回直接加载任务 URL。
+     */
     fun load(url: String) {
+        check(!destroyed) { "验证页已销毁" }
+        if (!configured) { configure(); configured = true }
         if (!WebBridgePolicy.isVerificationUrlAllowed(url)) {
             StudioLog.add("verification load refused", "W", "verification", "session=$sessionId")
             return
         }
-        // 优先恢复上次页面状态（避免刷新后回到挑战入口）；失败则直接加载。
-        if (!stateStore.restore(sessionId, webView)) {
-            webView.loadUrl(url)
+        // 优先恢复上次页面状态（避免刷新后回到挑战入口）；恢复后地址不合法则退回任务 URL。
+        if (stateStore.restore(sessionId, webView) && WebBridgePolicy.isVerificationUrlAllowed(lastObservedUrl)) {
+            return
         }
-        // 恢复成功时 onPageStarted 会回填观察地址；这里只兜底，避免恢复后仍为空。
+        lastObservedUrl = ""
+        webView.loadUrl(url)
+        // onPageStarted 会回填观察地址；这里只兜底，避免恢复后仍为空。
         if (lastObservedUrl.isBlank()) lastObservedUrl = url
     }
 
-    fun destroy() {
+    fun destroy(): Boolean {
+        if (destroyed) return true
         runCatching { stateStore.save(sessionId, webView) }
-        runCatching {
-            webView.stopLoading()
-            (webView.parent as? ViewGroup)?.removeView(webView)
-            webView.destroy()
+        runCatching { webView.settings.blockNetworkLoads = true }
+        runCatching { webView.stopLoading() }
+        runCatching { (webView.parent as? ViewGroup)?.removeView(webView) }
+        destroyed = runCatching { webView.destroy() }.isSuccess
+        return destroyed
+    }
+
+    companion object {
+        /** 子资源拒绝响应：空体 403，明确告知页面「不给」，绝不回 null 去联网。 */
+        private val BLOCKED_RESPONSE: WebResourceResponse by lazy {
+            WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), null)
         }
     }
 }

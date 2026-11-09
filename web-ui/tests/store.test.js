@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { flushPromises } from '@vue/test-utils'
 import { createStore } from '../src/store.js'
 
 // 应用状态：bootstrap 失败也必须能进入主题/连接设置；工具列表来自真实服务。
@@ -127,6 +128,53 @@ describe('store', () => {
     expect(store.state.dialog).toMatchObject({ kind: 'discard' })
     store.closeSheet()
     expect(store.state.sheet).toBe(null)
+    expect(store.state.sheetDirty).toBe(false)
+  })
+
+  it('部分保存失败必须向调用方报错，不误报全部成功', async () => {
+    const store = createStore({ bridge: fakeBridge({
+      'settings.save': async () => ({ ...BOOTSTRAP, partial: true, failed: ['reader'] })
+    }) })
+    await expect(store.saveSettings({ readerBaseUrl: 'https://reader.example' })).rejects.toThrow(/reader/)
+  })
+
+  it('主题选择将 palette 和 mode 一起持久化至宿主', async () => {
+    const bridge = fakeBridge({ 'settings.save': async () => BOOTSTRAP })
+    const store = createStore({ bridge })
+    store.setTheme(1)
+    store.setMode('dark')
+    await flushPromises()
+    const saves = bridge.calls.filter(([m]) => m === 'settings.save')
+    expect(saves.length).toBeGreaterThan(0)
+    expect(saves.at(-1)[1].appearance).toEqual({ palette: 'lava', theme: 'dark' })
+  })
+
+  it('页面有未保存编辑时切页必须确认，取消后编辑仍在', () => {
+    const store = createStore({ bridge: fakeBridge({}) })
+    store.setPage('sources')
+    store.markPageDirty(true)
+    store.setPage('skills')
+    expect(store.state.page).toBe('sources')
+    store.closeDialog()
+    expect(store.state.pageDirty).toBe(true)
+    store.goRoot()
+    const accept = store.state.dialog.onAccept
+    store.closeDialog()
+    accept()
+    expect(store.state.page).toBe('mcp')
+    expect(store.state.pageDirty).toBe(false)
+  })
+
+  it('放弃设置确认实际关闭 sheet，不丢失页面脏状态', () => {
+    const store = createStore({ bridge: fakeBridge({}) })
+    store.openSheet('settings')
+    store.markDirty(true)
+    store.requestDiscard()
+    const accept = store.state.dialog.onAccept
+    expect(typeof accept).toBe('function')
+    store.closeDialog()
+    accept()
+    expect(store.state.sheet).toBeNull()
     expect(store.state.sheetDirty).toBe(false)
   })
 

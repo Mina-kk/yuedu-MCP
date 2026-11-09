@@ -1,27 +1,47 @@
+/* GPL-3.0: Kotlin/JVM adaptation of LegadoTeam HtmlFormatter.kt,
+ * fixed commit 330e606c4d57e08adc056ff8ab7a4132c784da9a, lines 9-85.
+ * Keep source rules unchanged; only replaceRegex receives per-line-trimmed text.
+ */
 package com.mina.legadostudio.domain
 
-/**
- * 对齐阅读 [HtmlFormatter.formatKeepImg] + 逐行 trim 的正文预处理：
- * `replaceRegex` 作用在这段纯文本上，不是 `@html` 返回的 HTML。
- */
-object ContentPlainText {
-    private val IMG = Regex("(?i)<img\\b[^>]*>")
-    private val BLOCK = Regex("(?i)</?(?:p|div|br|h[1-6]|tr|li|blockquote|section|article)\\b[^>]*>")
-    private val TAG = Regex("<[^>]+>")
+import com.mina.legadostudio.runtime.ReaderRequestTemplate
+import java.util.regex.Pattern
 
-    fun formatKeepImg(html: String): String {
-        if (html.isEmpty()) return html
-        val images = ArrayList<String>()
-        var text = IMG.replace(html) { match ->
-            images += match.value
-            "\uE000${images.lastIndex}\uE001"
+object ContentPlainText {
+    private val nbsp = Regex("(&nbsp;)+")
+    private val esp = Regex("(&ensp;|&emsp;)")
+    private val noPrint = Regex("(&thinsp;|&zwnj;|&zwj;|\u2009|\u200C|\u200D)")
+    private val wrap = Regex("</?(?:div|p|br|hr|h\\d|article|dd|dl)[^>]*>")
+    private val comment = Regex("<!--[^>]*-->")
+    private val notImage = Regex("</?(?!img)[a-zA-Z]+(?=[ >])[^<>]*>")
+    private val indent = Regex("\\s*\\n+\\s*")
+    private val first = Regex("^[\\n\\s]+")
+    private val last = Regex("[\\n\\s]+$")
+    private val image = Pattern.compile(
+        "<img[^>]*\\ssrc\\s*=\\s*['\"]([^'\"{>]*\\{(?:[^{}]|\\{[^}>]+\\})+\\})['\"][^>]*>|<img[^>]*\\sdata-(?:src|original|srcset)\\s*=\\s*['\"]([^'\">]+)['\"][^>]*>|<img[^>]*\\ssrc\\s*=\\s*\"([^\">]+)\"[^>]*>|<img[^>]*\\s(?:data-[^=>]*|src)=\\s*['\"]([^'\">]*)['\"][^>]*>",
+        Pattern.CASE_INSENSITIVE,
+    )
+
+    @JvmOverloads
+    fun formatKeepImg(html: String, baseUrl: String = "", trimLines: Boolean = true): String {
+        val formatted = html.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+            .replace(nbsp, " ").replace(esp, " ").replace(noPrint, "")
+            .replace(wrap, "\n").replace(comment, "").replace(notImage, "")
+            .replace(indent, "\n　　").replace(first, "　　").replace(last, "")
+        val matcher = image.matcher(formatted)
+        val out = StringBuilder()
+        var position = 0
+        while (matcher.find()) {
+            val target = matcher.group(1) ?: matcher.group(2) ?: matcher.group(3) ?: matcher.group(4)
+            val option = ReaderRequestTemplate.splitUrlOption(target)
+            val absolute = if (baseUrl.isBlank()) option.urlPart else ReaderRequestTemplate.absoluteUrl(baseUrl, option.urlPart)
+            out.append(formatted, position, matcher.start()).append("<img src=\"")
+                .append(absolute).append(option.optionText?.let { ",$it" }.orEmpty()).append("\">")
+            position = matcher.end()
         }
-        text = BLOCK.replace(text, "\n")
-        text = TAG.replace(text, "")
-        text = org.jsoup.parser.Parser.unescapeEntities(text, false)
-        images.forEachIndexed { index, img ->
-            text = text.replace("\uE000$index\uE001", img)
-        }
-        return text.lineSequence().joinToString("\n") { it.trim() }
+        out.append(formatted, position, formatted.length)
+        // AnalyzeRule unescapes after formatting; never strip the newly unescaped literal '<...>'.
+        val text = org.jsoup.parser.Parser.unescapeEntities(out.toString(), false)
+        return if (trimLines) text.lineSequence().joinToString("\n") { it.trim() } else text
     }
 }

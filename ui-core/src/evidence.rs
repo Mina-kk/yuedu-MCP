@@ -245,6 +245,17 @@ fn summarize_object(root: &Map<String, Value>) -> Value {
         return verdict(scope, code, label, "warning", false, notes);
     }
 
+    // Explicit contradictory evidence always overrides a positive status label.
+    if failure_signals(get("failureSignals")) > 0
+        || matches!(get("identityMatches"), Some(Value::Bool(false)))
+        || matches!(get("confirmed"), Some(Value::Bool(false)))
+        || matches!(get("executionComplete"), Some(Value::Bool(false)))
+        || matches!(get("readerSidePassed"), Some(Value::Bool(false)))
+    {
+        notes.push("存在失败信号或明确未确认/未完成状态，不能算阅读端通过".to_string());
+        return verdict("reader_partial", "reader_side_unconfirmed", "阅读端证据不完整（未通过）", "warning", false, notes);
+    }
+
     // 4. Reader-side pass: only explicit, complete, identity-matched evidence.
     let reader_verified = delivery.as_deref() == Some("reader_verified")
         || status_text.as_deref() == Some("reader_verified");

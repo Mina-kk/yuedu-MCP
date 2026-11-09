@@ -99,7 +99,8 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
             // 落库决策集中在 McpSourceTools.decideSave：身份 = 规范化 bookSourceUrl 全文（保留尾部/与 #标签），
             // 同 URL 不同 JSON → 新版本；完全一致 → 幂等覆写。trimEnd('/') 归并已移除——尾部有/无是两个身份。
             val now = System.currentTimeMillis()
-            val decision = McpSourceTools.decideSave(obj, newVersion, app.projects.list(), now)
+            val decision = McpSourceTools.decideSave(obj, newVersion, app.projects.list(), now,
+                rawSource = sourceText.takeIf { fields == null && injectedFields.isEmpty() })
             val saved = app.projects.save(decision.project)
             val versionCount = McpSourceTools.versionCounts(app.projects.list())[saved.siteUrl.trim()] ?: 1
             ok(app.gson.toJson(linkedMapOf<String, Any?>(
@@ -122,7 +123,7 @@ internal fun StudioMcpServer.registerBookSourceTools(server: Server) {
                 "changedFieldsBase" to changedFieldsBase,
                 "editWithoutReaderEvidence" to editWithoutReaderEvidence,
                 // stage 命名须如实：VALIDATED=静态校验通过，不代表已联网实测——联网实测请以 check_source 的 verdict 为准
-                "stageMeaning" to "VALIDATED=静态校验通过（未联网）；联网实测结果用 check_source 的 verdict/evidence 字段判定；回读完整 JSON 用 get_source(projectId)",
+                "stageMeaning" to "VALIDATED=静态校验通过（未联网）；联网实测结果用 check_source 的 verdict/evidence 字段判定；回读完整 JSON 用 get_source(key=projectId)",
             ).apply {
                 if (editWithoutReaderEvidence) put("editHint", EDIT_WITHOUT_READER_EVIDENCE_HINT)
             }))

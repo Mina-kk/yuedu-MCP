@@ -142,11 +142,12 @@ class WebBridgeProtocolTest {
 
     @Test
     fun `payload exactly at limit is accepted`() {
-        val head = """{"id":"1","method":"app.bootstrap","params":{"x":""}"""
+        val head = """{"id":"1","method":"app.bootstrap","params":{"x":""""
         val tail = """"}}"""
         val filler = "a".repeat(WebBridgeProtocol.MAX_REQUEST_CHARS - head.length - tail.length)
         val payload = head + filler + tail
         assertEquals(WebBridgeProtocol.MAX_REQUEST_CHARS, payload.length)
+        assertEquals(WebBridgeProtocol.MAX_REQUEST_BYTES, WebBridgeProtocol.utf8Length(payload))
         assertTrue(WebBridgeProtocol.parseRequest(payload) is WebBridgeProtocol.Parsed.Ok)
     }
 
@@ -381,5 +382,60 @@ class WebBridgeProtocolTest {
     fun `all settings errors are reported together`() {
         val bad = settings("""{"port":1,"bookSourceType":9,"userAgent":"x"}""") as WebBridgeProtocol.SettingsParse.Bad
         assertTrue("should collect every field error, got ${bad.message}", bad.message.count { it == ';' } >= 2)
+    }
+
+    // --- 数字必须精确整数（不截断） ---------------------------------------
+
+    @Test
+    fun `fractional numbers are rejected instead of truncated`() {
+        listOf("1.5", "58823.9", "1024.0001", "1e3", "1.0").forEach { raw ->
+            val parsed = settings("""{"port":$raw}""")
+            assertTrue("port=$raw must fail, got $parsed", parsed is WebBridgeProtocol.SettingsParse.Bad)
+        }
+        assertTrue(settings("""{"bookSourceType":1.5}""") is WebBridgeProtocol.SettingsParse.Bad)
+    }
+
+    @Test
+    fun `out of range integers are rejected instead of clamped`() {
+        listOf("2147483648", "99999999999999999999", "-2147483649").forEach { raw ->
+            val parsed = settings("""{"port":$raw}""")
+            assertTrue("port=$raw must fail, got $parsed", parsed is WebBridgeProtocol.SettingsParse.Bad)
+        }
+    }
+
+    @Test
+    fun `exactInt accepts only plain integer literals`() {
+        assertEquals(0, WebBridgeProtocol.exactInt(JsonParser.parseString("0")))
+        assertEquals(-1, WebBridgeProtocol.exactInt(JsonParser.parseString("-1")))
+        assertEquals(58823, WebBridgeProtocol.exactInt(JsonParser.parseString("58823")))
+        assertNull(WebBridgeProtocol.exactInt(JsonParser.parseString("1.5")))
+        assertNull(WebBridgeProtocol.exactInt(JsonParser.parseString("\"1\"")))
+        assertNull(WebBridgeProtocol.exactInt(JsonParser.parseString("true")))
+        assertNull(WebBridgeProtocol.exactInt(JsonParser.parseString("2147483648")))
+    }
+
+    // --- 2MiB UTF-8 字节边界 ----------------------------------------------
+
+    @Test
+    fun `multibyte payload is bounded by utf8 bytes not chars`() {
+        // 每个汉字 3 字节：字符数只有 1/3 上限，但字节数已超 2MiB。
+        val head = """{"id":"1","method":"app.bootstrap","params":{"x":""""
+        val tail = """"}}"""
+        val budget = WebBridgeProtocol.MAX_REQUEST_BYTES - WebBridgeProtocol.utf8Length(head + tail)
+        val chinese = "字".repeat(budget / 3 + 1)
+        val payload = head + chinese + tail
+        assertTrue(
+            "chars=${payload.length} bytes=${WebBridgeProtocol.utf8Length(payload)}",
+            payload.length <= WebBridgeProtocol.MAX_REQUEST_CHARS,
+        )
+        assertTrue(WebBridgeProtocol.utf8Length(payload) > WebBridgeProtocol.MAX_REQUEST_BYTES)
+        val bad = WebBridgeProtocol.parseRequest(payload) as WebBridgeProtocol.Parsed.Bad
+        assertEquals(WebBridgeProtocol.ERR_PAYLOAD_TOO_LARGE, bad.error.code)
+    }
+
+    @Test
+    fun `utf8 length counts surrogate pairs once`() {
+        assertEquals(4, WebBridgeProtocol.utf8Length("\uD83D\uDE00"))
+        assertEquals(3, WebBridgeProtocol.utf8Length("字"))
     }
 }

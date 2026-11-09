@@ -219,6 +219,11 @@ class ReaderRulePart internal constructor(
 
     val paramSize: Int get() = ruleParam.size
 
+    /**
+     * 与上游 AnalyzeRule.SourceRule.isRule（AnalyzeRule.kt:837-842）逐字一致：`@` / `$.` / `$[` / `//`
+     * 开头视为规则，其余一律当 JS 求值。`{{class.name@text}}` 在上游同样进 JS 引擎（非法 JS，引擎报错），
+     * 要取 DOM 必须写 `{{@CSS:...}}` / `{{@XPath:...}}` / `{{$.field}}` / `{{//xpath}}`。
+     */
     private fun isRule(ruleStr: String): Boolean =
         ruleStr.startsWith('@') ||
             ruleStr.startsWith("$.") ||

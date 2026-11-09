@@ -89,11 +89,18 @@ class EmbeddedLegadoRuntime(
         val rawJsLib = root.text("jsLib")?.takeIf { it.isNotBlank() }
         var jsLibNote: String? = null
         if (rawJsLib != null) {
-            val loaded = ReaderRequestTemplate.loadJsLib(
-                raw = rawJsLib,
-                sourceUrl = sourceAnchorUrl,
-                fetcher = { url -> fetchJsLibSource(url, origin) },
-            )
+            // 上游 SharedJsScope.evaluateJsLib 236-259：JSON 映射里的 http(s) 值才是远程库；
+            // 其余值是内联片段，直接执行。只有真的声明了远程库时才需要下载能力。
+            val spec = ReaderRequestTemplate.parseJsLibSpec(rawJsLib)
+            val loaded = if (spec.remoteUrls.isEmpty()) {
+                ReaderRequestTemplate.JsLibLoadResult(spec.inlineParts, emptyList())
+            } else {
+                ReaderRequestTemplate.loadJsLib(
+                    raw = rawJsLib,
+                    sourceUrl = sourceAnchorUrl,
+                    fetcher = { url -> fetchJsLibSource(url, origin) },
+                )
+            }
             runtimeState.jsLibSources = loaded.inlineSources
             runtimeState.jsLibDiagnostics += loaded.diagnostics
             jsLibNote = loaded.diagnostics.takeIf { it.isNotEmpty() }?.joinToString("；")
@@ -395,27 +402,36 @@ class EmbeddedLegadoRuntime(
             }
             val bindings = mapOf("source" to state, "book" to book, "chapter" to chapter, "title" to "", "nextChapterUrl" to "") + jsLibBindings
             val rawContent = extract(response.body, contentRule, response.finalUrl, bindings, unescape = false, origin = origin, field = "ruleContent.content", fieldErrors = fieldErrors).orEmpty()
-            val plain = ContentPlainText.formatKeepImg(rawContent)
+            val plain = ContentPlainText.formatKeepImg(rawContent, response.finalUrl, trimLines = false)
             pages += plain
             lines += "第${page + 1}页 HTTP ${response.code}，正文 ${plain.length} 字符（replaceRegex 前已 formatKeepImg+逐行 trim）"
             val nextRule = rules.text("nextContentUrl")
             val nextUrls = nextRule?.takeIf { it.isNotBlank() }
-                ?.let { extractUrlList(response.body, it, response.finalUrl, bindings, origin, jsNotes) }
+                ?.let { extractUrlList(response.body, it, response.finalUrl, bindings, origin, jsNotes, emptyNote = "nextContentUrl <empty> (skipped)") }
                 .orEmpty()
             if (nextUrls.size > 1) {
                 lines += "nextContentUrl 返回 ${nextUrls.size} 个 URL，官方会并发抓取整表；本通道只串行跟第 1 个"
             }
             val nextUrl = nextUrls.firstOrNull()
+            // 自链接（下一页规则指回当前页）不提前丢弃：交给下一轮 visited 判定，
+            // 由 endReason=cycle 说明「规则指回本页」；提前过滤会让报告变成 complete，
+            // 把书源的分页规则错误伪装成「正常读完」。
             current = if (nextUrl != null && ContentPagination.isNextChapter(target, nextUrl, nextRule.orEmpty())) {
                 lines += "已忽略 nextContentUrl：指向下一章而不是下一页"
                 endReason = "next_chapter"
                 null
             } else nextUrl
         }
+        // visited 命中即 break，此时 current 仍指向该地址：只要不是「抓满上限」，
+        // 结束原因就是 cycle（自链接 / 环形分页），不是 complete。
+        if (endReason == "complete" && current != null && pages.size < MAX_CONTENT_PAGES) {
+            endReason = "cycle"
+            lines += "nextContentUrl 指回已抓取过的地址（${current.take(120)}），停止翻页"
+        }
         if (pages.size == MAX_CONTENT_PAGES && current != null) endReason = "page_limit"
         val merged = pages.joinToString("\n")
         val replaceRule = rules.text("replaceRegex")
-        val cleaned = if (replaceRule.isNullOrBlank()) merged else extract(merged, replaceRule, value, mapOf("source" to state, "book" to book, "chapter" to chapter) + jsLibBindings, unescape = true, origin = origin) ?: ""
+        val cleaned = if (replaceRule.isNullOrBlank()) merged else extract(merged.lineSequence().joinToString("\n") { it.trim() }, replaceRule, value, mapOf("source" to state, "book" to book, "chapter" to chapter) + jsLibBindings, unescape = true, origin = origin) ?: ""
         if (!replaceRule.isNullOrBlank()) {
             lines += "合并后 ${merged.length} 字符，全文 replaceRegex 后 ${cleaned.length} 字符（官方：HtmlFormatter.formatKeepImg + 逐行 trim 之后、多页合并之后才清洗，不是 HTML、不是逐页）"
         } else {
@@ -454,6 +470,9 @@ class EmbeddedLegadoRuntime(
                 beginItem()
                 writeLayer = ReaderRuntimeState.Layer.BOOK
             }
+            // 上游 AnalyzeRule.get("bookName") → book.name：条目字段按官方顺序（name 在最前）
+            // 抽出来后写回 book，后续字段的 java.get('bookName') 才能读到本条书名。
+            // 旧实现只有在 runtimeState 非空时才写 bookName；独立调用 debugList 时该键恒为空。
             val bindings = mapOf("source" to state, "book" to itemBook) + jsLibBindings
             linkedMapOf(
                 "name" to extract(html, rules.text("name"), response.finalUrl, bindings, origin = origin, field = "$ruleKey.name", fieldErrors = fieldErrors).orEmpty().also { itemBook.name = it; runtimeState?.bookName = it },
@@ -491,7 +510,13 @@ class EmbeddedLegadoRuntime(
         jsLog: ((String) -> Unit)? = null,
         observer: ((rawCode: Int?, reportedCode: Int?, transport: String, cacheUsed: Boolean?) -> Unit)? = null,
     ): HttpFetcher.FetchResult {
-        val parsed = LegadoUrlOptions.parse(value)
+        val original = LegadoUrlOptions.parse(value)
+        val headers = sourceHeaders + original.headers
+        val rawBody = original.body
+        val shouldEncodeForm = original.method.equals("POST", true) && rawBody != null &&
+            headers.keys.none { it.equals("Content-Type", true) } &&
+            !LegadoRuleEngine.isJsonContent(rawBody) && !rawBody.trimStart().startsWith("<")
+        val parsed = if (shouldEncodeForm) original.copy(body = ReaderRequestTemplate.encodeFormBody(rawBody!!, original.charset)) else original
         val absolute = resolve(base, parsed.url)
         // 规则内逐事务来源：锚点优先取书源自身 bookSourceUrl，其次显式 origin
         val requestOrigin = (origin ?: HttpOrigin())
@@ -597,23 +622,28 @@ class EmbeddedLegadoRuntime(
         val evalJs: (String, Any?) -> Any? = { script, result ->
             rhino.evaluateRaw(script, sourceUrl, result, bindings, origin = origin).value
         }
+        // 上游 initUrl 175-183 的顺序只走一遍（analyzeJs → replaceKeyPageJs → 切选项），
+        // 选项原文要原样透传给 fetchValue，所以这里先算一次模板结果再交给 resolveUrlWithOptionScope。
         val afterJs = ReaderRequestTemplate.analyzeJs(template, evalJs)
         val afterTemplates = ReaderRequestTemplate.replaceTemplates(afterJs, page, evalJs)
         val split = ReaderRequestTemplate.splitUrlOption(afterTemplates)
-        var absolute = ReaderRequestTemplate.absoluteUrl(sourceUrl, split.urlPart)
-        // 上游 292-296：option.js 在 URL 绝对化之后执行；其作用域里 baseUrl = 站点根，result = 完整 url。
-        val optionObject = split.optionText?.let { text ->
-            runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
-        }
-        optionObject?.get("js")?.takeIf { it.isJsonPrimitive }?.asString?.let { js ->
-            val siteBase = ReaderRequestTemplate.siteBaseUrl(absolute)
-            val jsBindings = bindings + mapOf("baseUrl" to siteBase)
-            rhino.evaluateRaw(js, siteBase, absolute, jsBindings, origin = origin).value
-                ?.toString()?.takeIf { it.isNotBlank() }?.let { absolute = it }
-        }
-        val option = optionObject?.let { UrlOption.from(it) } ?: UrlOption()
-        val encoded = ReaderRequestTemplate.encodeRequestUrl(absolute, option)
-        return if (split.optionText == null) encoded else "$encoded,${split.optionText}"
+        // 上游 292-296：option.js 在 URL 绝对化之后执行；其作用域里 baseUrl = 站点根（带尾斜杠），
+        // result = 完整 url。baseUrl 必须真的进 JS 绑定（旧实现只算了 siteBase 变量却没注入，
+        // 规则里 `baseUrl + '/x'` 直接 ReferenceError）。
+        val resolved = ReaderRequestTemplate.resolveUrlFromSplit(
+            split = split,
+            sourceUrl = sourceUrl,
+            evalOptionJs = { script, siteBase, absolute ->
+                rhino.evaluateRaw(
+                    script,
+                    siteBase,
+                    absolute,
+                    bindings + mapOf("baseUrl" to siteBase),
+                    origin = origin,
+                ).value
+            },
+        )
+        return if (split.optionText == null) resolved else "$resolved,${split.optionText}"
     }
 
     private fun toElementHtml(value: Any?): List<String> = when (value) {
@@ -674,21 +704,45 @@ class EmbeddedLegadoRuntime(
         bindings: Map<String, Any?>,
         origin: HttpOrigin?,
     ): ReaderRuleSession {
+        val localVariables = HashMap<String, String>()
         val state = bindings[RhinoEvaluator.BINDING_VARIABLES] as? ReaderRuntimeVariables
-        val context = ReaderRuntimeContext(
+        // 延迟引用：evaluator 闭包需要把「同一个 context」传回 JS 求值，但 context 正在构造中。
+        // 用局部 holder 在构造完成后回填，闭包只在真正求值 JS 时读它（那时已赋值）。
+        lateinit var context: ReaderRuntimeContext
+        context = ReaderRuntimeContext(
             content = content,
             baseUrl = baseUrl,
             engine = engine,
             evaluator = { script, result, src ->
+                // 同一 context 必须传回 JS 求值（上游 `bindings["java"] = this`）：
+                // 否则 RhinoEvaluator 会自建第二个 ReaderRuntimeContext，
+                // java.getString/setContent 与规则链就不是同一份 content，回到「两个方言」。
                 rhino.evaluateRaw(
                     script,
                     baseUrl,
                     result,
-                    bindings + (RhinoEvaluator.BINDING_SOURCE_CONTENT to src),
+                    bindings + mapOf(
+                        RhinoEvaluator.BINDING_SOURCE_CONTENT to src,
+                        RhinoEvaluator.BINDING_RUNTIME_CONTEXT to context,
+                    ),
                     origin = origin,
                 ).value
             },
-            variables = state ?: ReaderRuntimeVariables({ "" }, { _, _ -> }),
+            variables = state ?: ReaderRuntimeVariables({ localVariables[it].orEmpty() }, { key, value -> localVariables[key] = value }),
+            // 上游 AnalyzeRule.get 的 bookName/title 特殊键 → book.name / chapter.title。
+            // 这两个 provider 必须接到当前阶段的 book/chapter 上，否则 java.get('bookName')
+            // 在 debug 链路里恒为空（ReaderRuleSession.get 的 when 分支永远拿不到值）。
+            // 读的是 bindings 里的同一个 BookJsApi/ChapterJsApi 实例，字段抽取写回后立即生效。
+            bookName = {
+                (bindings["book"] as? BookJsApi)?.name.takeIf { !it.isNullOrEmpty() }
+                    ?: (bindings["book"] as? Map<*, *>)?.get("name")?.toString()?.takeIf { it.isNotEmpty() }
+                    ?: state?.bookNameOrNull()
+            },
+            chapterTitle = {
+                (bindings["chapter"] as? ChapterJsApi)?.title.takeIf { !it.isNullOrEmpty() }
+                    ?: (bindings["chapter"] as? Map<*, *>)?.get("title")?.toString()?.takeIf { it.isNotEmpty() }
+                    ?: state?.chapterTitleOrNull()
+            },
         )
         return context.session
     }
@@ -786,6 +840,40 @@ class EmbeddedLegadoRuntime(
             "Legado `id.`/`class.`/`tag.` 只接受单个属性值，想写 CSS 请用 `@css:` 前缀（如 `@css:#${m.groupValues[2]} ${m.groupValues[3]}` 或 `@css:.${m.groupValues[2]} .${m.groupValues[3]}`），或直接写 CSS 选择器；此为启发式告警，若阅读端已能正常解析则无需修改"
     }
 
+    /**
+     * 分页 URL 列表（上游 `BookChapterList`/正文分页的 `getStringList(rule, isUrl = true)`）：
+     * - 走同一个 [ReaderRuleSession]，`isUrl=true` 时 CSS/JSON 无命中回退 baseUrl（上游 getString 语义），
+     *   因此这里把「等于 baseUrl 的项」当空结果丢掉，避免把当前页当成下一页无限自指；
+     * - 每项按 baseUrl 绝对化并去重（上游 getStringList 286-288 的相对地址解析）；
+     * - 规则为空返回空列表；解析异常写进 [notes]（调用方把它并进报告），不静默当「没有下一页」。
+     */
+    private fun extractUrlList(
+        content: Any,
+        rule: String?,
+        baseUrl: String,
+        bindings: Map<String, Any?>,
+        origin: HttpOrigin?,
+        notes: MutableList<String>? = null,
+        emptyNote: String? = null,
+    ): List<String> {
+        if (rule.isNullOrBlank()) return emptyList()
+        val raw = try {
+            ruleSession(content, baseUrl, bindings, origin).getStringList(rule, null, false).orEmpty()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            notes?.add("分页规则解析失败（${ruleKindLabel(rule, LegadoStringRule.Mode.Default)}）：${rule.take(120)} → ${e.javaClass.simpleName}: ${(e.message ?: "").take(160)}")
+            return emptyList()
+        }
+        val urls = raw.mapNotNull { item ->
+            val trimmed = item.trim()
+            if (trimmed.isEmpty()) return@mapNotNull null
+            resolve(baseUrl, trimmed)
+        }.distinct()
+        if (urls.isEmpty() && emptyNote != null) notes?.add(emptyNote)
+        return urls
+    }
+
     private fun resolve(base: String, value: String): String = if (value.isBlank()) "" else if (value.startsWith("http://") || value.startsWith("https://")) value else base.toHttpUrlOrNull()?.resolve(value)?.toString() ?: value
     private fun resolveIfUrl(base: String, field: String, value: String): String = if (field in setOf("coverUrl", "tocUrl")) resolve(base, value) else value
     private fun JsonObject.text(key: String): String? = get(key)?.takeUnless { it.isJsonNull }?.asString
@@ -796,6 +884,11 @@ class EmbeddedLegadoRuntime(
         internal const val MAX_CONTENT_PAGES = 10
         /** 目录分页总请求上限（首页 + 链式/一层展开）；官方无硬顶，沙箱必须有界。 */
         internal const val MAX_TOC_PAGES = 100
+        /**
+         * 远程 jsLib 下载超时（秒）。与规则请求同一 HttpFetcher，但库文件通常更大、且只在
+         * 首次装载时抓一次，给比普通请求更宽的窗口；仍必须有界，避免挂死整条解析链。
+         */
+        internal const val JS_LIB_TIMEOUT_SEC = 30
         /**
          * 仅供单测核对花括号模板；生产路径用 [JsTemplates] 字符串扫描，不把花括号正则放进静态初始化。
          * 懒编译，失败时不把本类标成 erroneous。

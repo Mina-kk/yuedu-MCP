@@ -108,7 +108,7 @@ internal object WebBridgePolicy {
         val host = parsed.host.lowercase()
         if (host == "localhost" || host.endsWith(".localhost")) return false
         if (host == "appassets.androidplatform.net") return false
-        if (isPrivateOrLoopbackHost(host)) return false
+        if (com.mina.legadostudio.domain.LogFilterUtils.isLoopbackOrPrivate(url)) return false
         return true
     }
 
@@ -161,6 +161,43 @@ internal object WebBridgePolicy {
     const val ASSET_PREFIX = "/assets/web/"
 
     /**
+     * 主 WebView 导航决策（两个 `shouldOverrideUrlLoading` 重载共用）：
+     * - 只放行 trusted origin 下 `/assets/web/` 子树（页面自身、hash 路由、query 都算同页）；
+     * - 相似域（`appassets.androidplatform.net.evil.com`）、其它端口、`@` 凭据、百分号编码穿越、
+     *   自定义 scheme 一律拒绝——不交给系统浏览器，也不在 WebView 内加载。
+     */
+    fun hostNavigationDecision(rawUrl: String?): NavigationDecision {
+        val url = rawUrl?.trim().orEmpty()
+        if (url.isEmpty()) return NavigationDecision.Block
+        val parsed = runCatching { url.toHttpUrlOrNull() }.getOrNull()
+            ?: return NavigationDecision.Block
+        if (parsed.scheme != "https") return NavigationDecision.Block
+        if (parsed.host != "appassets.androidplatform.net") return NavigationDecision.Block
+        if (parsed.port != 443) return NavigationDecision.Block
+        if (parsed.username.isNotEmpty() || parsed.password.isNotEmpty()) return NavigationDecision.Block
+        val path = parsed.encodedPath
+        if (!path.startsWith(ASSET_PREFIX)) return NavigationDecision.Block
+        if (hasTraversal(path)) return NavigationDecision.Block
+        return NavigationDecision.Allow
+    }
+
+    enum class NavigationDecision { Allow, Block }
+
+    /**
+     * 穿越判定：解码一次后再看 `..` 段。`%2e%2e`、`..%2f`、`%252e` 这类写法在
+     * 解码后仍会留下可疑序列，因此「解码一次仍含 `..`」即拒绝（宁严不松）。
+     */
+    private fun hasTraversal(encodedPath: String): Boolean {
+        if (encodedPath.contains("..")) return true
+        val decoded = runCatching {
+            java.net.URLDecoder.decode(encodedPath, Charsets.UTF_8.name())
+        }.getOrDefault(encodedPath)
+        if (decoded.contains("..")) return true
+        if (decoded.contains('\\')) return true
+        return false
+    }
+
+    /**
      * shouldInterceptRequest 决策：
      * - 本地 web 资源 → 交给 assetLoader；
      * - 其余一律返回**拒绝响应**（404 空体），绝不返回 null——返回 null 会让 WebView
@@ -173,11 +210,44 @@ internal object WebBridgePolicy {
         if (!isHostUrlAllowed(url)) return LocalResource.Deny
         val path = parsed.encodedPath
         if (!path.startsWith(ASSET_PREFIX)) return LocalResource.Deny
-        if (path.contains("..")) return LocalResource.Deny
+        if (hasTraversal(path)) return LocalResource.Deny
         return LocalResource.Serve
     }
 
     enum class LocalResource { Serve, Deny }
+
+    /**
+     * 隔离验证页的请求决策：外站页面**只允许它自己的 http(s) 子资源**，
+     * 且不得指向 privileged origin（否则无 bridge 的外站页也能读到宿主 assets 内容）。
+     * `file:`/`content:`/`data:` 之外的 scheme 一律拒绝。
+     */
+    fun verificationResourceDecision(rawUrl: String?): LocalResource {
+        val url = rawUrl?.trim().orEmpty()
+        if (url.isEmpty()) return LocalResource.Deny
+        if (url.startsWith("data:", ignoreCase = true) || url.startsWith("blob:", ignoreCase = true)) {
+            return LocalResource.Serve
+        }
+        return if (isVerificationUrlAllowed(url)) LocalResource.Serve else LocalResource.Deny
+    }
+
+    /** Called only from WebView's background resource interceptor, never the UI thread. */
+    fun verificationNetworkAllowed(
+        rawUrl: String?,
+        resolve: (String) -> List<java.net.InetAddress> = { java.net.InetAddress.getAllByName(it).toList() },
+    ): Boolean {
+        if (verificationResourceDecision(rawUrl) != LocalResource.Serve) return false
+        val url = rawUrl.orEmpty()
+        if (url.startsWith("data:", true) || url.startsWith("blob:", true)) return true
+        val parsed = url.toHttpUrlOrNull() ?: return false
+        return runCatching {
+            val addresses = resolve(parsed.host)
+            addresses.isNotEmpty() && addresses.none { address ->
+                address.isAnyLocalAddress || address.isLoopbackAddress || address.isSiteLocalAddress ||
+                    address.isLinkLocalAddress || address.isMulticastAddress ||
+                    com.mina.legadostudio.domain.LogFilterUtils.isLoopbackOrPrivate(address.hostAddress.orEmpty())
+            }
+        }.getOrDefault(false)
+    }
 
     /** 从原始 JSON 文本里取顶层字符串字段（用于回读校验，不信任前端传的结构）。 */
     fun topLevelString(json: String, key: String): String? = runCatching {

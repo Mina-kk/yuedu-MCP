@@ -56,12 +56,25 @@ class RhinoEvaluator(
         // 未传时（eval_js 等独立求值）按本次 previous/content 建一个临时上下文，
         // java.getString 默认取该内容而不是空 Document。
         val providedContext = bindings[BINDING_RUNTIME_CONTEXT] as? ReaderRuntimeContext
+        val boundVariables = bindings[BINDING_VARIABLES] as? ReaderRuntimeVariables
+        val evaluationVariables = HashMap<String, String>()
         val runtimeContext = providedContext ?: ReaderRuntimeContext(
             content = bindings[BINDING_SOURCE_CONTENT] ?: previous ?: "",
             baseUrl = baseUrl,
             evaluator = { script, result, src -> evaluateRaw(script, baseUrl, result, bindings + (BINDING_SOURCE_CONTENT to src), origin).value },
-            variables = (bindings[BINDING_VARIABLES] as? ReaderRuntimeVariables)
-                ?: ReaderRuntimeVariables({ "" }, { _, _ -> }),
+            variables = boundVariables ?: ReaderRuntimeVariables(
+                // 独立求值（eval_js）：上游 put/get 落在 AnalyzeRule 自身上，这里的等价物是
+                // 本实例的 memoryStore——put 之后同一次求值（以及同一 evaluator 的后续求值）
+                // 的 java.get 必须读得到，旧实现给了空实现，put 静默丢弃。
+                get = { key -> evaluationVariables[key].orEmpty() },
+                put = { key, value -> evaluationVariables[key] = value },
+            ),
+            // 上游 AnalyzeRule.get 的 bookName/title 特殊键读的是 book.name / chapter.title；
+            // 独立求值（eval_js）没有实体，但调用方可能经 bindings 传了 book/chapter 映射，
+            // 这里按同一语义取，避免 java.get('bookName') 在沙箱里无端返回空。
+            // 显式传入的变量层（debug 链路）自带特殊键实现，不在此覆盖。
+            bookName = { boundVariables?.bookNameOrNull() ?: (bindings["book"] as? Map<*, *>)?.get("name")?.toString() },
+            chapterTitle = { boundVariables?.chapterTitleOrNull() ?: (bindings["chapter"] as? Map<*, *>)?.get("title")?.toString() },
         )
         val api = StudioJsApi(
             fetcher, { line -> logs += line; jsLogSink?.invoke(line) }, webViewLoader, cookies, userAgentProvider, httpLogs,
@@ -120,11 +133,21 @@ class RhinoEvaluator(
         // 即表达式所在作用域，java/cookie/source 等注入绑定在调用点生效。
         // jsLib 为 http(s) URL 时在 EmbeddedLegadoRuntime 层被拒（不做外部加载），到不了这里；
         // eval_js 不传该 binding 时不会凭空装载任何 jsLib。
+        //
+        // 上游 SharedJsScope.evaluateJsLib 262-273：jsLib 是 JSON 对象时只 eval 其中每个值，
+        // 值不是绝对 URL 的内联片段同样要执行（`{"a":"function f(){}"}` 这种形态很常见）；
+        // 不是 JSON 对象时整串当内联 JS。旧实现把 JSON 原文直接 eval，Rhino 会把
+        // `{"lib":"https://..."}` 当块语句解析成标签 + 注释，报 `Unexpected end of file`
+        // 并把环境问题伪装成规则错误——这里按上游先解析出内联片段再装载。
         @Suppress("UNCHECKED_CAST")
         val jsLibProvider = bindings[BINDING_JSLIB] as? () -> String?
         // 先取一次 jsLib 源码：装载失败时错误包装需要原样引用，行归属回退也要这份文本
         val jsLibSource = jsLibProvider?.invoke()?.takeIf { it.isNotBlank() }
-        val parent = jsLibSource?.let { libSource ->
+        val jsLibInline = jsLibSource?.let { source ->
+            runCatching { ReaderRequestTemplate.parseJsLibSpec(source).inlineParts.joinToString("\n") }
+                .getOrDefault(source)
+        }?.takeIf { it.isNotBlank() }
+        val parent = jsLibInline?.let { libSource ->
             RhinoScriptEngine.newStandardTopLevel().also { libScope ->
                 try {
                     RhinoScriptEngine.eval(libSource, libScope)
@@ -132,7 +155,7 @@ class RhinoEvaluator(
                     throw decorateApiError(
                         com.script.ScriptException("jsLib 执行失败：${error.message.orEmpty()}", "jsLib", -1)
                             .also { it.initCause(error) },
-                        js, jsLibSource,
+                        js, libSource,
                     )
                 }
             }
@@ -156,6 +179,13 @@ class RhinoEvaluator(
      *    方法确实存在但重载都对不上（如 java.get(url, headers, timeout) 这类真机签名）
      *    额外标注「沙箱不支持该签名（验收环境限制，非书源错误）」，并解析出 java.xxx(参数类型)。
      * 其余 JS 一般异常只做行归属，不改写文案。
+     *
+     * 分类边界（上游 AnalyzeRule.evalJS 的绑定集合决定）：
+     * - `ReferenceError: x is not defined` 是**变量未注入**，不是方法不存在；只有名字属于
+     *   沙箱注入对象（java/cookie/cache/source/book/chapter…）或已知缺失变量时才给定位提示，
+     *   其余名字（含 `typeof url === 'undefined'` 这类合法探测失败后的二次引用）只附行归属，
+     *   绝不追加「确凿的方法不存在」清单。
+     * - 只有「找不到方法/不是函数」这类文案才进入 API 清单分支。
      */
     private fun decorateApiError(error: Exception, script: String? = null, jsLib: String? = null): Exception {
         val scriptError = error as? com.script.ScriptException
@@ -173,9 +203,19 @@ class RhinoEvaluator(
         }.orEmpty()
         val message = error.message.orEmpty()
         val firstLine = message.substringBefore('\n')
-        UNDEFINED_NAME.find(firstLine)?.groupValues?.get(1)?.let { LEGADO_ABSENT_NAMES[it] }?.let { hint ->
+        // ReferenceError（变量未定义）优先于「方法不存在」分类：`x is not defined` 同时命中
+        // MISSING_API_PATTERNS 的英文条目，若不先分流就会被当成确凿的 API 缺失并附整张清单。
+        val undefinedName = MISSING_API_UNDEFINED.find(firstLine)?.groupValues?.get(1)
+            ?: UNDEFINED_NAME.find(firstLine)?.groupValues?.get(1)
+        if (undefinedName != null) {
+            val hint = LEGADO_ABSENT_NAMES[undefinedName]
+                ?: if (undefinedName in INJECTED_GLOBALS) {
+                    "\n【绑定提示】本次求值的规则 JS 上下文没有注入 `$undefinedName`；该名字属于阅读端内置对象，" +
+                        "请检查是否在 jsLib 或前一段 JS 里被覆盖/删除。"
+                } else null
+            if (hint == null && scriptContext.isEmpty()) return error
             return com.script.ScriptException(
-                message + scriptContext + hint,
+                message + scriptContext + hint.orEmpty(),
                 scriptError?.fileName,
                 scriptError?.lineNumber ?: -1,
                 scriptError?.columnNumber ?: -1,
@@ -318,6 +358,15 @@ class RhinoEvaluator(
         )
         /** ReferenceError 未定义名：en `"url" is not defined` / zh_CN `“url” 未定义` */
         private val UNDEFINED_NAME = Regex("[\"“]?([A-Za-z_$][\\w$]*)[\"”]?\\s*(?:is not defined|未定义)")
+        /** 带 `ReferenceError:` 前缀的同一形态（Rhino 把 EcmaError 文案放在首行） */
+        private val MISSING_API_UNDEFINED =
+            Regex("ReferenceError[:：]\\s*[\"“]?([A-Za-z_$][\\w$]*)[\"”]?\\s*(?:is not defined|未定义)")
+        /** 上游 AnalyzeRule.evalJS / AnalyzeUrl.evalJS 注入的内置对象名（未定义时给定位提示） */
+        private val INJECTED_GLOBALS = setOf(
+            "java", "cookie", "cache", "source", "book", "chapter", "chapters", "result",
+            "baseUrl", "title", "src", "nextChapterUrl", "page", "key", "speakText", "speakSpeed",
+            "infoMap", "fromBookInfo", "rssArticle", "paraIndex", "paraData",
+        )
         /**
          * 沙箱本次求值里**没有注入**的常见变量名 → 定位提示。
          *
@@ -549,7 +598,7 @@ class StudioJsApi(
     @JvmOverloads
     fun setContent(html: Any?, baseUrl: String? = null): Any? {
         val context = runtimeContext
-        if (context != null && html != null) {
+        if (context != null) {
             context.setContent(html, baseUrl)
             return context.session
         }
@@ -573,29 +622,28 @@ class StudioJsApi(
     }
 
     /**
-     * 官方 java.get(keyOrUrl, headers?)：
-     * - 一参且不是 URL 形态 → 变量查询（上游 AnalyzeRule.get，chapter→book→ruleData→source）；
-     * - URL 形态（http(s):// 或 `/` 开头）→ 网络 GET（上游 JsExtensions.get(url, headers)）。
+     * 官方 `java.get`：上游是**两个不同类的不同签名**，靠参数个数区分，不靠字符串形态猜。
      *
-     * 上游两个 `get` 是不同类的不同签名，这里按「是否 URL 形态」分派，与旧行为一致；
-     * 变量查询不再落到与规则核无关的 memoryStore。
+     * - 一参 `get(key)` → `AnalyzeRule.get(key)`：变量查询（chapter→book→ruleData→source，
+     *   特殊键 `bookName`/`title`）。**任何字符串都是一参变量查询**，`get("http://x")`
+     *   也按变量名查（上游就是如此，不会因为像 URL 就去发网络请求）。
+     * - 两参 `get(url, headers)` → `JsExtensions.get(url, headers)`：网络 GET。
+     * - 三参 `get(url, headers, timeout)` → 见下方独立声明。
+     *
+     * 旧实现按「是否 URL 形态」分派，等于让一参 `get("http://...")` 静默变成网络请求，
+     * 与上游不符；这里按 arity 严格区分。
      */
-    @JvmOverloads
-    fun get(keyOrUrl: String, headers: Any? = null): Any? {
-        if (keyOrUrl.startsWith("http://", ignoreCase = true) ||
-            keyOrUrl.startsWith("https://", ignoreCase = true) ||
-            keyOrUrl.startsWith("/")
-        ) {
-            return request(keyOrUrl, "GET", null, headers, null)
-        }
+    fun get(key: String): Any? {
         val context = runtimeContext
-        if (context != null) return context.get(keyOrUrl)
-        return memoryStore[keyOrUrl]
+        if (context != null) return context.get(key)
+        return memoryStore[key]
     }
+
+    /** 官方 `JsExtensions.get(url, headers)`：网络 GET（headers 可为 null） */
+    fun get(url: String, headers: Any?): StudioJsResponse = request(url, "GET", null, headers, null)
 
     /**
      * 官方三参形态 java.get(url, headers, timeout)：timeout 毫秒（JS Number → int/long/double 皆可）。
-     * 独立声明而不进 @JvmOverloads：避免生成 get(String,long) 把内存键查询也带上超时参数。
      */
     fun get(url: String, headers: Any?, timeout: Any?): StudioJsResponse =
         request(url, "GET", null, headers, timeoutMillis(timeout))
@@ -648,20 +696,43 @@ class StudioJsApi(
 
     /** 官方 java.getElement(rule)：返回 typed 节点（Element / JXNode / Map / regex capture List） */
     fun getElement(rule: String): Any? {
-        val context = runtimeContext ?: fallbackSession(null)
-        return context.getElement(rule)
+        val context = runtimeContext
+        if (context != null) return context.getElement(rule)
+        return fallbackSession(null).getElement(rule)
     }
 
     /** 官方 java.getElements(rule)：非列表结果返回空列表（上游 453-502） */
     fun getElements(rule: String): List<Any> {
-        val context = runtimeContext ?: fallbackSession(null)
-        return context.getElements(rule)
+        val context = runtimeContext
+        if (context != null) return context.getElements(rule)
+        return fallbackSession(null).getElements(rule)
     }
 
     /** 无显式运行上下文时（eval_js 等）按本次内容建一次性核，保证 java.getString 仍取真实内容 */
     private fun fallbackSession(content: Any?): ReaderRuleSession {
         val root = content ?: currentContent ?: currentDocument ?: ""
         return ReaderRuleSession(content = root, baseUrl = currentBaseUrl)
+    }
+
+    /**
+     * 上游 `AnalyzeRule.get("bookName")` → `book.name`。独立求值时调用方可能经 bindings
+     * 传了 `book`（BookJsApi 或 Map），这里按同一语义读；没有 book 时返回 null（上游同样返回空串）。
+     */
+    private fun bookNameFromBindings(bindings: Map<String, Any?>): () -> String? = {
+        when (val bound = bindings["book"]) {
+            is BookJsApi -> bound.name.takeIf { it.isNotEmpty() }
+            is Map<*, *> -> bound["name"]?.toString()?.takeIf { it.isNotEmpty() }
+            else -> null
+        }
+    }
+
+    /** 上游 `AnalyzeRule.get("title")` → `chapter.title`（同上） */
+    private fun chapterTitleFromBindings(bindings: Map<String, Any?>): () -> String? = {
+        when (val bound = bindings["chapter"]) {
+            is ChapterJsApi -> bound.title.takeIf { it.isNotEmpty() }
+            is Map<*, *> -> bound["title"]?.toString()?.takeIf { it.isNotEmpty() }
+            else -> null
+        }
     }
     @JvmOverloads
     fun encodeURI(value: String, charset: String = "UTF-8"): String = URLEncoder.encode(value, charset).replace("+", "%20")

@@ -55,6 +55,17 @@ async function mountPage(handlers) {
 }
 
 describe('McpPage', () => {
+  it('未连接时不假装已知服务停止或工具数量为零', async () => {
+    const bridge = fakeBridge({})
+    bridge.connected = false
+    const store = createStore({ bridge, storage: null })
+    await store.bootstrap()
+    const wrapper = mount(McpPage, { props: { store } })
+    await flushPromises()
+    expect(wrapper.find('.stat-value').text()).toBe('状态未知')
+    expect(wrapper.text()).toContain('未加载')
+  })
+
   it('显示真实服务状态、端口与端点，不显示 token', async () => {
     const { wrapper } = await mountPage({
       'app.bootstrap': async () => BOOTSTRAP,
@@ -131,7 +142,7 @@ describe('McpPage', () => {
     await flushPromises()
     const call = bridge.calls.find(([m]) => m === 'tools.call')
     expect(call[1]).toEqual({ name: 'list_sources', arguments: { limit: 5 } })
-    expect(wrapper.text()).toContain('{"items":[]}')
+    expect(JSON.parse(wrapper.find('pre').text())).toEqual({ items: [] })
   })
 
   it('破坏性工具调用前要求确认', async () => {

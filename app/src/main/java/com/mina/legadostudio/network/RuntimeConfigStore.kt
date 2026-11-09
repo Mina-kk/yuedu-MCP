@@ -9,9 +9,14 @@ class RuntimeConfigStore(
     private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("runtime_network_config", Context.MODE_PRIVATE)
     var userAgent: String
-        get() = prefs.getString("userAgent", null)?.takeIf { it.isNotBlank() } ?: HttpFetcher.DEFAULT_UA
+        get() = prefs.getString("userAgent", null)?.takeIf {
+            it.isNotBlank() && runCatching { okhttp3.Headers.Builder().add("User-Agent", it) }.isSuccess
+        } ?: HttpFetcher.DEFAULT_UA
         set(value) {
             require(value.trim().length in 8..500) { "User-Agent 长度必须在 8..500" }
+            require(runCatching { okhttp3.Headers.Builder().add("User-Agent", value) }.isSuccess) {
+                "User-Agent 包含非法 HTTP 头字符"
+            }
             val current = userAgent
             val next = value.trim()
             if (current != next) {

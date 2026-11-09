@@ -1,6 +1,5 @@
 package io.legado.app.model.analyzeRule
 
-import android.text.TextUtils
 import androidx.annotation.Keep
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -135,7 +134,10 @@ class AnalyzeByXPath(doc: Any) {
         val rules = ruleAnalyzes.splitRule("&&", "||")
         if (rules.size == 1) {
             getResult(rule)?.let {
-                return TextUtils.join("\n", it)
+                // ADAPT: 上游此处是 android.text.TextUtils.join("\n", it)（AnalyzeByXPath.kt:138）。
+                // TextUtils.join 对元素逐个 append（null 写成 "null"），分隔符只出现在元素之间；
+                // 本模块不链接 Android 框架，joinText 按同一语义实现，空集合返回 ""。
+                return joinText(it)
             }
             return null
         } else {
@@ -150,6 +152,25 @@ class AnalyzeByXPath(doc: Any) {
                 }
             }
             return textList.joinToString("\n")
+        }
+    }
+
+    private companion object {
+        /**
+         * `android.text.TextUtils.join(CharSequence delimiter, Iterable tokens)` 的 JVM 等价实现
+         * （AOSP TextUtils.java: `for (Object item : tokens) { if (!first) sb.append(delimiter);
+         * sb.append(item); first = false; }`，空集合返回 ""）。上游 AnalyzeByXPath.kt:138 依赖它，
+         * 本模块不链接 Android 框架，故内联同一语义。
+         */
+        fun joinText(tokens: Iterable<*>): String {
+            val sb = StringBuilder()
+            var first = true
+            for (item in tokens) {
+                if (!first) sb.append('\n')
+                sb.append(item)
+                first = false
+            }
+            return sb.toString()
         }
     }
 }

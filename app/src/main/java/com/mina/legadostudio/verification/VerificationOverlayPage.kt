@@ -30,6 +30,18 @@ object VerificationOverlayPage {
     /** 页面 HTML 硬上限，防御性断言用。 */
     const val MAX_PAGE_CHARS = 16_000
 
+    /** 球体绘制尺寸（CSS px）：窗口 52dp 时留 2dp 描边余量。 */
+    const val BALL_CSS_PX = 48
+
+    /** 气泡最大宽度（CSS px）：提醒态窗口上限 240dp，气泡不得超出。 */
+    const val ALERT_BUBBLE_MAX_WIDTH_CSS_PX = 220
+
+    /** 气泡内单行文本最大宽度（CSS px）：留出左右 padding。 */
+    const val ALERT_LABEL_MAX_WIDTH_CSS_PX = 200
+
+    /** 提醒态窗口最大高度（CSS px）：球 48 + 间距 6 + 两行气泡。 */
+    const val ALERT_WINDOW_MAX_HEIGHT_CSS_PX = 110
+
     /**
      * loadDataWithBaseURL 的 baseURL：不透明、不可解析为任何真实 origin。
      * 只允许文档自身（含 fragment）导航，其它一律拦截。
@@ -124,7 +136,7 @@ object VerificationOverlayPage {
         html,body{margin:0;padding:0;background:transparent;overflow:hidden;
           -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
         body{display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
-        .ball{box-sizing:border-box;width:48px;height:48px;border-radius:50%;
+        .ball{box-sizing:border-box;width:${BALL_CSS_PX}px;height:${BALL_CSS_PX}px;border-radius:50%;
           display:flex;align-items:center;justify-content:center;
           box-shadow:0 2px 8px rgba(0,0,0,.28)}
         .ball.normal{background:$COLOR_LIME;border:0}
@@ -132,14 +144,14 @@ object VerificationOverlayPage {
         .glyph{font:700 20px/1 -apple-system,"Noto Sans SC",Roboto,sans-serif;letter-spacing:.5px}
         .ball.normal .glyph{color:$COLOR_ON_LIME}
         .ball.alert .glyph{color:$COLOR_LIME}
-        .bubble{margin-top:6px;max-width:220px;box-sizing:border-box;
+        .bubble{margin-top:6px;max-width:${ALERT_BUBBLE_MAX_WIDTH_CSS_PX}px;box-sizing:border-box;
           display:flex;flex-direction:column;align-items:flex-start;gap:2px;
           padding:4px 10px;border-radius:12px;background:$COLOR_LIME;
           box-shadow:0 2px 8px rgba(0,0,0,.22)}
         .label{font:600 11px/1.25 -apple-system,"Noto Sans SC",Roboto,sans-serif;
-          color:$COLOR_ON_LIME;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+          color:$COLOR_ON_LIME;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${ALERT_LABEL_MAX_WIDTH_CSS_PX}px}
         .note{font:400 10px/1.2 -apple-system,"Noto Sans SC",Roboto,sans-serif;
-          color:$COLOR_ON_LIME;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+          color:$COLOR_ON_LIME;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${ALERT_LABEL_MAX_WIDTH_CSS_PX}px}
         </style>
         </head><body>
         $body

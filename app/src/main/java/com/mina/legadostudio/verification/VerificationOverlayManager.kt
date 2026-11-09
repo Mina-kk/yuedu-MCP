@@ -129,7 +129,7 @@ object VerificationOverlayManager {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = d.widthPixels - ballPx
+            x = (d.widthPixels - ballPx).coerceAtLeast(0)
             y = d.heightPixels / 3
         }
 
@@ -144,6 +144,14 @@ object VerificationOverlayManager {
     private fun buildBallView(context: Context, params: WindowManager.LayoutParams): WebView {
         val view = WebView(context)
         hardenSettings(view)
+        // 窗口尺寸与页面视口一致：52dp 正方形时页面正好铺满，提醒态放宽后再换页。
+        view.layoutParams = WindowManager.LayoutParams(
+            params.width,
+            params.height,
+            params.type,
+            params.flags,
+            params.format,
+        )
         view.setBackgroundColor(0x00000000)
         view.isVerticalScrollBarEnabled = false
         view.isHorizontalScrollBarEnabled = false
@@ -171,6 +179,7 @@ object VerificationOverlayManager {
         }
         loadPage(view, VerificationOverlayPage.normalPage())
         alertVisible = false
+        applyWindowSize(view, alert = false)
         attachDragAndClick(context, view, params)
         return view
     }
@@ -256,9 +265,10 @@ object VerificationOverlayManager {
         val ballWidth = (BALL_SIZE_DP * d.density + 0.5f).toInt()
         val centerX = params.x + view.width / 2
         val clampedY = params.y.coerceIn(0, (screenH - view.height).coerceAtLeast(0))
+        // 提醒态窗口比球宽（气泡），吸附时按窗口实际宽度贴边，且 x 不为负（否则气泡被裁）。
         val targetX = when {
             alertVisible ->
-                if (centerX < screenW / 2) 0 else screenW - view.width
+                if (centerX < screenW / 2) 0 else (screenW - view.width).coerceAtLeast(0)
             centerX < ballWidth -> -view.width / 2
             screenW - centerX < ballWidth -> screenW - view.width / 2
             else -> params.x
@@ -290,17 +300,55 @@ object VerificationOverlayManager {
     private fun applyAlertStyle(domain: String, purpose: String) {
         val view = ballView ?: return
         alertVisible = true
+        // 先改窗口尺寸再换页：页面按新视口排版，气泡不会被 52dp 方形裁掉。
+        applyWindowSize(view, alert = true)
         loadPage(view, VerificationOverlayPage.alertPage(domain, purpose))
     }
 
     private fun applyNormalStyle() {
         val view = ballView ?: return
         alertVisible = false
+        applyWindowSize(view, alert = false)
         loadPage(view, VerificationOverlayPage.normalPage())
+    }
+
+    /**
+     * 窗口尺寸策略（纯尺寸，不改任何 Web/网络策略）：
+     * - 常态：52dp 正方形，球完整可见；
+     * - 提醒态：放宽到气泡尺寸（宽 ≤ 240dp、高 ≤ 110dp），并 clamp 到屏幕内，
+     *   同时把 x 钳回屏内，避免气泡被屏幕边缘裁掉；
+     * - 关闭提醒恢复 52dp 正方形。
+     */
+    private fun applyWindowSize(view: WebView, alert: Boolean) {
+        val wm = windowManager ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val d = view.resources.displayMetrics
+        val ballPx = (BALL_SIZE_DP * d.density + 0.5f).toInt()
+        val width: Int
+        val height: Int
+        if (alert) {
+            width = minOf((ALERT_MAX_WIDTH_DP * d.density + 0.5f).toInt(), d.widthPixels).coerceAtLeast(ballPx)
+            height = minOf((ALERT_MAX_HEIGHT_DP * d.density + 0.5f).toInt(), d.heightPixels).coerceAtLeast(ballPx)
+        } else {
+            width = ballPx
+            height = ballPx
+        }
+        val changed = params.width != width || params.height != height
+        params.width = width
+        params.height = height
+        val maxX = (d.widthPixels - width).coerceAtLeast(0)
+        val maxY = (d.heightPixels - height).coerceAtLeast(0)
+        params.x = params.x.coerceIn(0, maxX)
+        params.y = params.y.coerceIn(0, maxY)
+        if (changed) runCatching { wm.updateViewLayout(view, params) }
     }
 
     /** 圆球直径（dp）：48dp 球体 + 2dp 描边余量，页面按 48px 绘制。 */
     private const val BALL_SIZE_DP = 52f
+
+    /** 提醒态窗口上限：气泡宽 240dp、高 110dp（球 52dp + 气泡两行）。 */
+    private const val ALERT_MAX_WIDTH_DP = 240f
+    private const val ALERT_MAX_HEIGHT_DP = 110f
 
     /** 不透出任何设备指纹的 UA；页面不联网，UA 只影响渲染。 */
     private const val OVERLAY_USER_AGENT = "StudioOverlay/1.0"

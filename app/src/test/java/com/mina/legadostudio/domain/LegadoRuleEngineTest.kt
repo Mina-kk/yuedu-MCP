@@ -32,9 +32,9 @@ class LegadoRuleEngineTest {
         assertEquals(listOf("书名", "作者"), engine.extract(html, ".name@text&&.author@text").values)
     }
 
-    @Test fun cssOrStripsRepeatedAtCssPrefixAndIgnoresBadSelector() {
+    @Test fun cssOrUsesOnePrefixForTheWholeRule() {
         val html = """<div id="play_0"><ul><li><a href="/w/152957.html">第一章 我有三个相宫</a></li></ul></div>"""
-        val rule = "@css:.m-box ul a[href\$='.html']||@css:#play_0 ul a||@css:ul a[href\$='.html']"
+        val rule = "@css:.m-box ul a[href\$='.html']||#play_0 ul a||ul a[href\$='.html']"
         val elements = engine.elements(html, rule)
         org.junit.Assert.assertTrue(elements.joinToString().contains("第一章"))
     }
@@ -42,9 +42,15 @@ class LegadoRuleEngineTest {
     @Test fun mixedDefaultAndCssSegmentsInOrRule() {
         val html = """<html><head><meta property="k" content="书名甲"></head><body><h1>书名乙</h1></body></html>"""
         // 第一段为空时落到 @css: 段
-        assertEquals("书名甲", engine.extract(html, ".missing@text||@css:meta[property=k]@content").first)
+        assertEquals("书名甲", engine.extract(html, "@css:.missing@text||meta[property=k]@content").first)
         // 官方 || 语义：第一个非空即停止，不合并
-        assertEquals(listOf("书名乙"), engine.extract(html, "h1@text||@css:meta[property=k]@content").values)
+        assertEquals(listOf("书名乙"), engine.extract(html, "@css:h1@text||meta[property=k]@content").values)
+    }
+
+    @Test(expected = Error::class)
+    fun invalidCssIsNotSilentlyTreatedAsNoMatch() {
+        // Fixed Team RuleAnalyzer.kt:228 throws Error for unbalanced groups, before JSoup runs.
+        engine.elements("<p>x</p>", "@css:[||p")
     }
 
     @Test fun leadingMinusReversesList() {

@@ -210,7 +210,7 @@ class EmbeddedLegadoRuntimeTest {
             checkNotNull(recorded)
             assertEquals("POST", recorded.method)
             assertEquals("/e/search/index.php", recorded.path)
-            assertEquals("keyboard=%E4%B8%87%E7%9B%B8+%E4%B9%8B%E7%8E%8B%2B100%25%26&tempid=1", recorded.body.readUtf8())
+            assertEquals("keyboard=%E4%B8%87%E7%9B%B8+%E4%B9%8B%E7%8E%8B%2B100%25&&tempid=1", recorded.body.readUtf8())
             assertEquals("application/x-www-form-urlencoded; charset=utf-8", recorded.getHeader("Content-Type"))
             val books = report.data as List<*>
             assertEquals("书名", (books.first() as Map<*, *>)["name"])
@@ -260,7 +260,7 @@ class EmbeddedLegadoRuntimeTest {
             assertNotNull("POST 搜索请求应在 5 秒内到达", recorded)
             checkNotNull(recorded)
             assertEquals("POST", recorded.method)
-            assertEquals("keyboard=万相 之王+100%&&tempid=1", recorded.body.readUtf8())
+            assertEquals("keyboard=%E4%B8%87%E7%9B%B8+%E4%B9%8B%E7%8E%8B%2B100%25&&tempid=1", recorded.body.readUtf8())
             assertEquals("application/x-www-form-urlencoded; charset=utf-8", recorded.getHeader("Content-Type"))
             val books = report.data as List<*>
             assertEquals("原名", (books.first() as Map<*, *>)["name"])
@@ -652,7 +652,8 @@ class EmbeddedLegadoRuntimeTest {
             val runtime = EmbeddedLegadoRuntime(HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
             val report = runtime.debug(source, "--${server.url("c1")}")
             val content = (report.data as Map<*, *>)["content"].toString()
-            assertEquals("第一段\n第二段\n第三段", content)
+            // Fixed Team HtmlFormatter inserts U+3000 indent; BookContent.kt:172-173 trims only with replaceRegex.
+            assertEquals("第一段\n　　第二段\n　　第三段", content)
         }
     }
 

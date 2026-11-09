@@ -153,13 +153,13 @@ class McpService : Service() {
         McpStats.resetConnections()
         // 重启开始新一轮工具使用统计：旧轮次在途调用完成后不落进新统计（代际隔离）
         com.mina.legadostudio.mcp.McpToolUsageRegistry.current = com.mina.legadostudio.mcp.McpToolUsage()
-        val store = McpConfigStore(this)
-        val config = store.load()
-        val addresses = McpAccess.localAddresses()
-        lastAddresses = addresses.map { it.hostAddress ?: "" }.toSet()
-        val hosts = McpAccess.allowedHosts(addresses)
-        val origins = McpAccess.allowedOrigins(hosts)
         try {
+            val store = McpConfigStore(this)
+            val config = store.requireAuthentication()
+            val addresses = McpAccess.localAddresses()
+            lastAddresses = addresses.map { it.hostAddress ?: "" }.toSet()
+            val hosts = McpAccess.allowedHosts(addresses)
+            val origins = McpAccess.allowedOrigins(hosts)
             engine = embeddedServer(CIO, host = "0.0.0.0", port = config.port) {
                 configureStudioMcp(store::load, hosts, origins) {
                     // 新会话 initialize 的 URL 决定本连接是否精简 tools/list；?compact=1 时工具/入参

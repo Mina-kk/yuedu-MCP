@@ -168,21 +168,19 @@ class ReaderWebToolContractTest {
         assertTrue("令牌必须加密保存", store.contains("SecureStringStore"))
         assertTrue("与 MCP 配置分离的 prefs", store.contains("reader_web_config"))
         assertFalse("不得在保存时推进 epoch", store.contains("contextEpoch"))
-        val ui = firstExisting(
-            "src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt",
-            "app/src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt",
+        val ui = firstExisting("../web-ui/src/components/SettingsPanel.vue", "web-ui/src/components/SettingsPanel.vue").readText()
+        val host = firstExisting(
+            "src/main/java/com/mina/legadostudio/web/StudioWebBridge.kt",
+            "app/src/main/java/com/mina/legadostudio/web/StudioWebBridge.kt",
         ).readText()
-        assertTrue(ui.contains("阅读 Web 服务"))
-        assertTrue(ui.contains("测试连接"))
-        assertTrue("测试连接必须离开主线程", ui.contains("withContext(Dispatchers.IO)"))
+        assertTrue(ui.contains("阅读 Web 地址"))
         assertFalse("不得预填用户私网地址", ui.contains("192.168.1."))
-        assertTrue("已存令牌不回显", ui.contains("已保存，留空则不修改"))
-        assertTrue("令牌输入框必须遮罩", ui.contains("PasswordVisualTransformation"))
-        assertTrue("保存当前输入失败时不得回退测旧地址", ui.contains("return@OutlinedButton"))
-        // 版本差异必须分开提示，不能再压成一句「不像阅读」
+        assertTrue("已存令牌不回显", ui.contains("留空则保留同 origin 令牌"))
+        assertTrue("令牌输入框必须遮罩", ui.contains("type=\"password\""))
+        assertTrue("异步设置必须等待宿主保存", ui.contains("await props.saveSettings"))
+        assertTrue("宿主保存和读取必须离开主线程", host.contains("withContext(Dispatchers.IO)"))
         assertFalse("不得把版本差异压成「不像阅读」", ui.contains("该地址不像阅读 Web 服务"))
-        assertTrue("必须按错误阶段展示", ui.contains("stageLabel"))
-        assertTrue("必须提供一键回环但由用户点选", ui.contains("改用同机回环"))
+        assertTrue("原有连接探测仍由真实工具提供", mcpSources().contains("\"reader_web_status\""))
         val verifier = readerSources()
         assertTrue("必须用旧 revision 区分本次新状态", verifier.contains("oldRevision"))
         assertTrue("读到旧状态只能报 stale_state", verifier.contains("\"stale_state\""))
@@ -193,7 +191,7 @@ class ReaderWebToolContractTest {
         // 令牌与 origin 绑定：保存必须走策略判定，换地址时清除旧令牌
         assertTrue("缺少配置策略", store.contains("ReaderWebConfigPolicy.resolve"))
         assertTrue("策略必须在换地址时清令牌", store.contains("previousOrigin != origin"))
-        assertTrue("UI 必须提示改地址需重填令牌", ui.contains("修改地址后需重新填写"))
+        assertTrue("UI 必须提示改地址需重填令牌", ui.contains("改 origin 时旧令牌会被清除"))
         // 一次检验使用固定快照，中途改配置不影响进行中的调用
         assertTrue("检验必须固定配置快照", verifier.contains("pinConfig()"))
         assertTrue("配置快照必须由客户端提供", readerSources().contains("fun pinConfig()"))
@@ -220,22 +218,17 @@ class ReaderWebToolContractTest {
         // 配置是独立 prefs，不读 MCP 配置
         assertTrue(store.contains("\"reader_web_config\""))
 
-        val ui = firstExisting(
-            "src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt",
-            "app/src/main/java/com/mina/legadostudio/ui/screens/McpStatusScreen.kt",
+        val host = firstExisting(
+            "src/main/java/com/mina/legadostudio/web/StudioWebBridge.kt",
+            "app/src/main/java/com/mina/legadostudio/web/StudioWebBridge.kt",
         ).readText()
-        val cardStart = ui.indexOf("Text(\"阅读 Web 服务\"")
-        assertTrue("缺少「阅读 Web 服务」卡片", cardStart >= 0)
-        // 卡片到下一个列表项之间：保存/测试连接/清除都在这里
-        val nextItem = ui.indexOf("\n                        item {", cardStart)
-        val card = ui.substring(cardStart, if (nextItem > cardStart) nextItem else ui.length)
-        listOf("McpService.restart", "contextEpoch", "bump(").forEach {
-            assertFalse("阅读 Web 服务卡片不得调用 $it", card.contains(it))
+        val readerSave = host.substringAfter("if (draft.readerBaseUrl != null)")
+            .substringBefore("draft.appearanceTheme")
+        listOf("McpService", "contextEpoch", "bump(").forEach {
+            assertFalse("阅读设置不得调用 $it", readerSave.contains(it))
         }
-        assertTrue("卡片仍有保存入口", card.contains("readerWebConfig.save"))
-        assertTrue("卡片仍有测试连接入口", card.contains("readerWebBridge.status()"))
-        // MCP 自身配置区仍保留重启逻辑：不能为了这条约束把既有行为删掉
-        assertTrue("MCP 配置保存仍会重启服务", ui.contains("McpService.restart(context)"))
+        assertTrue("阅读设置仍使用独立配置保存", readerSave.contains("reader.save("))
+        assertTrue("MCP 显式重启接口仍保留", host.contains("ServiceAction.RESTART -> McpService.restart(context)"))
     }
 
     /** 同步工具回包必须带实际请求顺序与写入结局字段，避免模型再猜「GET /saveBookSource」。 */

@@ -1,32 +1,32 @@
 # 阅读书源 MCP
 
-> **本分支为 2.0.0 重构开发快照，尚未完成验收，不是可安装发布版。** Rust/WASM + Vue 界面和阅读规则运行时仍在集成；构建、单元测试与 APK 打包转到 GitHub-hosted Actions。只有全部检查通过才上传 Debug APK，失败运行不提供可用性结论。`main` 与既有 Releases 不受此分支影响。
+> **本分支为 2.0.0 重构开发快照，尚未完成验收，不是正式发布版。** Rust/WASM + Vue 界面和阅读规则运行时仍在集成；可使用 GitHub-hosted Actions 或有资源限额的本机构建。Debug APK 不等于正式签名，不据打包成功推定运行时通过。`main` 与既有 Releases 不受此分支影响。
 
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`1.3.9`（versionCode 200，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.0`（versionCode 201，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
 
 ## 界面
 
-iOS 简约白风格：液态玻璃顶栏/底栏（高斯模糊）、大圆角卡片、底部悬浮标签栏。底栏为 **MCP / 书源 / 技能 / 验证中心 / 日志**。
+业务界面使用 **Vue 组件 + Rust/WASM 核心**，Android 仅保留 WebView、前台服务、系统权限与 SAF 文件选择器等宿主能力。玻璃顶栏/底栏、大圆角卡片与 10 套可切换配色来自固定的 apikey-vault 设计快照；支持亮色、暗色和跟随系统。底栏为 **MCP / 书源 / 技能 / 验证 / 日志**。
 
 验证中心运行时提供圆形 **M** 字悬浮球：可自由拖动到任意位置，靠近屏幕左右边缘松手时自动吸附半隐（点按展开）；人工验证气泡弹出时自动贴边完整显示，不打断当前操作。
 
 ## 连接 MCP
 
-MCP 页分三个页签：**连接**（服务开关 / 接入信息 / 健康检查）、**设置**（端口、令牌、阅读 Web 服务、书源类型、外观）、**前置条件**（通知、电池策略、端口占用等）。
+MCP 页显示服务状态、接入端点及真实工具目录；右上角**设置**打开端口、UA、阅读同步、书源类型与外观设置。
 
-1. 底栏 **MCP** →「连接」页签开启服务（默认端口 **58823**）
-2. 「接入信息」卡按你的客户端界面形态给出对应填法，每一项都可一键复制：
+1. 底栏 **MCP** → **启动服务**（默认端口 **58823**）
+2. 使用端点旁的复制按钮、**复制令牌**或**复制客户端配置**：
    - **服务器链接（所有客户端）**：`http://127.0.0.1:58823/mcp`；客户端不在同一台设备时切「局域网」，使用 `http://<局域网IP>:58823/mcp`
    - 客户端有 **Token / Bearer Token 输入框** → 只粘贴令牌本身，不要加 `Bearer` 前缀
    - 客户端只有 **自定义请求头（名称 + 值）两个框** → 名称填 `Authorization`，值填 `Bearer <令牌>`（名称填成 `Bearer` 是常见错误，会 401）
    - 客户端没有任何鉴权输入 → 建议换用支持鉴权的客户端；不要为局域网或远程接入关闭令牌校验
-   - **「配置文件客户端（JSON）」折叠卡**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制，跟随连接模式
+   - **复制客户端配置**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制，跟随连接模式；令牌只写入系统剪贴板，不回显在页面
 3. 鉴权统一使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
 4. 调用 `get_app_info` 可查看版本、运行能力及构建标识 `buildRevision`（源码提交标识）与 `buildType`（`debug`/`release`）。反馈问题时请提供版本和构建标识，不要提交访问令牌或未脱敏日志。
 

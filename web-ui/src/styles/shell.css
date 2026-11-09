@@ -1,0 +1,110 @@
+/* =========================================================================
+   shell.css — 应用外壳（页头固定、body 滚动、底部导航让位）
+   只补 5 页控制台需要的骨架；配色/圆角/玻璃/spring 全部来自 app.css + v8/v9/v10。
+
+   Insets 策略：
+   - Android 宿主「已经原生避让」后下发 studio:insets 0/0/0，App 不再二次相加；
+   - 浏览器（无宿主）用 env(safe-area-inset-*) 兜底，见 app.css 的 --safe-*。
+   ========================================================================= */
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+}
+
+#app {
+  min-height: 100dvh;
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100dvh;
+  isolation: isolate;
+}
+
+/* 页头：吸顶玻璃条，内容滚动时保持可见 */
+.shell-head {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: calc(12px + var(--safe-top)) max(18px, var(--safe-left)) 12px
+    max(18px, var(--safe-right));
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+}
+
+.shell-head .app-title {
+  font-size: clamp(19px, 5.2vw, 24px);
+  letter-spacing: -0.035em;
+}
+
+.shell-head .app-sub {
+  margin-top: 2px;
+  font-size: 11.5px;
+}
+
+.shell-head .head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+/* 页面主体：页头下方可滚动，底部给悬浮导航留出空间 */
+.page-body {
+  padding-top: 16px;
+  padding-bottom: calc(96px + var(--safe-bottom));
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 验证隔离页打开时：主 Web 只留 96 CSSpx 工具栏区（宿主 native 已在顶部 96dp 之下放独立 WebView）。
+   本页不创建 iframe，只把自己的内容收进工具栏高度，避免与原生验证页抢空间。 */
+.app-shell.verify-open .page-body {
+  padding-top: 4px;
+}
+
+.app-shell.verify-open .tabbar {
+  display: none;
+}
+
+@media (min-width: 720px) {
+  .shell-head {
+    padding-left: max(24px, var(--safe-left));
+    padding-right: max(24px, var(--safe-right));
+  }
+}
+
+/* 键盘弹起：底部导航隐藏（v10 已定义），页头保持，保存按钮不被遮挡 */
+html[data-keyboard='1'] .page-body {
+  padding-bottom: calc(24px + var(--safe-bottom));
+}
+
+/* Console alerts contain a title, explanation and action, not one inline row. */
+.page > .banner {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.page > .banner > strong { white-space: nowrap; }
+.page > .banner > p { margin: 0; }
+.page > .banner > .actions { margin-top: 0; }

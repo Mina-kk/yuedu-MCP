@@ -12,7 +12,7 @@
 
 ## 调试构建与测试
 
-本重构分支默认使用 GitHub-hosted Actions（`ubuntu-latest`）运行构建。服务器资源受限时不要在本机执行下述重型命令：推送 `refactor/rust-vue-reader-semantics` 自动触发，或 `gh workflow run ci.yml --ref refactor/rust-vue-reader-semantics` 手动触发。CI 将 Python 契约、Rust/Vue 与 Android 单测分开执行，全部成功后才打包并校验 APK，产物保存在对应 run 的 Artifacts，不自动发布 Release。
+本重构分支支持 GitHub-hosted Actions（`ubuntu-latest`）与本机受限构建。资源受限服务器须把整个任务树放入共享 CPU/内存预算，串行执行 Gradle 与模拟器，不能只限制 JVM 堆；本次本机验收使用整机 CPU/内存 90% 干预阈值。CI 将 Python 契约、Rust/Vue 与 Android 单测分开执行，全部成功后才打包并校验 APK，产物保存在对应 run 的 Artifacts，不自动发布 Release。
 
 Debug APK 使用 CI 调试签名，不等于正式发布签名，不能据此承诺覆盖既有正式安装或保留其数据。以下手动命令供具有足够资源的开发机使用。
 
@@ -72,7 +72,7 @@ python scripts/reconcile_corpus.py \
 ./gradlew :app:liveTestDebug
 ```
 
-当前站点测试需要自行准备 `work/zjread/zjread_js_lib.js` 和 `work/zjread/rhino_probe.js`；这些本地材料不随仓库提供。显式执行时缺少材料会报错。运行前应审查脚本，并确认允许访问对应站点。
+站点测试需要自行准备对应材料（如 `work/zjread/zjread_js_lib.js`、`work/zjread/rhino_probe.js`）；这些材料不随仓库提供。五源测试使用固定原文与 manifest，快照回放另标 `PublicSourceSnapshotReplayTest`，回放不能当新公网或阅读端通过。显式执行时缺少材料会报错。运行前应审查脚本，并确认允许访问对应站点。
 
 联网测试单独生成报告至 `app/build/reports/tests/liveTestDebug/`，不复用旧测试结果。类别过滤不是网络沙箱；`--offline` 只限制 Gradle 依赖下载，不会阻止测试代码发起 HTTP 请求。
 

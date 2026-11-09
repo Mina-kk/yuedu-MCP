@@ -24,6 +24,8 @@ package com.mina.legadostudio.runtime
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import io.legado.app.model.analyzeRule.RuleAnalyzer
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -52,8 +54,15 @@ object ReaderRequestTemplate {
     /** 上游 AnalyzeUrl.pagePattern */
     private val PAGE_PATTERN = Pattern.compile("<(.*?)>")
 
-    /** 上游 queryEncoder：RFC3986 UNRESERVED + 保留 `!$%&()*+,/:;=?@[]^`{|}` */
-    private val QUERY_SAFE = "!$%&()*+,/:;=?@[]^`{|}~-._".toSet()
+    /**
+     * 上游 `queryEncoder`（AnalyzeUrl.kt 819-820）：
+     * `RFC3986.UNRESERVED.orNew(PercentCodec.of("!$%&()*+,/:;=?@[]^`{|}"))`。
+     * `RFC3986.UNRESERVED` 是 hutool 的 `a-zA-Z0-9-._~`，`orNew` 再把子分隔符/分隔符并进保留集，
+     * 两者必须**合并**：旧实现只写了 `orNew` 那半边，ASCII 字母数字被当成需要编码的字符，
+     * `?q=剑 来&p=1` 会输出成 `?%71=%E5%89%91...&%70=%31`。
+     */
+    private val QUERY_SAFE: Set<Char> =
+        (('a'..'z') + ('A'..'Z') + ('0'..'9') + "-._~!$%&()*+,/:;=?@[]^`{|}".toList()).toSet()
 
     // ------------------------------------------------------------------ step 1
 
@@ -77,7 +86,7 @@ object ReaderRequestTemplate {
                 }
             }
             val script = matcher.group(2) ?: matcher.group(1) ?: ""
-            result = evalJs(script, result)?.toString().orEmpty()
+            result = evalJs(script, result).toString()
             start = matcher.end()
         }
         if (!matched) return ruleUrl
@@ -110,12 +119,16 @@ object ReaderRequestTemplate {
      * 上游 `AnalyzeUrl.replaceKeyPageJs`（216-243）：**先**替换 `{{}}`，**再**替换 `<a,b,c>` 分页段。
      * 顺序不能反：`{{page < 3 ? 1 : 2}}` 里的 `<` 会被分页正则误当成段首。
      *
-     * `{{}}` 用花括号平衡扫描（[RuleAnalyzerChomp]），JS 结果是整型 Double 时按 `%.0f` 输出。
+     * 复用上游 RuleAnalyzer.innerRule(String, String) 分隔重载，不另造括号平衡规则。
+     * JS 结果是整型 Double 时按 `%.0f` 输出；整段替换为空时保留原始规则（上游 229）。
      */
     fun replaceTemplates(template: String, page: Int?, evalJs: (String, Any?) -> Any?): String {
         var ruleUrl = template
         if (ruleUrl.contains("{{") && ruleUrl.contains("}}")) {
-            ruleUrl = replaceBalancedTemplates(ruleUrl, evalJs)
+            val replaced = RuleAnalyzer(ruleUrl).innerRule("{{", "}}") {
+                formatJsResult(evalJs(it, null))
+            }
+            if (replaced.isNotEmpty()) ruleUrl = replaced
         }
         if (page != null) {
             val matcher = PAGE_PATTERN.matcher(ruleUrl)
@@ -133,65 +146,6 @@ object ReaderRequestTemplate {
         return ruleUrl
     }
 
-    /**
-     * 花括号平衡扫描替换 `{{expr}}`（上游 `RuleAnalyzer.innerRule("{{","}}")`）。
-     * 支持嵌套 `{}`、引号内的括号；不平衡的 `{{` 当普通文本跳过。
-     */
-    private fun replaceBalancedTemplates(text: String, evalJs: (String, Any?) -> Any?): String {
-        val out = StringBuilder(text.length)
-        var i = 0
-        while (i < text.length) {
-            val start = text.indexOf("{{", i)
-            if (start < 0) {
-                out.append(text, i, text.length)
-                break
-            }
-            out.append(text, i, start)
-            val end = findBalancedEnd(text, start + 2)
-            if (end < 0) {
-                // 不平衡：`{{` 只是普通文本，继续往后找
-                out.append(text, start, start + 2)
-                i = start + 2
-                continue
-            }
-            val expression = text.substring(start + 2, end)
-            out.append(formatJsResult(evalJs(expression, null)))
-            i = end + 2
-        }
-        return out.toString()
-    }
-
-    /** 从 [from] 起找与 `{{` 配对的 `}}`，返回 `}}` 的首字符下标；不平衡返回 -1。 */
-    private fun findBalancedEnd(text: String, from: Int): Int {
-        var depth = 1
-        var inSingle = false
-        var inDouble = false
-        var i = from
-        while (i < text.length) {
-            val c = text[i]
-            if (c == '\\') {
-                i += 2
-                continue
-            }
-            if (c == '\'' && !inDouble) inSingle = !inSingle
-            else if (c == '"' && !inSingle) inDouble = !inDouble
-            if (!inSingle && !inDouble) {
-                if (c == '{' && i + 1 < text.length && text[i + 1] == '{') {
-                    depth++
-                    i += 2
-                    continue
-                }
-                if (c == '}' && i + 1 < text.length && text[i + 1] == '}') {
-                    depth--
-                    if (depth == 0) return i
-                    i += 2
-                    continue
-                }
-            }
-            i++
-        }
-        return -1
-    }
 
     /** 上游 `replaceKeyPageJs` 的 JS 结果格式化：整型 Double 输出 `%.0f`，其余 `toString()`。 */
     fun formatJsResult(value: Any?): String = when (value) {
@@ -223,6 +177,11 @@ object ReaderRequestTemplate {
     /**
      * 完整 URL 解析：`analyzeJs` → `replaceTemplates` → 切选项 → 绝对化 → `option.js` → 编码。
      *
+     * 上游 `AnalyzeUrl.analyzeUrl` 248-296：`option.js` 求值时 `baseUrl` 已归一为站点根
+     * （`NetworkUtils.getBaseUrl(url)`，形如 `https://site.test/`——带尾斜杠），`result` 才是完整 url。
+     * 旧实现把调用方传入的 `sourceUrl` 原样当 baseUrl（可能是 `https://site.test` 无尾斜杠、
+     * 也可能是整页地址），拼出来的地址会多/少斜杠，与阅读端不一致。
+     *
      * @param sourceUrl 书源 `bookSourceUrl`（相对路径基准）
      * @param page 分页号（`<a,b,c>` 段与 `{{page}}`）
      */
@@ -235,13 +194,42 @@ object ReaderRequestTemplate {
         val afterJs = analyzeJs(template, evalJs)
         val afterTemplates = replaceTemplates(afterJs, page, evalJs)
         val split = splitUrlOption(afterTemplates)
+        // 上游 292-296：option.js 在 URL 绝对化之后执行，result 是完整 url；
+        // 其 JS 作用域里的 baseUrl 是站点根（带尾斜杠）。
+        return resolveUrlFromSplit(split, sourceUrl) { js, _, absolute -> evalJs(js, absolute) }
+    }
+
+    /**
+     * 与 [resolveUrl] 相同顺序，但把 `option.js` 的求值作用域准备交给调用方：
+     * [evalOptionJs] 收到「站点根 baseUrl（带尾斜杠）」与「完整 url」，调用方据此把
+     * `baseUrl` 注入 JS 绑定（上游 AnalyzeUrl.evalJS 的 `bindings["baseUrl"] = baseUrl`）。
+     */
+    fun resolveUrlWithOptionScope(
+        template: String,
+        sourceUrl: String,
+        page: Int?,
+        evalJs: (String, Any?) -> Any?,
+        evalOptionJs: (script: String, siteBaseUrl: String, absoluteUrl: String) -> Any?,
+    ): String {
+        val afterJs = analyzeJs(template, evalJs)
+        val afterTemplates = replaceTemplates(afterJs, page, evalJs)
+        return resolveUrlFromSplit(splitUrlOption(afterTemplates), sourceUrl, evalOptionJs)
+    }
+
+    /**
+     * [resolveUrl] 的后半段：已切好的 [SplitUrl] → 绝对化 → `option.js` → query 编码。
+     * 调用方已经算过模板时用它，避免重复执行 `@js:` 段（重复求值会重复触发网络/日志）。
+     */
+    fun resolveUrlFromSplit(
+        split: SplitUrl,
+        sourceUrl: String,
+        evalOptionJs: (script: String, siteBaseUrl: String, absoluteUrl: String) -> Any?,
+    ): String {
         var absolute = absoluteUrl(sourceUrl, split.urlPart)
         val option = split.optionText?.let { parseOptionObject(it) }
-        // 上游 292-296：option.js 在 URL 绝对化之后执行，result 是完整 url；
-        // 其 JS 作用域里的 baseUrl 已归一为站点根（NetworkUtils.getBaseUrl(url)），
-        // 由调用方在 evalJs 闭包里用 siteBaseUrl() 提供（见 ReaderRuntimeContext）。
         option?.get("js")?.takeIf { it.isJsonPrimitive }?.asString?.let { js ->
-            evalJs(js, absolute)?.toString()?.takeIf { it.isNotBlank() }?.let { absolute = it }
+            val siteBase = siteBaseUrl(absolute).takeIf { it.isNotEmpty() } ?: siteBaseUrl(sourceUrl)
+            evalOptionJs(js, siteBase, absolute)?.toString()?.takeIf { it.isNotBlank() }?.let { absolute = it }
         }
         return encodeRequestUrl(absolute, option?.let { UrlOption.from(it) } ?: UrlOption())
     }
@@ -272,7 +260,7 @@ object ReaderRequestTemplate {
     /** 上游 `NetworkUtils.getBaseUrl(url)`：`scheme://host[:port]/`；非法 URL 返回空串。 */
     fun siteBaseUrl(url: String): String {
         val parsed = url.toHttpUrlOrNull() ?: return ""
-        return "${parsed.scheme}://${parsed.host}${if (parsed.port != parsed.defaultPort) ":${parsed.port}" else ""}/"
+        return "${parsed.scheme}://${if (parsed.host.contains(':')) "[${parsed.host}]" else parsed.host}${if (parsed.port != HttpUrl.defaultPort(parsed.scheme)) ":${parsed.port}" else ""}"
     }
 
     // ------------------------------------------------------------------ 编码
@@ -299,7 +287,19 @@ object ReaderRequestTemplate {
     }
 
     /** 上游 `encodedQuery`：query 里出现 `%xx` 即认为调用方已自行编码。 */
-    fun looksEncoded(query: String): Boolean = PERCENT_ESCAPE.containsMatchIn(query)
+    fun looksEncoded(query: String): Boolean = alreadyEncoded(query, QUERY_SAFE - '%')
+
+    private fun alreadyEncoded(value: String, safe: Set<Char>): Boolean {
+        var i = 0
+        while (i < value.length) {
+            if (value[i] in safe) { i++; continue }
+            if (value[i] == '%' && i + 2 < value.length && value[i + 1].digitToIntOrNull(16) != null && value[i + 2].digitToIntOrNull(16) != null) {
+                i += 3; continue
+            }
+            return false
+        }
+        return true
+    }
 
     private val PERCENT_ESCAPE = Regex("%[0-9A-Fa-f]{2}")
 
@@ -309,6 +309,10 @@ object ReaderRequestTemplate {
     fun encodeParams(params: String, charset: String?, isQuery: Boolean): String {
         val checkEncoded = charset.isNullOrEmpty()
         val escape = charset == "escape"
+        if (isQuery && !escape) {
+            if (looksEncoded(params)) return params
+            return percentEncodeQuery(params, charset ?: "UTF-8")
+        }
         val sb = StringBuilder(params.length + 16)
         var pos = 0
         val len = params.length
@@ -326,10 +330,10 @@ object ReaderRequestTemplate {
                 key = params.substring(pos, eqOffset)
                 value = params.substring(eqOffset + 1, ampOffset)
             }
-            sb.append(encodeComponent(key, checkEncoded, escape))
+            sb.append(encodeComponent(key, checkEncoded, escape, charset))
             if (value != null) {
                 sb.append('=')
-                sb.append(encodeComponent(value, checkEncoded, escape))
+                sb.append(encodeComponent(value, checkEncoded, escape, charset))
             }
             pos = ampOffset + 1
         }
@@ -337,19 +341,21 @@ object ReaderRequestTemplate {
     }
 
     /** 上游 `StringBuilder.appendEncoded`（`charset == null` 分支即 UTF-8 + 已编码保留）。 */
-    private fun encodeComponent(value: String, checkEncoded: Boolean, escape: Boolean): String {
-        if (checkEncoded && looksEncoded(value)) return value
+    private fun encodeComponent(value: String, checkEncoded: Boolean, escape: Boolean, charset: String?): String {
+        if (checkEncoded && looksFormEncoded(value)) return value
         if (escape) return EncoderUtils.escape(value)
-        return rfc3986Encode(value)
+        return URLEncoder.encode(value, charset?.takeIf { it.isNotBlank() } ?: "UTF-8")
     }
 
     /**
      * 上游 `queryEncoder`（RFC3986.UNRESERVED.orNew(PercentCodec.of("!$%&()*+,/:;=?@[\\]^`{|}")))：
      * 保留 `=&` 等分隔符与子分隔符，空格编码为 `%20`（不是 `+`）。
      */
-    fun rfc3986Encode(value: String): String {
+    fun rfc3986Encode(value: String): String = percentEncodeQuery(value, "UTF-8")
+
+    private fun percentEncodeQuery(value: String, charset: String): String {
         val sb = StringBuilder(value.length + 8)
-        for (byte in value.toByteArray(Charsets.UTF_8)) {
+        for (byte in value.toByteArray(java.nio.charset.Charset.forName(charset))) {
             val ch = (byte.toInt() and 0xFF).toChar()
             if (ch in QUERY_SAFE && byte >= 0) {
                 sb.append(ch)
@@ -448,7 +454,8 @@ object ReaderRequestTemplate {
             if (!value.isJsonPrimitive) continue
             val part = value.asString
             if (part.isBlank()) continue
-            if (isAbsoluteUrl(part)) remote += part else inline += part
+            // Team SharedJsScope:238-256 only executes URL-valued map entries.
+            if (isAbsoluteUrl(part)) remote += part
         }
         return JsLibSpec(inline, remote)
     }
@@ -526,7 +533,7 @@ object ReaderRequestTemplate {
     fun redactUrl(url: String): String {
         val parsed = url.toHttpUrlOrNull() ?: return url.take(80)
         val path = parsed.encodedPath.take(60)
-        return "${parsed.scheme}://${parsed.host}${if (parsed.port != parsed.defaultPort) ":${parsed.port}" else ""}$path"
+        return "${parsed.scheme}://${parsed.host}${if (parsed.port != HttpUrl.defaultPort(parsed.scheme)) ":${parsed.port}" else ""}$path"
     }
 
     /** 远程 jsLib 单文件上限（与 HttpFetcher 文本上限同量级，防大文件撑爆内存） */
@@ -535,7 +542,8 @@ object ReaderRequestTemplate {
     // ------------------------------------------------------------- 其它小工具
 
     /** 上游 `NetworkUtils.encodedForm` 同义：出现 `%xx` 即视为已编码 */
-    fun looksFormEncoded(value: String): Boolean = looksEncoded(value)
+    fun looksFormEncoded(value: String): Boolean = alreadyEncoded(value,
+        (('a'..'z') + ('A'..'Z') + ('0'..'9') + "*-._".toList()).toSet())
 
     /** 把 `application/x-www-form-urlencoded` 的 body 按上游 encodeParams 编码 */
     fun encodeFormBody(body: String, charset: String?): String = encodeParams(body, charset, isQuery = false)

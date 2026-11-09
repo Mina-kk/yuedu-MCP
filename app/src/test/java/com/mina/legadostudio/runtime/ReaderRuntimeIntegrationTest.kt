@@ -1,6 +1,7 @@
 package com.mina.legadostudio.runtime
 
 import com.google.gson.Gson
+import com.mina.legadostudio.domain.BookSourceValidator
 import com.mina.legadostudio.network.HttpFetcher
 import io.legado.app.model.analyzeRule.LegadoRuleEngine
 import kotlinx.coroutines.runBlocking
@@ -39,7 +40,7 @@ class ReaderRuntimeIntegrationTest {
             val report = runtime().inspect(
                 LegadoRuntime.InspectRequest(
                     url = server.url("/list").toString(),
-                    rule = ".book<js>java.setContent(result); java.put('k', java.getString('a@text')); java.get('k') + '|' + src.length</js>",
+                    rule = "<js>java.put('k', java.getString('.book a@text')); java.get('k') + '|' + src.length</js>",
                 ),
             )
             val output = report.output
@@ -178,9 +179,9 @@ class ReaderRuntimeIntegrationTest {
         }
     }
 
-    @Test fun remoteJsLibWithoutFetcherFailsLoudlyNotSilently() = runBlocking {
+    @Test fun failedRemoteJsLibFailsLoudlyNotSilently() = runBlocking {
         MockWebServer().use { server ->
-            server.enqueue(MockResponse().setBody("<div class='book'><a class='n' href='/b/1'>书</a></div>"))
+            server.enqueue(MockResponse().setResponseCode(404).setBody("missing library"))
             server.start()
             val source = """
                 {
@@ -196,6 +197,29 @@ class ReaderRuntimeIntegrationTest {
             val error = report.exceptionOrNull()
             assertNotNull("远程 jsLib 未加载时必须失败：$report", error)
             assertTrue(error!!.message.orEmpty(), error.message.orEmpty().contains("jsLib"))
+        }
+    }
+
+    /**
+     * `java.setContent` 必须影响**同一条规则链的后续段**（上游 `bindings["java"] = this`：
+     * java 就是 AnalyzeRule 本身）。旧实现里 java.* 走另一个 ReaderRuntimeContext，
+     * setContent 只改 JS 自己的副本，链的下一段仍读原页面——两个方言。
+     */
+    @Test fun javaSetContentAffectsFollowingRuleChainSegment() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody("<div class='page'><span class='x'>原页面</span></div>"),
+            )
+            server.start()
+            val report = runtime().inspect(
+                LegadoRuntime.InspectRequest(
+                    url = server.url("/p").toString(),
+                    // 第一段 JS 把内容换成新页面；第二段 CSS 必须在新页面上取到「替换后」
+                    rule = "<js>java.setContent(\"<b class='x'>替换后</b>\"); java.getString('b.x@text')</js>",
+                ),
+            )
+            val first = report.output?.first.orEmpty()
+            assertEquals("java.setContent 后链上后续段必须读新内容（同一 session）", "替换后", first)
         }
     }
 }

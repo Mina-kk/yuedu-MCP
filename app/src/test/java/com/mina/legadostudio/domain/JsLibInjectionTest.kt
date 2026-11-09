@@ -141,10 +141,10 @@ class JsLibInjectionTest {
               "ruleSearch":{"bookList":".book","name":"a@text","bookUrl":"a@href"},
               "ruleToc":{"chapterList":"a"},"ruleContent":{"content":"#c@html"}
             }"""
-            val report = runtime().debug(source, "k")
-            assertTrue(report.lines.any { it.contains("jsLib") && it.contains("不加载") })
-            // 只允许 /search 一次请求，绝不能去抓 evil.js
-            assertEquals("/search?q=k", server.takeRequest().path)
+            val error = runCatching { runtime().debug(source, "k") }.exceptionOrNull()
+            assertTrue("裸 URL 不是上游远程库 map，不得静默跳过", error != null)
+            assertTrue(error!!.message.orEmpty().contains("jsLib"))
+            // 加载失败必须终止，不能跳过依赖继续搜索。
             assertNull(server.takeRequest(300, java.util.concurrent.TimeUnit.MILLISECONDS))
         }
     }

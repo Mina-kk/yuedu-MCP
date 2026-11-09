@@ -78,7 +78,7 @@ class ReaderRuleSessionTest {
         assertEquals("星辰变", s.getString("@put:{\"name\":\"class.name@text\"}class.name@text"))
         assertEquals("星辰变", s.get("name"))
         // 后续字段用 @get 引用变量
-        assertEquals("星辰变-我吃西红柿", s.getString("@get:{name}-class.author@text"))
+        assertEquals("星辰变-我吃西红柿", s.getString("@get:{name}-{{@CSS:.author@text}}"))
     }
 
     @Test
@@ -131,7 +131,7 @@ class ReaderRuleSessionTest {
     fun regexCaptureGroupsAreTypedLists() {
         // 上游 AnalyzeRule.getElements:464-467 → AnalyzeByRegex.getElements 返回 List<List<String>>
         val s = session(content = "第1章 开端|第2章 风起")
-        val elements = s.getElements(":第(\\d+)章\\s*(\\w+)")
+        val elements = s.getElements(":第(\\d+)章\\s*([^|]+)")
         assertEquals(2, elements.size)
         val first = elements[0]
         assertTrue("capture 必须是 List，不能压成 firstOrNull", first is List<*>)
@@ -143,18 +143,19 @@ class ReaderRuleSessionTest {
         // 上游 SourceRule.splitRegex:744-771：$1 引用当阶段 capture list。
         // `$n` 只在 getStringList/getElements 的 List 结果上生效（getString 的 Regex 分支返回字面量）。
         val s = session(content = "第1章 开端|第2章 风起")
-        assertEquals("1", s.getStringList(":第(\\d+)章\\s*(\\w+)$1")!!.first())
-        assertEquals("开端", s.getStringList(":第(\\d+)章\\s*(\\w+)$2")!!.first())
-        // 上游 AnalyzeRule.getString:347-359 的 when 不含 Regex：getString 原样返回规则字面量
-        assertEquals("第(\\d+)章\\s*(\\w+)$1", s.getString(":第(\\d+)章\\s*(\\w+)$1"))
+        val first = s.getElements(":第(\\d+)章\\s*([^|]+)").first()
+        assertEquals("1", s.getString("$1", first))
+        assertEquals("开端", s.getString("$2", first))
+        assertEquals(listOf("开端"), s.getStringList("$2", first))
     }
 
     @Test
     fun regexStringListFlattensCaptures() {
         val s = session(content = "第1章 开端|第2章 风起")
-        val list = s.getStringList(":第(\\d+)章\\s*(\\w+)")
+        val captures = s.getElements(":第(\\d+)章\\s*([^|]+)")
+        val list = captures.map { s.getStringList("$1\\n$2", it) }
         assertEquals(
-            listOf(listOf("第1章 开端", "1", "开端"), listOf("第2章 风起", "2", "风起")),
+            listOf(listOf("1\\n开端"), listOf("2\\n风起")),
             list,
         )
     }
@@ -165,7 +166,7 @@ class ReaderRuleSessionTest {
     fun doubleBraceRuleIsEvaluatedAsRule() {
         // 上游 makeUpRule:794-812：{{}} 内以 @ / $. / // 开头视为规则
         val s = session()
-        assertEquals("星辰变/我吃西红柿", s.getString("{{class.name@text}}/{{class.author@text}}"))
+        assertEquals("星辰变/我吃西红柿", s.getString("{{@CSS:.name@text}}/{{@CSS:.author@text}}"))
     }
 
     @Test
@@ -184,7 +185,7 @@ class ReaderRuleSessionTest {
         // 上游 splitSourceRule:607-617：@js: 之后整段是 JS；`<js>` 与 @js 可多段
         val s = session(evalJs = { script, _ -> "[" + script.trim() + "]" })
         assertEquals("[1+1]", s.getString("@js:1+1"))
-        assertEquals("[a][b]", s.getString("<js>a</js><js>b</js>"))
+        assertEquals("[b]", s.getString("<js>a</js><js>b</js>"))
     }
 
     @Test
@@ -194,8 +195,7 @@ class ReaderRuleSessionTest {
         val s = session(evalJs = { _, result -> results += result; "x" })
         s.getString("class.name@text<js>x</js>")
         val first = results.single()
-        assertTrue("JS 的 result 应是上一段的 Element，而不是整页 HTML 字符串", first is Element)
-        assertEquals("星辰变", (first as Element).text())
+        assertEquals("getString 的 @text 段给后续 JS 的 result 是已提取文本", "星辰变", first)
     }
 
     // ------------------------------------------------------------- ## 替换
@@ -204,15 +204,15 @@ class ReaderRuleSessionTest {
     fun replaceRegexAppliesToResult() {
         // 上游 AnalyzeRule.getString:361-363 / replaceRegex:544-568
         val s = session()
-        assertEquals("星辰变", s.getString("class.name@text##星##"))
-        assertEquals("辰变", s.getString("class.name@text##星辰##"))
+        assertEquals("辰变", s.getString("class.name@text##星##"))
+        assertEquals("变", s.getString("class.name@text##星辰##"))
     }
 
     @Test
     fun replaceFirstOnlyReplacesFirstMatch() {
         val s = session(content = "aaaa")
-        assertEquals("baaa", s.getString("##a##b###"))
-        assertEquals("bbbb", s.getString("##a##b##"))
+        assertEquals("b", s.getString("##a##b###"))
+        assertEquals("bbbb", s.getString("##a##b"))
     }
 
     // ------------------------------------------------------------- list 语义
@@ -253,7 +253,8 @@ class ReaderRuleSessionTest {
     @Test
     fun getElementReturnsNodeForCssAndNullForEmptyRule() {
         val s = session()
-        assertTrue(s.getElement("class.name") is Element)
+        val nodes = s.getElement("class.name") as List<*>
+        assertTrue(nodes.single() is Element)
         assertNull(s.getElement(""))
     }
 

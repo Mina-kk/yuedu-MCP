@@ -95,8 +95,8 @@ internal object WebBridgeProtocol {
     const val REJECT_FOREIGN_ORIGIN = "origin_not_allowed"
     const val REJECT_SUB_FRAME = "not_main_frame"
 
-    /** Gson 不做 HTML 转义：回包是 JSON 数据，不是 HTML；转义交给 JSON 编码本身。 */
-    private val gson: Gson = GsonBuilder().disableHtmlEscaping().serializeNulls().create()
+    /** 保留 HTML 安全转义；JSON 解码后内容不变，避免信封被嵌入脚本时提前闭合。 */
+    private val gson: Gson = GsonBuilder().serializeNulls().create()
 
     fun isAllowedMethod(method: String?): Boolean = method != null && method in METHODS
 
@@ -130,6 +130,10 @@ internal object WebBridgeProtocol {
 
     fun parseRequest(raw: String?): Parsed {
         if (raw == null) return Parsed.Bad(null, BridgeError(ERR_BAD_REQUEST, "空消息"))
+        // 先按字符数粗筛：UTF-8 每字符最多 4 字节，字符数都超了就没必要再逐码点计数。
+        if (raw.length > MAX_REQUEST_CHARS) {
+            return Parsed.Bad(null, BridgeError(ERR_PAYLOAD_TOO_LARGE, "请求超过 ${MAX_REQUEST_BYTES / 1024}KB（UTF-8 字节）上限"))
+        }
         val bytes = utf8Length(raw)
         if (bytes > MAX_REQUEST_BYTES) {
             return Parsed.Bad(null, BridgeError(ERR_PAYLOAD_TOO_LARGE, "请求超过 ${MAX_REQUEST_BYTES / 1024}KB（UTF-8 字节）上限"))
@@ -194,19 +198,20 @@ internal object WebBridgeProtocol {
     }
 
     /**
-     * 宿主 → 前端事件信封：`{event, detail}`。
-     * 前端 `StudioBridge.onmessage` 统一按 `{event, detail}` 分发（与 RPC 回包 `{id,ok,...}` 区分）。
+     * 宿主 → 前端事件信封：`{event, payload}`。
+     * 前端 `StudioBridge.onmessage` 统一按 `{event, payload}` 分发（与 RPC 回包 `{id,ok,...}` 区分）；
+     * 只有 MainActivity 用 `window.dispatchEvent(CustomEvent)` 派发的路由事件走 `detail`（DOM 规定字段）。
      */
     fun event(name: String, payload: JsonElement?): String? {
         if (!isAllowedEvent(name)) return null
         val obj = JsonObject()
         obj.addProperty("event", name)
-        obj.add("detail", payload ?: JsonObject())
+        obj.add("payload", payload ?: JsonObject())
         return gson.toJson(obj)
     }
 
     /**
-     * `tools.call` 的结果：MCP CallToolResult 原形（`content` + `isError`）。
+     * `tools.call` 的结果：MCP CallToolResult 原形（`content` + `isError` + 可选 `structuredContent`）。
      * [contentJson] 来自 SDK 自身的序列化；无法解析时降级为一条错误文本，
      * 而不是把异常抛给前端（前端永远拿到可渲染结果）。
      */
@@ -441,7 +446,8 @@ internal object WebBridgeProtocol {
                 errors += "$key 必须是整数"
                 return null
             }
-            val value = runCatching { element.asInt }.getOrNull()
+            // 不能用 asInt：Gson 会把 1.5 截成 1、把越界大数截成 Int.MAX_VALUE，等于放行非法输入。
+            val value = exactInt(element)
             if (value == null) {
                 errors += "$key 必须是整数"
                 return null
@@ -467,6 +473,9 @@ internal object WebBridgeProtocol {
         val compact = bool("compact")
         val userAgent = str("userAgent")?.also { ua ->
             if (ua.trim().length !in MIN_UA..MAX_UA) errors += "userAgent 长度必须在 $MIN_UA..$MAX_UA"
+            if (runCatching { okhttp3.Headers.Builder().add("User-Agent", ua) }.isFailure) {
+                errors += "userAgent 包含非法 HTTP 头字符"
+            }
         }
         val bookSourceType = int("bookSourceType", -1..4)
         val readerBaseUrl = str("readerBaseUrl")?.also { raw ->
@@ -530,6 +539,21 @@ internal object WebBridgeProtocol {
     }
 
     // --- 小工具 -----------------------------------------------------------
+
+    /**
+     * 严格整数：只接受 JSON 整数字面量且落在 Int 范围内。
+     * `1.5`、`1e3`、`1.0` 这类浮点写法一律返回 null（不做截断/四舍五入）。
+     */
+    fun exactInt(element: JsonElement): Int? {
+        if (!element.isJsonPrimitive) return null
+        val primitive = element.asJsonPrimitive
+        if (primitive.isBoolean || primitive.isString) return null
+        val raw = runCatching { primitive.asString }.getOrNull() ?: return null
+        if (raw.isEmpty()) return null
+        val body = raw.removePrefix("-")
+        if (body.isEmpty() || body.any { it !in '0'..'9' }) return null
+        return raw.toIntOrNull()
+    }
 
     fun jsonArrayOf(block: JsonArray.() -> Unit): JsonArray = JsonArray().apply(block)
 

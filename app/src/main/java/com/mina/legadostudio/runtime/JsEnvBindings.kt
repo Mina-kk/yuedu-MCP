@@ -194,6 +194,9 @@ class SourceJsApi(
 ) {
     private val gson = Gson()
 
+    /** Fixed Team BookSource.getKey(): return the complete bookSourceUrl, including variant suffix. */
+    fun getKey(): String = anchor
+
     /** 官方 source.getVariable()：全部变量的 JSON 串 */
     fun getVariable(): String = gson.toJson(state)
 

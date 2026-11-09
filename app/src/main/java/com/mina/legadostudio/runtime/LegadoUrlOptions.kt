@@ -17,23 +17,14 @@ object LegadoUrlOptions {
     )
 
     fun parse(value: String): Parsed {
-        val marker = value.lastIndexOf(",{")
-        if (marker < 0) return Parsed(value.trim())
-        val rawUrl = value.substring(0, marker).trim()
-        val options = runCatching { JsonParser.parseString(value.substring(marker + 1)).asJsonObject }.getOrNull()
-            ?: return Parsed(value.trim())
-        val headers = options.getAsJsonObject("header")?.entrySet()?.associate { it.key to it.value.asString }
-            ?: options.getAsJsonObject("headers")?.entrySet()?.associate { it.key to it.value.asString }.orEmpty()
+        val split = ReaderRequestTemplate.splitUrlOption(value)
+        if (split.optionText == null) return Parsed(value.trim())
+        val option = ReaderRequestTemplate.parseOption(split.optionText)
         return Parsed(
-            url = rawUrl,
-            method = options.get("method")?.asString ?: "GET",
-            headers = headers,
-            body = options.get("body")?.takeUnless { it.isJsonNull }?.asString,
-            charset = options.get("charset")?.takeUnless { it.isJsonNull }?.asString,
-            bodyJs = options.get("bodyJs")?.takeUnless { it.isJsonNull }?.asString,
-            webView = options.get("webView")?.takeUnless { it.isJsonNull }?.asBoolean ?: false,
-            webJs = options.get("webJs")?.takeUnless { it.isJsonNull }?.asString,
-            webViewDelayTime = options.get("webViewDelayTime")?.takeUnless { it.isJsonNull }?.asLong ?: 800,
+            url = split.urlPart.trim(), method = option.method, headers = option.headers,
+            body = option.body, charset = option.charset, bodyJs = option.bodyJs,
+            webView = option.webView, webJs = option.webJs,
+            webViewDelayTime = option.raw?.get("webViewDelayTime")?.asLong ?: 800,
         )
     }
 

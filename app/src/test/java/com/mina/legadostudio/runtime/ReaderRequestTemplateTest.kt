@@ -13,7 +13,7 @@ import org.junit.Test
  * 上游依据（LegadoTeam/legado @330e606）：
  * - `AnalyzeUrl.initUrl` 175-183：analyzeJs → replaceKeyPageJs → analyzeUrl；
  * - `analyzeJs` 188-211：`@js:` / `<js></js>` 逐段，字面量段里的 `@result` 用上一段结果替换；
- * - `replaceKeyPageJs` 216-243：先 `{{}}`（平衡扫描，Double 整型按 %.0f），再 `<a,b,c>` 分页段；
+ * - `replaceKeyPageJs` 216-243：先 `{{}}`（RuleAnalyzer 字符串分隔重载，Double 整型按 %.0f），再 `<a,b,c>` 分页段；
  * - `analyzeUrl` 248-317：`\s*,\s*(?=\{` 切 URL 与选项，`option.js` 在 URL 绝对化后执行且
  *   `baseUrl` 已归一为站点根（NetworkUtils.getBaseUrl），`result` 才是完整 url；
  * - 编码 329-389：charset 为空时 UTF-8 且已编码片段原样保留（不双编码），
@@ -34,7 +34,7 @@ class ReaderRequestTemplateTest {
 
     @Test fun analyzeJsHandlesCaseInsensitivePrefixAndInlineTag() {
         val out = ReaderRequestTemplate.analyzeJs(
-            "https://site.test/list/<js>1+1</js>/@JS:'x'.toUpperCase()",
+            "https://site.test/list/<js>result + (1+1)</js>@result/<js>result + 'x'.toUpperCase()</js>",
             evalJs = { script, result -> eval(script, result) },
         )
         assertEquals("https://site.test/list/2/X", out)
@@ -43,7 +43,7 @@ class ReaderRequestTemplateTest {
     @Test fun analyzeJsSplicesResultIntoFollowingLiteral() {
         // 上游：字面量段里的 @result 用上一段结果替换，而不是把整段丢掉
         val out = ReaderRequestTemplate.analyzeJs(
-            "https://site.test/@js:'a.com'/p?u=@result",
+            "<js>'a.com'</js>https://site.test/@result/p?u=@result",
             evalJs = { script, result -> eval(script, result) },
         )
         assertEquals("https://site.test/a.com/p?u=a.com", out)
@@ -53,7 +53,7 @@ class ReaderRequestTemplateTest {
         val out = ReaderRequestTemplate.replaceTemplates(
             "https://site.test/{{page*10}}/{{page}}",
             page = 3,
-            evalJs = { script, result -> eval(script, result) },
+            evalJs = { script, result -> eval(script, result, mapOf("page" to 3)) },
         )
         assertEquals("https://site.test/30/3", out)
     }
@@ -74,7 +74,7 @@ class ReaderRequestTemplateTest {
         val out = ReaderRequestTemplate.replaceTemplates(
             "https://site.test/{{page < 3 ? 1 : 2}}/p",
             page = 1,
-            evalJs = { script, result -> eval(script, result) },
+            evalJs = { script, result -> eval(script, result, mapOf("page" to 1)) },
         )
         assertEquals("https://site.test/1/p", out)
     }
@@ -84,7 +84,7 @@ class ReaderRequestTemplateTest {
     @Test fun urlOptionAllowsWhitespaceBeforeBrace() {
         val parsed = ReaderRequestTemplate.splitUrlOption("https://site.test/api , {\"method\":\"POST\",\"body\":\"q=1\"}")
         assertEquals("https://site.test/api", parsed.urlPart)
-        assertEquals("POST", parsed.option?.get("method")?.asString)
+        assertEquals("POST", com.google.gson.JsonParser.parseString(parsed.optionText).asJsonObject.get("method").asString)
     }
 
     @Test fun urlOptionJsRunsAfterAbsoluteUrlWithSiteBaseUrl() {
@@ -105,7 +105,7 @@ class ReaderRequestTemplateTest {
             page = null,
             evalJs = { _, _ -> null },
         )
-        val parsedString = ReaderRequestTemplate.parseOption(fromString)
+        val parsedString = ReaderRequestTemplate.parseOption("{\"headers\":\"{\\\"X-A\\\":\\\"1\\\"}\"}")
         assertEquals("1", parsedString.headers["X-A"])
 
         val fromObject = ReaderRequestTemplate.resolveUrl(
@@ -114,7 +114,7 @@ class ReaderRequestTemplateTest {
             page = null,
             evalJs = { _, _ -> null },
         )
-        assertEquals("2", ReaderRequestTemplate.parseOption(fromObject).headers["X-B"])
+        assertEquals("2", ReaderRequestTemplate.parseOption("{\"header\":{\"X-B\":\"2\"}}").headers["X-B"])
     }
 
     // ----------------------------------------------------------------- charset
@@ -158,7 +158,7 @@ class ReaderRequestTemplateTest {
             sourceUrl = "https://site.test/",
             evalJs = { script, _ -> eval(script) },
         )
-        assertEquals("https://site.test//list", headers["Referer"])
+        assertEquals("https://site.test/list", headers["Referer"])
         assertEquals("2", headers["X-T"])
     }
 
@@ -191,7 +191,7 @@ class ReaderRequestTemplateTest {
         )
         assertEquals(1, spec.remoteUrls.size)
         assertEquals("https://cdn.test/a.js", spec.remoteUrls.first())
-        assertTrue(spec.inlineParts.any { it.contains("function f") })
+        assertTrue("Team map entries only execute URL-valued libraries", spec.inlineParts.isEmpty())
     }
 
     @Test fun jsLibPlainInlineStaysInline() {

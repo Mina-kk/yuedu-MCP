@@ -532,8 +532,14 @@ object McpSourceTools {
         newVersion: Boolean,
         all: List<ProjectEntity>,
         now: Long,
+        rawSource: String? = null,
     ): SaveDecision {
-        val finalJson = obj.toString()
+        // Keep caller bytes when no field patch/type injection changed the validated object.
+        // kotlinx preserves numeric lexemes: Gson equality may round adjacent huge integers.
+        fun tree(text: String) = kotlinx.serialization.json.Json.parseToJsonElement(text)
+        val canonicalTree = tree(obj.toString())
+        require(rawSource == null || tree(rawSource) == canonicalTree) { "原始书源与校验结果不一致" }
+        val finalJson = rawSource ?: obj.toString()
         val bookSourceUrl = obj.get("bookSourceUrl")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
         val name = obj.get("bookSourceName")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty().ifBlank { "未命名书源" }
         val siteUrl = bookSourceUrl // 落库 siteUrl = 原 bookSourceUrl（含 #标签/尾部/），不做 trimEnd 归并
@@ -558,7 +564,7 @@ object McpSourceTools {
             existingKey == bucketKey
         }
         val identical = sameIdentity.filter {
-            runCatching { JsonParser.parseString(it.sourceJson) }.getOrNull() == JsonParser.parseString(finalJson)
+            runCatching { tree(it.sourceJson) }.getOrNull() == canonicalTree
         }
         val conflicts = sameIdentity.filter { it !in identical }
 

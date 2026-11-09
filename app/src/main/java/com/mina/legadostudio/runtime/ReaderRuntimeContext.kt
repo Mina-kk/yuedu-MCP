@@ -48,18 +48,33 @@ class ReaderRuntimeContext(
     /** 规则解析诊断（字段级错误）汇出处 */
     private val onRuleError: ((Exception) -> Unit)? = null,
 ) {
+    /**
+     * 解析核：与 `java.*` 共用同一实例（上游 `java = this`）。
+     *
+     * `evalJs` 闭包里的 `src` 必须是**原始内容**（上游 `bindings["src"] = content`），
+     * 不能用 `session.content` 自引用——lambda 在 `session` 初始化表达式里，捕获的是尚未
+     * 赋值的字段，Kotlin 会把它当未初始化变量（或运行时读到 null）。这里用构造参数 [content]
+     * 与 [self] 延迟引用：`self` 在 `also` 里赋值后，闭包读到的才是当前 session 的实时内容
+     * （`java.setContent` 之后 `src` 应随之更新）。
+     */
+    private val self: ReaderRuleSession
+
+    init {
+        self = ReaderRuleSession(
+            content = content,
+            baseUrl = baseUrl,
+            engine = engine,
+            evalJs = { script, result -> evaluator(script, result, self.content) },
+            evalWebJs = evalWebJs?.let { web -> { script: String, result: Any? -> web(script, result) } },
+            getVariable = { key -> variables.get(key) },
+            putVariable = { key, value -> variables.put(key, value) },
+            bookNameProvider = bookName,
+            chapterTitleProvider = chapterTitle,
+        ).also { it.onError = onRuleError }
+    }
+
     /** 解析核：与 `java.*` 共用同一实例（上游 `java = this`） */
-    val session: ReaderRuleSession = ReaderRuleSession(
-        content = content,
-        baseUrl = baseUrl,
-        engine = engine,
-        evalJs = { script, result -> evaluator(script, result, session.content) },
-        evalWebJs = evalWebJs?.let { web -> { script: String, result: Any? -> web(script, result) } },
-        getVariable = { key -> variables.get(key) },
-        putVariable = { key, value -> variables.put(key, value) },
-        bookNameProvider = bookName,
-        chapterTitleProvider = chapterTitle,
-    ).also { it.onError = onRuleError }
+    val session: ReaderRuleSession get() = self
 
     /** 当前规则内容（`java.setContent` 会替换它，见上游 AnalyzeRule.setContent） */
     val content: Any? get() = session.content

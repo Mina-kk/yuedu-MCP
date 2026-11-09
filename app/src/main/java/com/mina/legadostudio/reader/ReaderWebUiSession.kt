@@ -244,9 +244,15 @@ class ReaderWebUiSession(
      * 排队中被取消的调用不会误伤别人正在用的会话。
      */
     private suspend fun <T> runCall(block: suspend () -> T): T {
+        if (com.mina.legadostudio.web.WebProxyBoundary.active) {
+            throw UiSessionException("VERIFICATION_ACTIVE", "请先关闭隔离验证页，再操作阅读 Web 页面；阅读同步接口不受影响")
+        }
         // lock() 在 try 之外：被取消时不会进入 finally，也就不会误放别人的锁
         mutex.lock()
         try {
+            if (com.mina.legadostudio.web.WebProxyBoundary.active) {
+                throw UiSessionException("VERIFICATION_ACTIVE", "隔离验证页已打开，请关闭后重试")
+            }
             return withTimeout(callTimeoutMs) {
                 try {
                     block()

@@ -128,4 +128,21 @@ class VerificationOverlayPageTest {
         assertTrue(VerificationOverlayPage.normalPage().length < VerificationOverlayPage.MAX_PAGE_CHARS)
         assertTrue(VerificationOverlayPage.alertPage("a".repeat(200)).length < VerificationOverlayPage.MAX_PAGE_CHARS)
     }
+
+    @Test fun alertPageBubbleFitsTheAlertWindow() {
+        // 提醒态窗口宽 ≤ 240dp、高 ≤ 110dp：气泡不能超过这两个上限，否则会被窗口裁掉。
+        assertTrue(VerificationOverlayPage.ALERT_BUBBLE_MAX_WIDTH_CSS_PX <= 240)
+        assertTrue(VerificationOverlayPage.ALERT_WINDOW_MAX_HEIGHT_CSS_PX <= 110)
+        val html = VerificationOverlayPage.alertPage("www.example.com", "登录确认")
+        assertTrue(html.contains("max-width:${VerificationOverlayPage.ALERT_BUBBLE_MAX_WIDTH_CSS_PX}px"))
+        assertTrue(html.contains("max-width:${VerificationOverlayPage.ALERT_LABEL_MAX_WIDTH_CSS_PX}px"))
+        // 球仍按 48px 绘制，窗口 52dp 时有 2dp 描边余量。
+        assertTrue(html.contains("width:${VerificationOverlayPage.BALL_CSS_PX}px"))
+    }
+
+    @Test fun normalPageHasNoBubble() {
+        val html = VerificationOverlayPage.normalPage()
+        assertFalse(html.contains("class=\"bubble\""))
+        assertTrue(html.contains("class=\"ball normal\""))
+    }
 }

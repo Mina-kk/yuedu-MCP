@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import AppIcon from './Icon.vue'
 
 // 设置：主题（本地立即生效）+ 运行时/阅读端字段（settings.save 整体校验后回读）。
@@ -11,9 +11,10 @@ const props = defineProps({
   coreStatus: { type: String, default: 'idle' },
   coreVersion: { type: String, default: '' },
   themeIdx: { type: Number, default: 0 },
-  mode: { type: String, default: 'auto' }
+  mode: { type: String, default: 'auto' },
+  saveSettings: { type: Function, default: null }
 })
-const emit = defineEmits(['close', 'pick-theme', 'pick-mode', 'save', 'retry', 'connect-web', 'exit'])
+const emit = defineEmits(['close', 'pick-theme', 'pick-mode', 'dirty', 'retry', 'connect-web', 'exit'])
 
 const SOURCE_TYPES = [
   [-1, '自动'],
@@ -38,6 +39,7 @@ const saving = ref(false)
 const error = ref('')
 const webEndpoint = ref('')
 const webToken = ref('')
+watch(form, () => emit('dirty', true), { deep: true, flush: 'sync' })
 
 function payload() {
   const out = {}
@@ -55,8 +57,10 @@ async function submit() {
   error.value = ''
   saving.value = true
   try {
-    const outcome = await emit('save', payload())
-    if (outcome && typeof outcome.then === 'function') await outcome
+    if (!props.saveSettings) throw new Error('保存接口不可用')
+    await props.saveSettings(payload())
+    form.readerToken = ''
+    emit('dirty', false)
   } catch (err) {
     error.value = (err && err.message) || '保存失败'
   } finally {
@@ -210,11 +214,6 @@ function connectWeb() {
   </div>
 </template>
 
-<script>
-// 保存失败必须让父组件拿到真实错误（emit 不返回 Promise），
-// 因此父组件通过 save 事件调用 store 并在失败时回写 error。
-export default { inheritAttrs: true }
-</script>
 
 <style scoped>
 .err-text {

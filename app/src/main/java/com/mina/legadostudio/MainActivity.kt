@@ -2,10 +2,10 @@ package com.mina.legadostudio
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -20,15 +20,22 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewAssetLoader
 import com.mina.legadostudio.service.McpService
-import com.mina.legadostudio.ui.theme.ThemeMode
-import com.mina.legadostudio.ui.theme.ThemeModeStore
 import com.mina.legadostudio.web.SafHost
 import com.mina.legadostudio.web.SafImportResult
 import com.mina.legadostudio.web.SafLauncher
 import com.mina.legadostudio.web.SafRequest
 import com.mina.legadostudio.web.StudioWebBridge
 import com.mina.legadostudio.web.VerificationBrowserView
+import com.mina.legadostudio.web.WebAppearance
+import com.mina.legadostudio.web.WebBridgePolicy
 import com.mina.legadostudio.web.WebBridgeProtocol
+import com.mina.legadostudio.web.WebProxyBoundary
+import com.mina.legadostudio.web.VerificationLifecycle
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * 全屏 WebView 宿主（不使用 Compose 业务 UI）。
@@ -37,28 +44,38 @@ import com.mina.legadostudio.web.WebBridgeProtocol
  * 所有业务控件（含验证工具栏、确认框、Toast 替代）都由 Web 渲染；本类只做：
  * - 加载 `https://appassets.androidplatform.net/assets/web/index.html`（WebViewAssetLoader，仅本地 assets）；
  * - 安装 [StudioWebBridge]（origin + main frame 双重校验）；
- * - Back 派发 `studio:back` 给前端；Insets 通过 `studio:insets` 事件与 CSS 变量下发；
+ * - Back 派发 `studio:back` 给前端；Insets 通过 `studio:insets` 事件下发；
  * - 隔离验证页的创建/关闭（toolbar 由前端覆盖，宿主只发 `studio:verification-browser` 事件）。
+ *
+ * 布局与 insets（`.tasks/host-remote-build.md` 第 6/8 条）：
+ * - 系统栏/键盘由**原生 padding** 让出（只算一次），因此下发给前端的 insets 是 0；
+ *   原始 px 与 density 只作信息字段，前端不得再加一次；
+ * - 验证页打开时，主 WebView 保持原尺寸（不 resize，避免底部弹层错位），
+ *   隔离页从顶部 [VERIFICATION_TOOLBAR_DP] 下方开始，Vue 渲染的 toolbar 始终可点。
  */
 class MainActivity : ComponentActivity() {
 
     private lateinit var root: FrameLayout
     private lateinit var webView: WebView
     private var bridge: StudioWebBridge? = null
-    private var verificationView: VerificationBrowserView? = null
+    private val verificationLifecycle = VerificationLifecycle<VerificationBrowserView>()
+    private val verificationView: VerificationBrowserView? get() = verificationLifecycle.resource
     private var verificationSessionId: String? = null
     private lateinit var saf: SafLauncher
     private var unsupportedShown = false
+
+    /** 主页面是否已 load 完成；未完成时路由先排队（事件不能打空）。 */
+    private var webReady = false
+    private var pendingRoute: String? = null
+
     /** 验证页观察地址回写用的后台作用域（Activity 销毁即取消）。 */
-    private val ioScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
-    )
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** 系统 Back 交给前端处理（先关弹层/草稿，再根页退出确认）。 */
     private val backCallback = object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
             // 验证页打开时，Back 先退回主 Web 控制台（关闭由前端 toolbar 或本回调触发）。
-            if (verificationView != null) {
+            if (verificationLifecycle.busy) {
                 closeVerificationBrowser(reason = "back")
                 return
             }
@@ -83,13 +100,14 @@ class MainActivity : ComponentActivity() {
         }
         setContentView(root)
 
+        // SAF 必须在 onCreate 内注册（registerForActivityResult 生命周期约束）。
         saf = SafLauncher(this).also { it.register() }
 
         bridge = StudioWebBridge(
             activity = this,
             onExit = { finish() },
             onRequestCloseVerificationBrowser = { closeVerificationBrowser(reason = "host") },
-            onThemeApplied = { dark -> applySystemBars(dark) },
+            onThemeApplied = { dark, _ -> applySystemBars(dark) },
         ).also { created ->
             created.attachSaf(object : SafHost {
                 override suspend fun export(request: SafRequest.Export) {
@@ -102,6 +120,10 @@ class MainActivity : ComponentActivity() {
                 }
             })
             created.setVerificationBrowserOpener { session -> showVerificationBrowser(session.id, session.url) }
+            // 完成会话时取隔离页当前真实观察地址（没有打开中的页面则返回 null，由 bridge 回落）。
+            created.setObservedUrlProvider { sessionId ->
+                verificationView?.takeIf { verificationSessionId == sessionId }?.lastObservedUrl
+            }
         }
 
         onBackPressedDispatcher.addCallback(this, backCallback)
@@ -115,9 +137,10 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun buildWebView() {
+        // 标准 AssetsPathHandler 只能挂 Context 根（/assets/），因此挂到 /assets/ 再由
+        // shouldInterceptRequest 只放行 /assets/web/ 子树，其余一律 404，绝不回 null 去联网。
         val assetLoader = WebViewAssetLoader.Builder()
-            // 只服务 app 内 assets/web/：不挂 AssetsPathHandler 根目录，避免把 skills/corpus 暴露给页面。
-            .addPathHandler("/assets/web/", WebViewAssetLoader.AssetsPathHandler(this, "web"))
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
         webView = WebView(this).apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -141,18 +164,30 @@ class MainActivity : ComponentActivity() {
         }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-                assetLoader.shouldInterceptRequest(request.url)
+                when (WebBridgePolicy.localResourceDecision(request.url?.toString())) {
+                    WebBridgePolicy.LocalResource.Serve -> assetLoader.shouldInterceptRequest(request.url)
+                        ?: DENY_RESPONSE
+                    WebBridgePolicy.LocalResource.Deny -> DENY_RESPONSE
+                }
 
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                // 主页面只允许 appassets origin 内导航；外链一律不接管（不打开外部浏览器，
-                // 避免把用户带离宿主后无路可回）。
-                val url = request.url
-                return url.scheme != "https" || url.host != "appassets.androidplatform.net"
-            }
+            @Deprecated("兼容旧 WebView")
+            override fun shouldInterceptRequest(view: WebView, url: String?): WebResourceResponse? =
+                when (WebBridgePolicy.localResourceDecision(url)) {
+                    WebBridgePolicy.LocalResource.Serve -> url?.let { assetLoader.shouldInterceptRequest(android.net.Uri.parse(it)) }
+                        ?: DENY_RESPONSE
+                    WebBridgePolicy.LocalResource.Deny -> DENY_RESPONSE
+                }
+
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                WebBridgePolicy.hostNavigationDecision(request.url?.toString()) != WebBridgePolicy.NavigationDecision.Allow
 
             @Deprecated("兼容旧 WebView")
             override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean =
-                !url.startsWith(WebBridgeProtocol.TRUSTED_ORIGIN)
+                WebBridgePolicy.hostNavigationDecision(url) != WebBridgePolicy.NavigationDecision.Allow
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                notifyWebReady()
+            }
         }
         webView.webChromeClient = object : android.webkit.WebChromeClient() {
             // 主页面同样不弹原生对话框：JS alert/confirm/prompt 一律拒绝并记录。
@@ -188,14 +223,26 @@ class MainActivity : ComponentActivity() {
 
     // --- Insets ----------------------------------------------------------
 
+    /**
+     * 原生 padding 让出系统栏 + 键盘（只算一次），随后把「留给 Web 的 insets」按 0 下发，
+     * 防止前端再算一次导致双倍留白；raw px / density 仅作信息字段。
+     */
     private fun installInsetsListener() {
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
             val bottom = maxOf(bars.bottom, ime)
-            // 原生只负责给 Web 留出安全区（内容不被系统栏/键盘压住）；具体布局由 Vue 决定。
             view.setPadding(bars.left, bars.top, bars.right, bottom)
-            bridge?.emitInsets(bars.top, bars.bottom, ime)
+            val density = resources.displayMetrics.density
+            bridge?.emitInsets(
+                top = 0,
+                bottom = 0,
+                ime = 0,
+                rawTop = bars.top,
+                rawBottom = bars.bottom,
+                rawIme = ime,
+                density = density,
+            )
             insets
         }
         ViewCompat.requestApplyInsets(root)
@@ -210,10 +257,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyThemeFromStore() {
-        val mode = ThemeModeStore(this).load()
-        val systemDark = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
-            android.content.res.Configuration.UI_MODE_NIGHT_YES
-        applySystemBars(ThemeMode.resolveDark(mode, systemDark))
+        val state = WebAppearance.load(this)
+        val systemDark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        applySystemBars(WebAppearance.isDark(state.mode, systemDark))
     }
 
     // --- 隔离验证页 -------------------------------------------------------
@@ -221,10 +268,18 @@ class MainActivity : ComponentActivity() {
     /**
      * 在宿主内嵌隔离 WebView。toolbar（关闭/完成）由主 Web UI 覆盖渲染：
      * 这里只创建无 bridge 的页面，并把状态变化以 `studio:verification-browser` 事件通知前端。
+     *
+     * 布局：主 WebView **保持原尺寸**（不 resize，否则底部弹层会错位）；隔离页从顶部
+     * [VERIFICATION_TOOLBAR_DP] 之下开始，Vue 的顶部控制栏（96 CSS px）始终可见可点。
      */
-    private fun showVerificationBrowser(sessionId: String, url: String) {
+    private suspend fun showVerificationBrowser(sessionId: String, url: String) {
         if (verificationView != null && verificationSessionId == sessionId) return
-        closeVerificationBrowser(reason = "replace")
+        check(!isFinishing && !isDestroyed) { "宿主已关闭" }
+        val networkOwner = verificationLifecycle.begin()
+        try {
+        WebProxyBoundary.acquire(networkOwner) { (application as StudioApplication).readerWebUiSession.close() }
+        check(!isFinishing && !isDestroyed) { "宿主已关闭" }
+        check(verificationLifecycle.canAttach(networkOwner)) { "验证页打开已取消" }
         val view = VerificationBrowserView(
             context = this,
             sessionId = sessionId,
@@ -248,23 +303,50 @@ class MainActivity : ComponentActivity() {
             },
             onTitleObserved = { bridge?.emitVerificationBrowser("title", sessionId) },
         )
-        verificationView = view
+        // Track the unconfigured, blank view before any operation that can throw.
+        verificationLifecycle.attach(networkOwner, view)
         verificationSessionId = sessionId
+        val toolbarPx = verificationToolbarPx()
+        view.webView.layoutParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ).apply { topMargin = toolbarPx }
         root.addView(view.webView)
         view.load(url)
+        applyVerificationLayout()
         bridge?.emitVerificationBrowser("open", sessionId)
-        // 隔离页盖住主页面时，主页面仍可被前端覆盖层操作（toolbar）；这里不拦截触摸。
+        } catch (error: Exception) {
+            val closed = verificationLifecycle.finish(networkOwner, { it.destroy() }, WebProxyBoundary::release)
+            if (closed) verificationSessionId = null
+            throw error
+        }
+    }
+
+    /** 96dp 顶部控制栏高度（px）。 */
+    private fun verificationToolbarPx(): Int =
+        verificationToolbarPx(resources.displayMetrics.density)
+
+    /**
+     * 验证页打开时主 WebView 不 resize（保持底部弹层坐标正确），
+     * 只在关闭时恢复默认布局参数。旋转/insets 变化时重新应用 topMargin。
+     */
+    private fun applyVerificationLayout() {
+        val view = verificationView ?: return
+        val params = view.webView.layoutParams as? FrameLayout.LayoutParams ?: return
+        params.topMargin = verificationToolbarPx()
+        view.webView.layoutParams = params
     }
 
     private fun closeVerificationBrowser(reason: String) {
-        val view = verificationView ?: return
+        val view = verificationView
         val sessionId = verificationSessionId
-        verificationView = null
-        verificationSessionId = null
-        runCatching {
-            root.removeView(view.webView)
-            view.destroy()
+        val closed = verificationLifecycle.cancel({ it.destroy() }, WebProxyBoundary::release)
+        if (!closed) {
+            if (view != null) com.mina.legadostudio.mcp.StudioLog.add("验证页销毁未确认，保留网络隔离，请重启应用", "W", "verification")
+            return
         }
+        verificationSessionId = null
+        if (view == null) return
         bridge?.emitVerificationBrowser("close", sessionId)
         if (reason == "host") bridge?.emitVerificationBrowser("closed", sessionId)
     }
@@ -277,24 +359,37 @@ class MainActivity : ComponentActivity() {
         consumeRoute(intent)
     }
 
+    /* 主 WebView 加载完成：宿主此前排队的深链/通知路由现在可以安全派发。 */
+    private fun notifyWebReady() {
+        webReady = true
+        flushPendingRoute()
+    }
+
+    /** 路由只在页面 load 完成后派发；页面未就绪时先存起来，避免事件打空。 */
+    private fun flushPendingRoute() {
+        val route = pendingRoute ?: return
+        if (!webReady || unsupportedShown) return
+        pendingRoute = null
+        webView.evaluateJavascript(
+            "window.dispatchEvent(new CustomEvent('studio:route',{detail:${quoteJs(route)}}))",
+            null,
+        )
+    }
+
     /** 通知/深链带来的路由：交给前端处理（前端自己决定打开哪一页）。 */
     private fun consumeRoute(intent: Intent?) {
         val route = intent?.getStringExtra("route") ?: return
         intent.removeExtra("route")
-        webView.post {
-            if (unsupportedShown) return@post
-            webView.evaluateJavascript(
-                "window.dispatchEvent(new CustomEvent('studio:route',{detail:${quoteJs(route)}}))",
-                null,
-            )
-        }
+        pendingRoute = route
+        webView.post { flushPendingRoute() }
     }
 
     override fun onResume() {
         super.onResume()
+        webView.onResume()
         applyThemeFromStore()
         // 服务状态变化（前台服务启停/网络切换）由前端轮询 bootstrap，这里不重复推送。
-        if (McpService.running) bridge?.emit("studio:service", null)
+        if (McpService.running) bridge?.emit(WebBridgeProtocol.EVENT_SERVICE, null)
     }
 
     override fun onPause() {
@@ -302,19 +397,39 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // 系统深浅色切换：同步系统栏图标；验证页顶部区域按新 density 重算。
+        applyThemeFromStore()
+        applyVerificationLayout()
+    }
+
     override fun onDestroy() {
         ioScope.cancel()
         runCatching { webView.stopLoading() }
         runCatching { (webView.parent as? ViewGroup)?.removeView(webView) }
         runCatching { webView.destroy() }
-        verificationView?.destroy()
-        verificationView = null
+        closeVerificationBrowser(reason = "destroy")
+        // 先释放 SAF（结算在途文件操作），再释放桥（结算在途 RPC）。
+        runCatching { saf.release() }
         bridge?.release()
         bridge = null
         super.onDestroy()
     }
 
     companion object {
+        /** Vue 顶部控制栏高度（CSS px = dp）：验证页必须让出这块区域。 */
+        const val VERIFICATION_TOOLBAR_DP = 96
+
+        /** 验证页顶部区域高度（px）。density 变化（旋转/显示大小）时重算。 */
+        fun verificationToolbarPx(density: Float): Int =
+            (VERIFICATION_TOOLBAR_DP * density + 0.5f).toInt()
+
+        /** 非本地资源统一 404：空体、不联网。 */
+        internal val DENY_RESPONSE: WebResourceResponse by lazy {
+            WebResourceResponse("text/plain", "utf-8", 404, "Not Found", emptyMap(), null)
+        }
+
         private const val UNSUPPORTED_HTML = """
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
