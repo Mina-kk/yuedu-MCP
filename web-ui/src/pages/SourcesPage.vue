@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useDetailNavigation } from '../lib/detail-navigation.js'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { callToolParsed, formatTime, itemsOf, prettyJson, redactForDisplay } from '../lib/tools.js'
@@ -13,6 +14,7 @@ import { exportText, importText, sourceJsonSlices } from '../lib/files.js'
 //  - conflict 是已保留新版本的回执，不是写入被拒；按 projectId 回读，不重复写。
 const props = defineProps({ store: { type: Object, required: true } })
 const s = props.store.state
+const { pageRef, detailOpen, enterDetail, leaveDetail } = useDetailNavigation()
 
 const PAGE = 20
 const query = ref('')
@@ -22,6 +24,7 @@ const items = ref([])
 const total = ref(null)
 const hasMore = ref(false)
 const loading = ref(false)
+let openRevision = 0
 const listError = ref('')
 
 const editing = ref(null) // {projectId, bookSourceName, bookSourceUrl}
@@ -48,7 +51,8 @@ const dirty = computed(() => editing.value !== null && draft.value !== original.
 const coreReady = computed(() => s.coreStatus === 'loaded')
 
 watch(dirty, (v) => props.store.markPageDirty(v))
-onBeforeUnmount(() => props.store.markPageDirty(false))
+onBeforeUnmount(() => { openRevision += 1; props.store.markPageDirty(false) })
+watch(editing, (value, previous) => { if (!value && previous) leaveDetail() })
 
 onMounted(() => {
   load()
@@ -105,6 +109,8 @@ async function open(row) {
     })
     return
   }
+  const revision = ++openRevision
+  enterDetail()
   loadingSource.value = true
   saveError.value = ''
   analysis.value = null
@@ -113,6 +119,7 @@ async function open(row) {
   readbackDiff.value = null
   try {
     const parsed = await callToolParsed(props.store, 'get_source', { key: row.projectId })
+    if (revision !== openRevision) return
     if (parsed.threw) throw new Error(parsed.threw)
     if (parsed.isError) throw new Error(parsed.text || 'get_source 返回错误')
     editing.value = { projectId: row.projectId, name: row.bookSourceName, url: row.bookSourceUrl }
@@ -121,13 +128,24 @@ async function open(row) {
     original.value = parsed.raw
     props.store.markPageDirty(false)
   } catch (error) {
+    if (revision !== openRevision) return
     saveError.value = (error && error.message) || '读取书源失败'
   } finally {
-    loadingSource.value = false
+    if (revision === openRevision) loadingSource.value = false
   }
 }
 
+function handleBack() {
+  if (!detailOpen.value) return false
+  closeEditor()
+  return true
+}
+defineExpose({ handleBack })
+
 function closeEditor() {
+  if (saveBusy.value) return
+  openRevision += 1
+  loadingSource.value = false
   if (deleteBusy.value) return
   if (dirty.value) {
     props.store.confirmDialog({
@@ -146,6 +164,7 @@ function closeEditor() {
     return
   }
   editing.value = null
+  leaveDetail()
   props.store.markPageDirty(false)
 }
 
@@ -420,9 +439,14 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 </script>
 
 <template>
-  <section class="page">
+  <section ref="pageRef" class="page">
+    <div v-if="detailOpen" class="detail-navigation">
+      <button data-detail-back class="btn btn-ghost" type="button" @click="handleBack"><AppIcon name="chevron-left" :size="16" /><span>返回列表</span></button>
+    </div>
+    <p v-if="detailOpen && deleteBusy" role="status">正在删除并回读校验，请勿重复操作…</p>
+    <p v-if="detailOpen && deleteError" class="code-block err" role="alert">{{ deleteError }}</p>
     <fieldset class="source-controls" :disabled="deleteBusy" :aria-busy="deleteBusy">
-    <div class="section">
+    <div v-show="!detailOpen" class="section">
       <div class="section-head">
         <h3 class="section-title">书源</h3>
         <span class="section-sub">
@@ -507,6 +531,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
       </div>
     </div>
 
+    <p v-if="detailOpen && !editing && saveError" class="code-block err" role="alert">{{ saveError }}</p>
     <div v-if="loadingSource" class="section">
       <EmptyState title="正在读取书源原文" text="get_source" :busy="true" />
     </div>
@@ -545,6 +570,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         <button class="btn btn-ghost" type="button" @click="exportCurrent">
           <AppIcon name="download" :size="16" /><span>导出</span>
         </button>
+        <button class="btn btn-ghost danger" type="button" :disabled="saveBusy" @click="askDeleteIds([editing.projectId])">删除书源</button>
         <button class="btn btn-ghost" type="button" @click="closeEditor">
           <AppIcon name="x" :size="16" /><span>关闭</span>
         </button>
@@ -596,6 +622,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 </template>
 
 <style scoped>
+.detail-navigation { position: sticky; top: 0; z-index: 2; padding: 8px 0; background: var(--surface); }
 .source-list {
   display: flex;
   flex-direction: column;

@@ -63,6 +63,21 @@ afterEach(() => {
 })
 
 describe('App shell', () => {
+  it('系统返回先关闭当前工具详情而不是退出应用', async () => {
+    installStudioBridge(handlers({ 'tools.list': async () => ({ tools: [{ name: 'get_app_info', description: '应用信息', inputSchema: { type: 'object', properties: {} } }] }) }))
+    const wrapper = mount(App)
+    await flushPromises()
+    const tool = wrapper.findAll('button').find(b => b.text().includes('get_app_info'))
+    expect(tool).toBeTruthy()
+    await tool.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('返回列表')
+    dispatchHostEvent('studio:back', {})
+    await flushPromises()
+    expect(wrapper.find('[role="alertdialog"]').exists()).toBe(false)
+    expect(wrapper.findAll('button').some(b => b.text().includes('返回列表'))).toBe(false)
+    wrapper.unmount()
+  })
   it('底部导航包含 5 个真实页面并可切换', async () => {
     installStudioBridge(handlers())
     const wrapper = mount(App)

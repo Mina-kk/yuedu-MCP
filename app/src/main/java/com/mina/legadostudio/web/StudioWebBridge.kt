@@ -194,6 +194,7 @@ internal class StudioWebBridge(
         WebBridgeProtocol.M_CONNECTION_COPY -> connectionCopy(params)
         WebBridgeProtocol.M_TOOLS_LIST -> toolsList()
         WebBridgeProtocol.M_TOOLS_CALL -> toolsCall(params)
+        WebBridgeProtocol.M_LOGS_DELETE -> logsDelete(params)
         WebBridgeProtocol.M_VERIFICATION_LIST -> verificationList()
         WebBridgeProtocol.M_VERIFICATION_OPEN -> verificationOpen(params)
         WebBridgeProtocol.M_VERIFICATION_COMPLETE -> verificationComplete(params)
@@ -514,6 +515,84 @@ internal class StudioWebBridge(
             ReaderWebConfigStore(context).load()?.token,
         )
         return WebToolResultPolicy.forWeb(call.name, JsonParser.parseString(encoded), knownSecrets)
+    }
+
+    // --- logs.delete (trusted local bridge only; never an MCP tool) --------
+
+    private val logDeleteLock = Mutex()
+
+    private suspend fun logsDelete(params: JsonObject): JsonElement {
+        val request = WebBridgeProtocol.parseLogDelete(params)
+            ?: throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "需要 kind 和 1..100 个不重复的精确字符串 ids")
+        return logDeleteLock.withLock {
+            val dao = app.database.dao()
+            val store = object : WebBridgeProtocol.LogDeleteStore {
+                fun file(kind: String, id: String): java.io.File = when (kind) {
+                    "crash" -> java.io.File(app.filesDir, "crash-logs/$id")
+                    "snapshot" -> java.io.File(app.filesDir, "diagnostic-snapshots/$id.json")
+                    "capture" -> java.io.File(app.cacheDir, "captures/${id.removePrefix("cap:")}")
+                    else -> error("Not a file log")
+                }
+
+                // No links, alternate roots, or arbitrary persisted paths, even in a corrupted row.
+                fun safeFile(kind: String, id: String): Boolean {
+                    val target = file(kind, id)
+                    val root = if (kind == "capture") app.cacheDir else app.filesDir
+                    val expectedParent = java.io.File(root.canonicalFile, target.parentFile!!.name)
+                    val expectedTarget = java.io.File(expectedParent, target.name)
+                    if (target.parentFile!!.canonicalFile != expectedParent) return false
+                    if (target.canonicalFile != expectedTarget) return false
+                    return !target.exists() || expectedTarget.walkTopDown().all { it.canonicalFile == it.absoluteFile }
+                }
+
+                override suspend fun exists(kind: String, id: String): Boolean = when (kind) {
+                    "operation" -> dao.operationLog(id.toLong()) != null
+                    "http" -> dao.httpLog(id.toLong()) != null
+                    "capture" -> dao.countHttpLogsByContextId(id) > 0 || file(kind, id).exists()
+                    "crash" -> app.crashLogs.list().any { it.name == id } || file(kind, id).exists()
+                    "snapshot" -> dao.diagnosticSnapshot(id) != null || file(kind, id).exists()
+                    else -> error("Unknown log kind")
+                }
+
+                override suspend fun blockedReason(kind: String, id: String): String? {
+                    if (kind == "http" && dao.httpLog(id.toLong())?.contextId?.startsWith("cap:", ignoreCase = true) == true) {
+                        return "wrong_log_kind"
+                    }
+                    if (kind == "capture" && app.webViewCapture.isCaptureSessionActive(id)) return "active_capture"
+                    if (kind in setOf("capture", "crash", "snapshot") && !safeFile(kind, id)) return "unsafe_file"
+                    if (kind == "snapshot") {
+                        val row = dao.diagnosticSnapshot(id)
+                        if (row != null && java.io.File(row.path).absoluteFile != file(kind, id).absoluteFile) return "unsafe_file"
+                    }
+                    return null
+                }
+
+                override suspend fun delete(kind: String, id: String) {
+                    // Recheck immediately before touching data, not just at batch start.
+                    check(blockedReason(kind, id) == null)
+                    when (kind) {
+                        "operation" -> dao.deleteOperationLogs(listOf(id.toLong()))
+                        "http" -> dao.deleteHttpLogs(listOf(id.toLong()))
+                        "capture" -> {
+                            check(com.mina.legadostudio.network.CaptureActivity.deleteIfInactive(id) {
+                                dao.deleteCaptureSessionByContextId(id)
+                                val target = file(kind, id)
+                                if (target.exists()) check(target.deleteRecursively())
+                            }) { "active_capture" }
+                        }
+                        "crash" -> app.crashLogs.delete(listOf(id))
+                        "snapshot" -> {
+                            // Store.delete trusts row.path and ignores failed file deletion. Use the
+                            // fixed whitelist path and retain the DB row on file failure instead.
+                            val target = file(kind, id)
+                            if (target.exists()) check(target.isFile && target.delete())
+                            dao.deleteDiagnosticSnapshots(listOf(id))
+                        }
+                    }
+                }
+            }
+            WebBridgeProtocol.toJson(WebBridgeProtocol.deleteLogs(request, store))
+        }
     }
 
     // --- verification.* ----------------------------------------------------

@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { afterEach, describe, it, expect } from 'vitest'
+import { enableAutoUnmount, mount, flushPromises } from '@vue/test-utils'
+enableAutoUnmount(afterEach)
 import { createStore } from '../src/store.js'
 import SourcesPage from '../src/pages/SourcesPage.vue'
 
@@ -41,7 +42,7 @@ async function mountPage(handlers) {
   const bridge = fakeBridge({ 'app.bootstrap': async () => BOOTSTRAP, ...handlers })
   const store = createStore({ bridge, storage: null })
   await store.bootstrap()
-  const wrapper = mount(SourcesPage, { props: { store } })
+  const wrapper = mount(SourcesPage, { attachTo: document.body, props: { store } })
   await flushPromises()
   return { wrapper, store, bridge }
 }
@@ -56,6 +57,78 @@ async function acceptDialog(store) {
 }
 
 describe('SourcesPage', () => {
+  it('详情删除失败仍显示持久错误', async () => {
+    const { wrapper, store } = await mountPage({ list_sources: async () => result(LIST), get_source: async () => result(RAW), delete_projects: async () => { throw new Error('删除断线') } })
+    await wrapper.find('.source-row').trigger('click'); await flushPromises()
+    await wrapper.findAll('button').find(b => b.isVisible() && b.text() === '删除书源').trigger('click')
+    await acceptDialog(store)
+    expect(wrapper.findAll('[role="alert"]').some(e => e.isVisible() && e.text().includes('删除未完全确认'))).toBe(true)
+  })
+  it('独立详情仍提供可见的单条删除入口', async () => {
+    const { wrapper, store } = await mountPage({ list_sources: async () => result(LIST), get_source: async () => result(RAW) })
+    await wrapper.find('.source-row').trigger('click'); await flushPromises()
+    const remove = wrapper.findAll('button').find(b => b.isVisible() && b.text() === '删除书源')
+    expect(remove).toBeTruthy()
+    await remove.trigger('click')
+    expect(store.state.dialog.kind).toBe('delete')
+  })
+
+  it.each([true, false])('加载时可返回，迟到回包不重开详情；失败可见=%s', async (fail) => {
+    let finish
+    const { wrapper } = await mountPage({ list_sources: async () => result(LIST), get_source: () => new Promise(resolve => { finish = resolve }) })
+    await wrapper.find('.source-row').trigger('click')
+    expect(wrapper.find('.source-row').isVisible()).toBe(false)
+    expect(wrapper.find('[data-detail-back]').exists()).toBe(true)
+    if (!fail) {
+      expect(wrapper.vm.handleBack()).toBe(true)
+      await flushPromises()
+    }
+    finish({ content: [{ type: 'text', text: fail ? '读取失败证据' : '迟到内容' }], isError: fail })
+    await flushPromises()
+    if (fail) {
+      expect(wrapper.text()).toContain('读取失败证据')
+      expect(wrapper.vm.handleBack()).toBe(true)
+      await flushPromises()
+    }
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('.source-row').isVisible()).toBe(true)
+  })
+
+  it('系统返回保护未保存内容，取消保留、确认才退出', async () => {
+    const { wrapper, store } = await mountPage({ list_sources: async () => result(LIST), get_source: async () => result(RAW) })
+    await wrapper.find('.source-row').trigger('click'); await flushPromises()
+    await wrapper.find('textarea').setValue('未保存草稿')
+    expect(wrapper.vm.handleBack()).toBe(true)
+    expect(store.state.dialog?.kind).toBe('discard')
+    store.closeDialog()
+    expect(wrapper.find('textarea').element.value).toBe('未保存草稿')
+    expect(wrapper.vm.handleBack()).toBe(true)
+    const accept = store.state.dialog.onAccept
+    store.closeDialog(); await accept(); await flushPromises()
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('.source-row').isVisible()).toBe(true)
+  })
+
+  it('详情独立展示，顶部返回恢复列表与滚动且不聚焦表单', async () => {
+    const { wrapper } = await mountPage({ list_sources: async () => result(LIST), get_source: async () => result(RAW) })
+    const page = wrapper.find('.page').element
+    page.scrollTop = 320
+    const list = wrapper.find('.source-row').element.parentElement
+    list.scrollTop = 75
+    await wrapper.find('.source-row').trigger('click'); await flushPromises()
+    expect(wrapper.find('.source-row').isVisible()).toBe(false)
+    const back = wrapper.find('[data-detail-back]')
+    expect(back.exists()).toBe(true)
+    expect(back.isVisible()).toBe(true)
+    expect(page.scrollTop).toBe(0)
+    expect(document.activeElement?.tagName).not.toMatch(/INPUT|TEXTAREA/)
+    await back.trigger('click'); await flushPromises()
+    expect(wrapper.find('.source-row').isVisible()).toBe(true)
+    expect(page.scrollTop).toBe(320)
+    expect(list.scrollTop).toBe(75)
+    expect(wrapper.vm.handleBack()).toBe(false)
+  })
+
   it('回读总数与枚举不一致不能清除选择或报成功', async () => {
     let deleted = false
     const { wrapper, store } = await mountPage({

@@ -55,6 +55,8 @@ class CaptureOnce(
     /** 录制开关 + 按 contextId 读日志的最小依赖面，Android 侧由 HttpLogRecorder+StudioDao 薄壳实现，JVM 测试注入 fake。 */
     interface LogStore {
         val recordingEnabled: Boolean
+        /** Stores with asynchronous writes must enqueue this callback behind every accepted write. */
+        fun afterPendingWrites(onSettled: () -> Unit) { onSettled() }
         suspend fun logsByContextId(contextId: String): List<LogEntry>
         /**
          * 写入一条重定向中间跳的脱敏日志（App 侧桥接 HttpLogRecorder：调用线程构建实体、异步落库）。
@@ -146,7 +148,13 @@ class CaptureOnce(
         }.getOrNull()
 
         return gate.withLock {
-            execute(url, method, params, contextId, anchor)
+            CaptureActivity.start(contextId)
+            try {
+                execute(url, method, params, contextId, anchor)
+            } finally {
+                // Polling limits/recording switches/cancellation do not imply the writer is drained.
+                logStore.afterPendingWrites { CaptureActivity.finish(contextId) }
+            }
         }
     }
 

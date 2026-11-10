@@ -75,6 +75,7 @@ class StudioApplication : Application() {
             },
             logStore = object : com.mina.legadostudio.network.CaptureOnce.LogStore {
                 override val recordingEnabled get() = httpLogs.enabled
+                override fun afterPendingWrites(onSettled: () -> Unit) = httpLogs.afterPendingWrites(onSettled)
                 override suspend fun logsByContextId(contextId: String) = database.dao().httpLogsByContextId(contextId).map {
                     com.mina.legadostudio.network.CaptureOnce.LogEntry(
                         it.id, it.method, it.url, it.finalUrl, it.statusCode, it.durationMs, it.error, it.originKind,

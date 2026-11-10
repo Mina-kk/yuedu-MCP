@@ -74,7 +74,8 @@ function syncKeyboardFlag() {
 
 watch(() => s.insets, syncKeyboardFlag, { deep: true })
 
-const handleBack = createBackHandler({
+const pageRef = ref(null)
+const rootBack = createBackHandler({
   state: s,
   actions: {
     closeDialog: () => store.closeDialog(),
@@ -85,12 +86,17 @@ const handleBack = createBackHandler({
   }
 })
 
+function handleBack() {
+  if (s.dialog || s.sheet) return rootBack()
+  if (verifyBrowserOpen.value) return closeVerifyBrowser()
+  if (pageRef.value?.handleBack?.()) return
+  return rootBack()
+}
+
 function onKeydown(event) {
   if (event.key !== 'Escape') return
-  if (s.dialog || s.sheet) {
-    event.preventDefault()
-    handleBack()
-  }
+  event.preventDefault()
+  handleBack()
 }
 
 function routePage(payload) {
@@ -265,7 +271,7 @@ onBeforeUnmount(() => {
     </header>
 
     <main class="shell with-tabs page-body">
-      <component :is="activePage" :store="store" :key="s.page" />
+      <component ref="pageRef" :is="activePage" :store="store" :key="s.page" />
     </main>
 
     <nav class="tabbar" aria-label="主导航">

@@ -51,6 +51,7 @@ internal object WebBridgeProtocol {
     const val M_CONNECTION_COPY = "connection.copy"
     const val M_TOOLS_LIST = "tools.list"
     const val M_TOOLS_CALL = "tools.call"
+    const val M_LOGS_DELETE = "logs.delete"
     const val M_VERIFICATION_LIST = "verification.list"
     const val M_VERIFICATION_OPEN = "verification.open"
     const val M_VERIFICATION_COMPLETE = "verification.complete"
@@ -64,7 +65,7 @@ internal object WebBridgeProtocol {
 
     val METHODS: Set<String> = linkedSetOf(
         M_BOOTSTRAP, M_SERVICE_SET, M_SETTINGS_SAVE, M_CONNECTION_COPY,
-        M_TOOLS_LIST, M_TOOLS_CALL,
+        M_TOOLS_LIST, M_TOOLS_CALL, M_LOGS_DELETE,
         M_VERIFICATION_LIST, M_VERIFICATION_OPEN, M_VERIFICATION_COMPLETE,
         M_VERIFICATION_CLEAR, M_VERIFICATION_CLOSE, M_VERIFICATION_BROWSER_CLOSE,
         M_FILE_EXPORT, M_FILE_IMPORT, M_THEME, M_EXIT,
@@ -260,6 +261,75 @@ internal object WebBridgeProtocol {
         .replace(AUTH_HEADER, "$1: [已隐藏]")
         .replace(SECRET_QUERY, "$1[已隐藏]")
         .replace(URL_CREDENTIALS, "$1[已隐藏]@")
+
+    // --- 本地日志删除：精确身份，禁止日期/全库/路径删除 ----------------------
+
+    const val MAX_LOG_DELETE_BATCH = 100
+    data class LogDelete(val kind: String, val ids: List<String>)
+    data class LogDeleteFailure(val id: String, val code: String)
+    data class LogDeleteResult(
+        val kind: String,
+        val deletedIds: List<String>,
+        val missingIds: List<String>,
+        val failed: List<LogDeleteFailure>,
+    )
+
+    private val LOG_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+    fun parseLogDelete(params: JsonObject): LogDelete? {
+        if (params.keySet() != setOf("kind", "ids")) return null
+        val kind = params.get("kind")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString ?: return null
+        if (kind !in setOf("operation", "http", "capture", "crash", "snapshot")) return null
+        val array = params.get("ids")?.takeIf { it.isJsonArray }?.asJsonArray ?: return null
+        if (array.size() !in 1..MAX_LOG_DELETE_BATCH) return null
+        val ids = mutableListOf<String>()
+        for (element in array) {
+            if (!element.isJsonPrimitive || !element.asJsonPrimitive.isString) return null
+            val id = element.asString
+            val valid = when (kind) {
+                "operation", "http" -> id.matches(Regex("[1-9][0-9]{0,18}")) && id.toLongOrNull() != null
+                "capture" -> id.matches(Regex("cap:$LOG_UUID"))
+                "snapshot" -> id.matches(Regex(LOG_UUID))
+                "crash" -> id.matches(Regex("(?:crash|fault)-[0-9]{1,19}\\.txt"))
+                else -> false
+            }
+            if (!valid || id in ids) return null
+            ids += id
+        }
+        return LogDelete(kind, ids)
+    }
+
+    /** Store must check category ownership/activity BEFORE mutating, and include files in readback. */
+    interface LogDeleteStore {
+        suspend fun exists(kind: String, id: String): Boolean
+        suspend fun blockedReason(kind: String, id: String): String?
+        suspend fun delete(kind: String, id: String)
+    }
+
+    suspend fun deleteLogs(request: LogDelete, store: LogDeleteStore): LogDeleteResult {
+        val deleted = mutableListOf<String>()
+        val missing = mutableListOf<String>()
+        val failed = mutableListOf<LogDeleteFailure>()
+        for (id in request.ids) {
+            try {
+                val reason = store.blockedReason(request.kind, id)
+                if (reason != null) {
+                    failed += LogDeleteFailure(id, reason)
+                } else if (!store.exists(request.kind, id)) {
+                    missing += id
+                } else {
+                    store.delete(request.kind, id)
+                    if (store.exists(request.kind, id)) failed += LogDeleteFailure(id, "delete_unconfirmed")
+                    else deleted += id
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                failed += LogDeleteFailure(id, "delete_failed")
+            }
+        }
+        return LogDeleteResult(request.kind, deleted, missing, failed)
+    }
 
     // --- 参数校验：service / connection -----------------------------------
 

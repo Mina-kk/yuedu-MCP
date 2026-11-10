@@ -78,15 +78,14 @@ class WebViewCaptureEngine(
      * 正在写入的 cap: 会话注册表：newSession 建会话即登记，finishSession（「结束并保存」/
      * 无头收尾/页面销毁结算）注销。抓包历史页删会话前查它——活跃会话仍在追加日志，
      * 删除会与写入竞态（删后新行复活成幽灵会话），必须拒绝而不是先删后写丢数据。
-     * 线程安全：shouldInterceptRequest 在拦截线程、注册/查询在主线程，用 synchronizedSet。
-     * 覆盖两类 webview 抓包（可见浏览器页 + MCP 无头）；逐次抓包 capture_once 走
-     * HttpLogRecorder 同步链路，一次跑完即结束，不在此表（会话产生期间历史页即便删到
-     * 同名 cap: 也只是小概率空操作窗口——cap:<uuid> 撞名实际不可能）。
+     * 与 capture_once 共用 CaptureActivity；登记/注销/精确删除预留在同一监视器下协调。
+     * 生产者停止后仍须等 HttpLogRecorder FIFO 中所有已接收的写入结算，才释放活动资格。
      */
-    private val activeCaptureContextIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    // Both WebView and CaptureOnce retain ownership until their recorder FIFO barrier.
+    private val captureActivity = com.mina.legadostudio.network.CaptureActivity
 
     /** 该 cap:contextId 是否有正在写入的抓包会话（可见页未结算/无头 run 进行中）。 */
-    fun isCaptureSessionActive(contextId: String): Boolean = contextId in activeCaptureContextIds
+    fun isCaptureSessionActive(contextId: String): Boolean = captureActivity.isActive(contextId)
 
     /**
      * DNS 私网守卫 + 连接级钉住：同 host 3 分钟内不重复解析，防拦截线程被 DNS 拖死。
@@ -116,7 +115,7 @@ class WebViewCaptureEngine(
         }
         val base = WebViewCapture.open(url)
         // 建会话即登记活跃表：该 contextId 在结算前不接受历史页删除（删行会与在途追加竞态）。
-        activeCaptureContextIds.add(base.contextId)
+        captureActivity.start(base.contextId)
         return WebViewCapture.Session(
             contextId = base.contextId,
             entryUrl = base.entryUrl,
@@ -354,7 +353,7 @@ class WebViewCaptureEngine(
                 ),
                 // 失败也注销：否则该 ctx 永远活跃、历史页永远删不掉；如实记日志不冒称已写。
                 onSettled = { written ->
-                    activeCaptureContextIds.remove(session.contextId)
+                    captureActivity.finish(session.contextId)
                     if (!written) {
                         android.util.Log.w("WebViewCapture", "结算行未落库 contextId=${session.contextId}")
                     }
@@ -493,76 +492,91 @@ class WebViewCaptureEngine(
         }
     }
 
+    /**
+     * Own the registration across every headless exit, including setup errors and cancellation.
+     * Cleanup is non-suspending: closeWrites waits for producers, then the recorder FIFO releases
+     * ownership. Never unregister here directly or wait in the cancelled caller for database IO.
+     * Internal seam keeps Android setup out of lifecycle tests without replacing gate/recorder logic.
+     */
+    internal suspend fun withHeadlessSession(
+        url: String,
+        block: suspend (WebViewCapture.Session, Long) -> Result,
+    ): Result {
+        val started = System.currentTimeMillis()
+        val session = newSession(url)
+        var finalUrl = session.entryUrl
+        try {
+            return block(session, started).also { finalUrl = it.finalUrl }
+        } finally {
+            finishSession(session, finalUrl, started)
+        }
+    }
+
     /** 无头模式的 WebView 加载流程：onPageFinished + 稳定轮询后取 outerHTML / webJs 值。 */
     private suspend fun load(
         url: String,
         delayMs: Long,
         timeoutMs: Long,
         webJs: String?,
-    ): Result = withTimeout(timeoutMs) {
-        val session = newSession(url)
-        val plan = WebViewLoadPlan.plan(session.entryUrl, null)
-        val main = android.os.Handler(android.os.Looper.getMainLooper())
-        val closed = AtomicBoolean(false)
-        val started = System.currentTimeMillis()
-        var view: WebView? = null
-        var finalUrl = session.entryUrl
+    ): Result = withHeadlessSession(url) { session, started ->
+        withTimeout(timeoutMs) {
+            val plan = WebViewLoadPlan.plan(session.entryUrl, null)
+            val main = android.os.Handler(android.os.Looper.getMainLooper())
+            val closed = AtomicBoolean(false)
+            var view: WebView? = null
 
-        fun teardown() {
-            main.removeCallbacksAndMessages(null)
-            view?.stopLoading()
-            view?.destroy()
-            view = null
-        }
+            fun teardown() {
+                main.removeCallbacksAndMessages(null)
+                view?.stopLoading()
+                view?.destroy()
+                view = null
+            }
 
-        suspendCancellableCoroutine<Result> { continuation ->
-            fun finish(result: kotlin.Result<Result>) {
-                if (!closed.compareAndSet(false, true)) return
-                main.post { teardown() }
-                if (continuation.isActive) {
-                    result.onSuccess(continuation::resume).onFailure(continuation::resumeWithException)
+            suspendCancellableCoroutine<Result> { continuation ->
+                fun finish(result: kotlin.Result<Result>) {
+                    if (!closed.compareAndSet(false, true)) return
+                    main.post { teardown() }
+                    if (continuation.isActive) {
+                        result.onSuccess(continuation::resume).onFailure(continuation::resumeWithException)
+                    }
+                }
+                continuation.invokeOnCancellation {
+                    closed.set(true)
+                    main.post { teardown() }
+                }
+                main.post {
+                    if (closed.get()) return@post
+                    runCatching {
+                        WebView(context).also { webView ->
+                            view = webView
+                            configure(webView)
+                            // 无头模式：供给 client 之上叠一层 onPageFinished→稳定轮询收尾。
+                            val inner = clientFor(session)
+                            webView.webViewClient = object : WebViewClient() {
+                                override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): WebResourceResponse? =
+                                    inner.shouldInterceptRequest(v, request)
+
+                                override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean =
+                                    inner.shouldOverrideUrlLoading(v, request)
+
+                                override fun onReceivedHttpError(v: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) =
+                                    inner.onReceivedHttpError(v, request, errorResponse)
+
+                                override fun onReceivedError(v: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) =
+                                    inner.onReceivedError(v, request, error)
+
+                                override fun onPageFinished(v: WebView, finishedUrl: String) {
+                                    if (closed.get()) return
+                                    main.postDelayed({
+                                        poll(v, webJs, session, started, main, closed, ::finish) {}
+                                    }, delayMs.coerceIn(0, 10_000))
+                                }
+                            }
+                            webView.loadUrl(plan.url)
+                        }
+                    }.onFailure { finish(kotlin.Result.failure(it)) }
                 }
             }
-            continuation.invokeOnCancellation {
-                closed.set(true)
-                main.post { teardown() }
-            }
-            main.post {
-                if (closed.get()) return@post
-                runCatching {
-                    WebView(context).also { webView ->
-                        view = webView
-                        configure(webView)
-                        // 无头模式：供给 client 之上叠一层 onPageFinished→稳定轮询收尾。
-                        val inner = clientFor(session)
-                        webView.webViewClient = object : WebViewClient() {
-                            override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): WebResourceResponse? =
-                                inner.shouldInterceptRequest(v, request)
-
-                            override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean =
-                                inner.shouldOverrideUrlLoading(v, request)
-
-                            override fun onReceivedHttpError(v: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) =
-                                inner.onReceivedHttpError(v, request, errorResponse)
-
-                            override fun onReceivedError(v: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) =
-                                inner.onReceivedError(v, request, error)
-
-                            override fun onPageFinished(v: WebView, finishedUrl: String) {
-                                if (closed.get()) return
-                                main.postDelayed({
-                                    poll(v, webJs, session, started, main, closed, ::finish) { resolved ->
-                                        finalUrl = resolved
-                                    }
-                                }, delayMs.coerceIn(0, 10_000))
-                            }
-                        }
-                        webView.loadUrl(plan.url)
-                    }
-                }.onFailure { finish(kotlin.Result.failure(it)) }
-            }
-        }.also { result ->
-            finishSession(session, finalUrl, started)
         }
     }
 

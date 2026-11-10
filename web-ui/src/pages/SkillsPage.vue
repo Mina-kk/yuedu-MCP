@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useDetailNavigation } from '../lib/detail-navigation.js'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { callToolParsed, itemsOf, prettyJson } from '../lib/tools.js'
@@ -9,10 +10,12 @@ import { callToolParsed, itemsOf, prettyJson } from '../lib/tools.js'
 // 知识库：search_knowledge(query)、read_knowledge(domain, mode) 折叠展示。
 const props = defineProps({ store: { type: Object, required: true } })
 const s = props.store.state
+const { pageRef, detailOpen, enterDetail, leaveDetail } = useDetailNavigation()
 
 const tab = ref('builtin')
 const skills = ref([])
 const loading = ref(false)
+let openRevision = 0
 const listError = ref('')
 
 const current = ref(null) // {id,name,builtIn}
@@ -40,7 +43,8 @@ const refError = ref('')
 const dirty = computed(() => current.value !== null && markdown.value !== original.value)
 
 watch(dirty, (v) => props.store.markPageDirty(v && !(current.value && current.value.builtIn)))
-onBeforeUnmount(() => props.store.markPageDirty(false))
+onBeforeUnmount(() => { openRevision += 1; props.store.markPageDirty(false) })
+watch(current, (value, previous) => { if (!value && previous) leaveDetail() })
 
 const filtered = computed(() => {
   const want = tab.value === 'builtin'
@@ -77,10 +81,13 @@ async function open(skill) {
     })
     return
   }
+  const revision = ++openRevision
+  enterDetail()
   loadingSkill.value = true
   skillError.value = ''
   try {
     const parsed = await callToolParsed(props.store, 'get_skill', { id: skill.id })
+    if (revision !== openRevision) return
     if (parsed.threw) throw new Error(parsed.threw)
     if (parsed.isError) throw new Error(parsed.text || 'get_skill 返回错误')
     current.value = { id: skill.id, name: skill.name, builtIn: Boolean(skill.builtIn) }
@@ -88,13 +95,24 @@ async function open(skill) {
     original.value = parsed.raw
     props.store.markPageDirty(false)
   } catch (error) {
+    if (revision !== openRevision) return
     skillError.value = (error && error.message) || '读取技能失败'
   } finally {
-    loadingSkill.value = false
+    if (revision === openRevision) loadingSkill.value = false
   }
 }
 
+function handleBack() {
+  if (!detailOpen.value) return false
+  closeEditor()
+  return true
+}
+defineExpose({ handleBack })
+
 function closeEditor() {
+  if (saveBusy.value) return
+  openRevision += 1
+  loadingSkill.value = false
   if (dirty.value) {
     props.store.confirmDialog({
       kind: 'discard',
@@ -112,6 +130,7 @@ function closeEditor() {
     return
   }
   current.value = null
+  leaveDetail()
   props.store.markPageDirty(false)
 }
 
@@ -248,8 +267,11 @@ async function readKnowledge() {
 </script>
 
 <template>
-  <section class="page">
-    <div class="section">
+  <section ref="pageRef" class="page">
+    <div v-if="detailOpen" class="detail-navigation">
+      <button data-detail-back class="btn btn-ghost" type="button" @click="handleBack"><AppIcon name="chevron-left" :size="16" /><span>返回列表</span></button>
+    </div>
+    <div v-show="!detailOpen" class="section">
       <div class="section-head">
         <h3 class="section-title">技能</h3>
         <span class="section-sub">{{ skills.length }} 个</span>
@@ -325,6 +347,7 @@ async function readKnowledge() {
       </div>
     </div>
 
+    <p v-if="detailOpen && !current && skillError" class="code-block err" role="alert">{{ skillError }}</p>
     <div v-if="loadingSkill" class="section">
       <EmptyState title="正在读取技能内容" text="get_skill" :busy="true" />
     </div>
@@ -361,13 +384,14 @@ async function readKnowledge() {
         <button v-else class="btn btn-ghost" type="button" @click="props.store.toast('内置技能不可覆盖')">
           <AppIcon name="alert" :size="16" /><span>内置只读</span>
         </button>
+        <button v-if="!current.builtIn" class="btn btn-ghost danger" type="button" :disabled="saveBusy" @click="askDelete(current)">删除技能</button>
         <button class="btn btn-ghost" type="button" @click="closeEditor">
           <AppIcon name="x" :size="16" /><span>关闭</span>
         </button>
       </div>
     </div>
 
-    <details class="section collapsible">
+    <details v-show="!detailOpen" class="section collapsible">
       <summary class="section-head">
         <h3 class="section-title">知识库搜索</h3>
         <span class="section-sub">search_knowledge</span>
@@ -385,7 +409,7 @@ async function readKnowledge() {
       <pre v-if="knowledgeResult" class="code-block tall">{{ knowledgeResult }}</pre>
     </details>
 
-    <details class="section collapsible">
+    <details v-show="!detailOpen" class="section collapsible">
       <summary class="section-head">
         <h3 class="section-title">规则参考</h3>
         <span class="section-sub">read_knowledge(domain, mode)</span>
@@ -410,6 +434,7 @@ async function readKnowledge() {
 </template>
 
 <style scoped>
+.detail-navigation { position: sticky; top: 0; z-index: 2; padding: 8px 0; background: var(--surface); }
 .skill-list {
   display: flex;
   flex-direction: column;

@@ -1,0 +1,189 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+import LogsPage from '../src/pages/LogsPage.vue'
+
+const button = (w, text) => w.findAll('button').find(b => b.text() === text)
+const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] })
+const mounted = []
+afterEach(() => mounted.splice(0).forEach(w => w.unmount()))
+async function setup(handler, bridgeHandler, bridgeKind = 'android') {
+  const store = { state: { bridgeKind }, bridge: { call: vi.fn(bridgeHandler) }, callTool: vi.fn(handler), toast: vi.fn(), confirmDialog: vi.fn() }
+  const host = document.createElement('main')
+  host.className = 'page-body'
+  document.body.appendChild(host)
+  const wrapper = mount(LogsPage, { props: { store }, attachTo: host })
+  mounted.push({ unmount: () => { wrapper.unmount(); host.remove() } })
+  await flushPromises()
+  return { wrapper, store, host }
+}
+const cases = [
+  ['操作', 'get_logs', 'get_log', { id: 1, message: '操作记录' }, { id: 1 }],
+  ['HTTP', 'get_http_logs', 'get_http_log', { id: 2, url: 'https://example.com' }, { id: 2 }],
+  ['抓包', 'list_captures', 'get_capture', { contextId: 'cap:one' }, { contextId: 'cap:one', limit: 50, offset: 0 }],
+  ['崩溃', 'get_crash_logs', 'get_crash_log', { name: 'crash.txt' }, { name: 'crash.txt' }],
+  ['诊断', 'get_diagnostic_snapshots', 'get_diagnostic_snapshot', { id: 'snap-one' }, { id: 'snap-one' }]
+]
+describe('日志独立详情', () => {
+  it('批次去重且最多 100，failed 不能计入成功', async () => {
+    const rows = [...Array.from({ length: 105 }, (_, i) => ({ id: String(i + 1) })), { id: '1' }]
+    const { wrapper, store } = await setup(() => result({ items: rows }), (_, args) => ({ kind: args.kind, deletedIds: args.ids, missingIds: [], failed: [{ id: '1', code: 'delete_unconfirmed' }] }))
+    await button(wrapper, '全选已加载').trigger('click')
+    expect(wrapper.text()).toContain('已选 100 条')
+    await button(wrapper, '删除所选').trigger('click')
+    await button(wrapper, '确认删除').trigger('click'); await flushPromises()
+    const request = store.bridge.call.mock.calls[0][1]
+    expect(request.ids).toHaveLength(100)
+    expect(new Set(request.ids).size).toBe(100)
+    expect(wrapper.text()).toContain('已删除 99 条，已不存在 0 条，失败 1 条')
+    expect(wrapper.text()).toContain('已选 1 条')
+  })
+  it('桥异常保留单删目标选择，确认期间筛选不能变化', async () => {
+    const { wrapper } = await setup(() => result({ items: [{ id: 1 }] }), () => { throw new Error('桥断线') })
+    await button(wrapper, '删除').trigger('click')
+    expect(button(wrapper, '警告').element.disabled).toBe(true)
+    await button(wrapper, '确认删除').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('桥断线')
+    expect(wrapper.text()).toContain('已选 1 条')
+    expect(wrapper.find('.log-row').exists()).toBe(true)
+  })
+  it('HTTP 抓包事务不能单删，提供抓包页入口', async () => {
+    const { wrapper, store } = await setup(() => result({ items: [{ id: 7, contextId: 'cap:12345678-1234-1234-1234-123456789abc' }] }))
+    await button(wrapper, 'HTTP').trigger('click'); await flushPromises()
+    expect(button(wrapper, '删除').attributes('disabled')).toBeDefined()
+    await button(wrapper, '前往抓包页').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('list_captures', { limit: 20, offset: 0 })
+    expect(store.bridge.call).not.toHaveBeenCalled()
+  })
+  it('无效或不精确 ID 不发送，非 Android 明确不支持', async () => {
+    const { wrapper, store } = await setup(() => result({ items: [{ id: '01' }, { id: 9223372036854775807 }] }))
+    expect(wrapper.findAll('button').filter(b => b.text() === '删除').every(b => b.attributes('disabled') !== undefined)).toBe(true)
+    await button(wrapper, '全选已加载').trigger('click')
+    expect(wrapper.text()).toContain('已选 0 条')
+    expect(store.bridge.call).not.toHaveBeenCalled()
+    const browser = await setup(() => result({ items: [{ id: 1 }] }), undefined, 'browser')
+    expect(browser.wrapper.text()).toContain('不支持删除日志')
+    expect(button(browser.wrapper, '删除')).toBeUndefined()
+  })
+  it.each([
+    ['HTTP', 'http', { id: '12' }, '12'],
+    ['抓包', 'capture', { contextId: 'cap:12345678-1234-1234-1234-123456789abc' }, 'cap:12345678-1234-1234-1234-123456789abc'],
+    ['崩溃', 'crash', { name: 'crash-123.txt' }, 'crash-123.txt'],
+    ['诊断', 'snapshot', { id: '12345678-1234-1234-1234-123456789abc' }, '12345678-1234-1234-1234-123456789abc']
+  ])('%s 遵循真实 kind/ids，宿主拒绝后保留记录和选择', async (label, kind, row, id) => {
+    const { wrapper, store } = await setup(() => result({ items: [row] }), () => ({ kind, deletedIds: [], missingIds: [], failed: [{ id, code: kind === 'capture' ? 'active_capture' : 'delete_failed' }] }))
+    await button(wrapper, label).trigger('click'); await flushPromises()
+    await button(wrapper, '删除').trigger('click')
+    await button(wrapper, '确认删除').trigger('click'); await flushPromises()
+    expect(store.bridge.call).toHaveBeenCalledWith('logs.delete', { kind, ids: [id] })
+    expect(wrapper.text()).toContain('已删除 0 条')
+    expect(wrapper.text()).toContain('已选 1 条')
+    expect(wrapper.text()).toContain(kind === 'capture' ? 'active_capture' : 'delete_failed')
+    expect(wrapper.find('.log-row').exists()).toBe(true)
+  })
+  it('批删仅选当前加载项，失败保留选择且刷新错误持久可见，请求期间锁定', async () => {
+    let release
+    let reads = 0
+    const { wrapper, store } = await setup(() => {
+      if (++reads > 1) throw new Error('刷新断线')
+      return result({ items: [{ id: 1 }, { id: 2 }, { id: 3 }], total: 99 })
+    }, () => new Promise(resolve => { release = resolve }))
+    await button(wrapper, '全选已加载').trigger('click')
+    expect(wrapper.text()).toContain('已选 3 条')
+    await button(wrapper, '取消选择').trigger('click')
+    expect(wrapper.text()).toContain('已选 0 条')
+    await button(wrapper, '全选已加载').trigger('click')
+    await button(wrapper, '删除所选').trigger('click')
+    await button(wrapper, '确认删除').trigger('click')
+    await button(wrapper, 'HTTP').trigger('click')
+    await button(wrapper, '刷新').trigger('click')
+    expect(store.callTool).toHaveBeenCalledTimes(1)
+    expect(wrapper.vm.handleBack()).toBe(true)
+    release({ kind: 'operation', deletedIds: ['1'], missingIds: ['3'], failed: [{ id: '2', code: 'delete_unconfirmed' }] })
+    await flushPromises()
+    expect(store.bridge.call).toHaveBeenCalledWith('logs.delete', { kind: 'operation', ids: ['1', '2', '3'] })
+    expect(wrapper.text()).toContain('已选 1 条')
+    expect(wrapper.text()).toContain('已删除 1 条，已不存在 1 条，失败 1 条')
+    expect(wrapper.text()).toContain('delete_unconfirmed')
+    expect(wrapper.text()).toContain('刷新断线')
+    expect(wrapper.findAll('.log-row')).toHaveLength(1)
+    expect(wrapper.find('input[type="checkbox"]').element.checked).toBe(true)
+  })
+  it('单删需 Vue 确认，精确字符串 ID 走本地桥并刷新', async () => {
+    let rows = [{ id: '9223372036854775807', message: '精确记录' }]
+    const { wrapper, store } = await setup(() => result({ items: rows }), (method, args) => {
+      rows = []
+      return { kind: args.kind, deletedIds: args.ids, missingIds: [], failed: [] }
+    })
+    await button(wrapper, '删除').trigger('click')
+    expect(wrapper.find('[role="dialog"]').text()).toContain('1 条')
+    expect(store.bridge.call).not.toHaveBeenCalled()
+    await button(wrapper, '取消').trigger('click')
+    expect(store.bridge.call).not.toHaveBeenCalled()
+    await button(wrapper, '删除').trigger('click')
+    await button(wrapper, '确认删除').trigger('click')
+    await flushPromises()
+    expect(store.bridge.call).toHaveBeenCalledTimes(1)
+    expect(store.bridge.call).toHaveBeenCalledWith('logs.delete', { kind: 'operation', ids: ['9223372036854775807'] })
+    expect(wrapper.find('.log-row').exists()).toBe(false)
+    expect(wrapper.text()).toContain('已删除 1 条')
+  })
+  it('操作日志不发送未支持的 offset，也不显示伪下一页', async () => {
+    const { wrapper, store } = await setup(() => result({ items: Array.from({ length: 20 }, (_, i) => ({ id: i + 1 })) }))
+    expect(store.callTool).toHaveBeenLastCalledWith('get_logs', { limit: 20 })
+    expect(button(wrapper, '下一页')).toBeUndefined()
+  })
+  it('全部筛选采用 Vue 控件，中文级别及严格日期校验', async () => {
+    const { wrapper, store } = await setup(async () => result({ items: [] }))
+    expect(wrapper.find('select').exists()).toBe(false)
+    await button(wrapper, '警告').trigger('click')
+    await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_logs', expect.objectContaining({ level: 'W' }))
+    await button(wrapper, 'HTTP').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('input[type="date"]').exists()).toBe(false)
+    const input = wrapper.find('input[aria-label="日期"]')
+    await input.setValue('2026-02-30')
+    const calls = store.callTool.mock.calls.length
+    await button(wrapper, '应用日期').trigger('click')
+    expect(store.callTool).toHaveBeenCalledTimes(calls)
+    expect(wrapper.text()).toContain('请输入有效日期')
+    await input.setValue('2024-02-29')
+    await button(wrapper, '应用日期').trigger('click')
+    await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', expect.objectContaining({ date: '2024-02-29' }))
+  })
+  it('详情加载期间可系统返回，迟到结果不能重开详情', async () => {
+    let release
+    const { wrapper, host } = await setup(name => name === 'get_log'
+      ? new Promise(resolve => { release = resolve }) : result({ items: [{ id: 1 }] }))
+    host.scrollTop = 123
+    await wrapper.find('.log-row').trigger('click')
+    expect(wrapper.text()).toContain('正在读取详情')
+    expect(wrapper.vm.handleBack()).toBe(true)
+    await flushPromises()
+    release(result({ body: 'late' }))
+    await flushPromises()
+    expect(wrapper.find('[data-testid="log-detail"]').exists()).toBe(false)
+    expect(host.scrollTop).toBe(123)
+  })
+  it.each(cases)('%s 有明确详情入口，打开独立视图并返回原位置', async (label, list, detail, row, args) => {
+    const { wrapper, store, host } = await setup(async name => result(name === detail ? { body: '真实正文', token: 'private' } : { items: [row], total: 1 }))
+    if (label !== '操作') { await button(wrapper, label).trigger('click'); await flushPromises() }
+    host.scrollTop = 480
+    expect(wrapper.find('.log-row').text()).toContain('查看详情')
+    await wrapper.find('.log-row').trigger('click')
+    await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith(detail, args)
+    expect(wrapper.find('.log-list').isVisible()).toBe(false)
+    expect(wrapper.find('[data-testid="log-detail"]').isVisible()).toBe(true)
+    expect(wrapper.find('pre').text()).toContain('真实正文')
+    expect(wrapper.find('pre').text()).not.toContain('private')
+    expect(host.scrollTop).toBe(0)
+    await button(wrapper, '返回日志列表').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.log-list').isVisible()).toBe(true)
+    expect(host.scrollTop).toBe(480)
+    expect(store.callTool.mock.calls.filter(([name]) => name === list)).toHaveLength(1)
+    expect(wrapper.vm.handleBack()).toBe(false)
+  })
+})

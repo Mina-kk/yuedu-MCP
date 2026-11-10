@@ -5,7 +5,7 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`2.0.0`（versionCode 201，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.2`（versionCode 203，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）

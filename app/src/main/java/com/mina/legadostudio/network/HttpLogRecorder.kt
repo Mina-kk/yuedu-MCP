@@ -58,13 +58,16 @@ class HttpLogRecorder(context: Context, private val dao: StudioDao, private val 
      * 回调在写库线程触发，实现里不得再阻塞等待写库线程（WebViewCaptureEngine 只动 synchronizedSet）。
      */
     fun recordAsync(draft: Draft, onSettled: ((Boolean) -> Unit)?) {
-        if (!enabled) { onSettled?.invoke(false); return }
-        if (shouldDropForPrivateUrl(draft)) { onSettled?.invoke(false); return }
-        val entity = buildEntity(draft)
+        val entity = if (enabled && !shouldDropForPrivateUrl(draft)) buildEntity(draft) else null
         asyncWriter.execute {
-            val ok = runCatching { runBlocking(Dispatchers.IO) { dao.addHttpLog(entity) } }.isSuccess
+            val ok = entity != null && runCatching { runBlocking(Dispatchers.IO) { dao.addHttpLog(entity) } }.isSuccess
             onSettled?.invoke(ok)
         }
+    }
+
+    /** FIFO barrier, independent of enabled/filter state. Enqueue after the last producer exits. */
+    fun afterPendingWrites(onSettled: () -> Unit) {
+        asyncWriter.execute(onSettled)
     }
 
     fun record(draft: Draft) {

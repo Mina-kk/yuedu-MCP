@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { afterEach, describe, it, expect } from 'vitest'
+import { enableAutoUnmount, mount, flushPromises } from '@vue/test-utils'
+enableAutoUnmount(afterEach)
 import { createStore } from '../src/store.js'
 import McpPage from '../src/pages/McpPage.vue'
 
@@ -49,18 +50,53 @@ async function mountPage(handlers) {
   const bridge = fakeBridge(handlers)
   const store = createStore({ bridge, storage: null })
   await store.bootstrap()
-  const wrapper = mount(McpPage, { props: { store } })
+  const wrapper = mount(McpPage, { attachTo: document.body, props: { store } })
   await flushPromises()
   return { wrapper, store, bridge }
 }
 
 describe('McpPage', () => {
+  it('系统返回保护未保存内容，取消保留、确认才退出', async () => {
+    const { wrapper, store } = await mountPage({ 'app.bootstrap': async () => BOOTSTRAP, 'tools.list': async () => TOOLS })
+    await wrapper.find('.tool-row').trigger('click'); await flushPromises()
+    await wrapper.find('textarea').setValue('未保存草稿')
+    expect(wrapper.vm.handleBack()).toBe(true)
+    expect(store.state.dialog?.kind).toBe('discard')
+    store.closeDialog()
+    expect(wrapper.find('textarea').element.value).toBe('未保存草稿')
+    expect(wrapper.vm.handleBack()).toBe(true)
+    const accept = store.state.dialog.onAccept
+    store.closeDialog(); await accept(); await flushPromises()
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('.tool-row').isVisible()).toBe(true)
+  })
+
+  it('详情独立展示，顶部返回恢复列表与滚动且不聚焦表单', async () => {
+    const { wrapper } = await mountPage({ 'app.bootstrap': async () => BOOTSTRAP, 'tools.list': async () => TOOLS })
+    const page = wrapper.find('.page').element
+    page.scrollTop = 320
+    const list = wrapper.find('.tool-row').element.parentElement
+    list.scrollTop = 75
+    await wrapper.find('.tool-row').trigger('click'); await flushPromises()
+    expect(wrapper.find('.tool-row').isVisible()).toBe(false)
+    const back = wrapper.find('[data-detail-back]')
+    expect(back.exists()).toBe(true)
+    expect(back.isVisible()).toBe(true)
+    expect(page.scrollTop).toBe(0)
+    expect(document.activeElement?.tagName).not.toMatch(/INPUT|TEXTAREA/)
+    await back.trigger('click'); await flushPromises()
+    expect(wrapper.find('.tool-row').isVisible()).toBe(true)
+    expect(page.scrollTop).toBe(320)
+    expect(list.scrollTop).toBe(75)
+    expect(wrapper.vm.handleBack()).toBe(false)
+  })
+
   it('未连接时不假装已知服务停止或工具数量为零', async () => {
     const bridge = fakeBridge({})
     bridge.connected = false
     const store = createStore({ bridge, storage: null })
     await store.bootstrap()
-    const wrapper = mount(McpPage, { props: { store } })
+    const wrapper = mount(McpPage, { attachTo: document.body, props: { store } })
     await flushPromises()
     expect(wrapper.find('.stat-value').text()).toBe('状态未知')
     expect(wrapper.text()).toContain('未加载')

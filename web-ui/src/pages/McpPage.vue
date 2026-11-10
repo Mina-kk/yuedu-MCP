@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useDetailNavigation } from '../lib/detail-navigation.js'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ToolResult from '../components/ToolResult.vue'
@@ -10,10 +11,15 @@ import { callToolParsed, itemsOf, prettyJson } from '../lib/tools.js'
 // 不猜端口、不造目录；token 永不出现在 DOM，只通过宿主剪贴板接口复制。
 const props = defineProps({ store: { type: Object, required: true } })
 const s = props.store.state
+const { pageRef, detailOpen, enterDetail, leaveDetail } = useDetailNavigation()
 
 const search = ref('')
 const selected = ref('')
 const argsText = ref('{}')
+const originalArgs = ref('{}')
+const dirty = computed(() => detailOpen.value && argsText.value !== originalArgs.value)
+watch(dirty, value => props.store.markPageDirty(value))
+onBeforeUnmount(() => props.store.markPageDirty(false))
 const calling = ref(false)
 const result = ref(null)
 const resultError = ref('')
@@ -106,7 +112,24 @@ async function copy(kind, lan = false) {
   }
 }
 
+function handleBack() {
+  if (!detailOpen.value) return false
+  if (calling.value) return true
+  const close = () => {
+    selected.value = ''
+    pendingConfirm.value = null
+    argsText.value = originalArgs.value
+    props.store.markPageDirty(false)
+    leaveDetail()
+  }
+  if (dirty.value) props.store.confirmDialog({ kind: 'discard', title: '放弃未保存的参数？', message: '返回后参数草稿不会保留。', confirmLabel: '放弃修改', danger: true, onAccept: close })
+  else close()
+  return true
+}
+defineExpose({ handleBack })
+
 function pick(tool) {
+  enterDetail()
   selected.value = tool.name
   result.value = null
   resultError.value = ''
@@ -123,6 +146,7 @@ function pick(tool) {
     else skeleton[name] = ''
   }
   argsText.value = JSON.stringify(skeleton, null, 2)
+  originalArgs.value = argsText.value
 }
 
 function parseArgs() {
@@ -198,7 +222,11 @@ const prettyResult = computed(() => {
 </script>
 
 <template>
-  <section class="page">
+  <section ref="pageRef" class="page">
+    <div v-if="detailOpen" class="detail-navigation">
+      <button data-detail-back class="btn btn-ghost" type="button" @click="handleBack"><AppIcon name="chevron-left" :size="16" /><span>返回列表</span></button>
+    </div>
+    <div v-show="!detailOpen">
     <div class="stat-grid">
       <div class="stat">
         <span class="stat-label">服务</span>
@@ -317,6 +345,7 @@ const prettyResult = computed(() => {
       </div>
     </div>
 
+    </div>
     <div v-if="selectedTool" class="section">
       <div class="section-head">
         <h3 class="section-title mono">{{ selectedTool.name }}</h3>
@@ -362,6 +391,7 @@ const prettyResult = computed(() => {
 </template>
 
 <style scoped>
+.detail-navigation { position: sticky; top: 0; z-index: 2; padding: 8px 0; background: var(--surface); }
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
