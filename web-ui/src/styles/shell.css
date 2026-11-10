@@ -171,28 +171,38 @@ html[data-keyboard='1'] .page-body {
   padding-bottom: calc(24px + var(--safe-bottom));
 }
 
-/* A resized Android IME can leave only 156 CSS px. Keep the shell header
-   to one line and give the detail's own sticky Back + editor the rest.
+/* Short viewports need compact chrome even without an IME signal.
+   Keep Back in the detail's scroll flow and reserve a compact navigation row.
    Do not alter the native verification overlay's fixed 96px toolbar. */
 @media (max-height: 400px) {
-  html[data-keyboard='1'] .app-shell:not(.verify-open) > .shell-head {
+  .app-shell:not(.verify-open) > .shell-head {
     flex-wrap: nowrap;
     gap: 4px;
     padding: 2px max(8px, var(--safe-right)) 2px max(8px, var(--safe-left));
   }
-  html[data-keyboard='1'] .app-shell:not(.verify-open) .app-title {
+  .app-shell:not(.verify-open) .app-title {
     font-size: 16px;
     white-space: nowrap;
   }
-  html[data-keyboard='1'] .app-shell:not(.verify-open) .app-sub,
-  html[data-keyboard='1'] .app-shell:not(.verify-open) .head-actions > .chip {
+  .app-shell:not(.verify-open) .app-sub,
+  .app-shell:not(.verify-open) .head-actions > .chip {
     display: none;
   }
-  html[data-keyboard='1'] .app-shell:not(.verify-open) > .page-body {
+  .app-shell:not(.verify-open) > .page-body {
     padding-top: 0;
     padding-bottom: 4px;
     scroll-padding-block: 4px;
   }
+  .app-shell:not(.verify-open) > .tabbar {
+    margin-block: 0;
+    padding: 2px;
+  }
+  .app-shell:not(.verify-open) > .tabbar .tab {
+    height: 32px;
+    flex-direction: row;
+    gap: 2px;
+  }
+  .app-shell:not(.verify-open) > .tabbar .tab .ico { display: none; }
 }
 
 /* Console alerts contain a title, explanation and action, not one inline row. */

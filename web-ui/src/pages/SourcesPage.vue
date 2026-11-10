@@ -622,7 +622,8 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 </template>
 
 <style scoped>
-.detail-navigation { position: sticky; top: 0; z-index: 2; padding: 8px 0; background: var(--surface); }
+/* Keep Back in document flow: a sticky row occludes edits/actions in a short IME viewport. */
+.detail-navigation { padding: 8px 0; background: var(--surface); }
 .source-list {
   display: flex;
   flex-direction: column;

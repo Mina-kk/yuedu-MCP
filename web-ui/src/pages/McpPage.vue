@@ -391,7 +391,8 @@ const prettyResult = computed(() => {
 </template>
 
 <style scoped>
-.detail-navigation { position: sticky; top: 0; z-index: 2; padding: 8px 0; background: var(--surface); }
+/* Keep Back in document flow: a sticky row occludes edits/actions in a short IME viewport. */
+.detail-navigation { padding: 8px 0; background: var(--surface); }
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
