@@ -441,6 +441,7 @@ function itemSub(item) {
     <p v-if="deleteMessage" role="status" class="code-block">{{ deleteMessage }}</p>
     <Teleport to="body">
       <div v-if="pendingDelete" class="sheet-layer delete-overlay" @click.self="handleBack" @keydown.esc.stop.prevent="handleBack" @keydown.tab="trapDeleteFocus">
+        <div class="scrim" aria-hidden="true" @click="handleBack"></div>
         <div class="dialog-wrap">
           <div ref="deletePanel" role="dialog" aria-modal="true" aria-label="确认删除日志" :aria-busy="deleting" tabindex="-1" class="dialog delete-dialog">
             <div class="dialog-ico"><AppIcon name="trash" :size="22" /></div>
@@ -473,9 +474,10 @@ function itemSub(item) {
 </template>
 
 <style scoped>
-.delete-overlay { position: fixed; inset: 0; height: 100dvh; z-index: 80; align-items: center; background: #0008; padding: 16px; }
+.delete-overlay { z-index: 80; align-items: center; padding: 16px; }
+.delete-overlay > .scrim { background: #0008; backdrop-filter: none; -webkit-backdrop-filter: none; }
 .delete-overlay .dialog-wrap { width: min(100%, 420px); max-height: 100%; }
-.delete-dialog { background: var(--surface-solid); max-height: calc(100dvh - 32px); }
+.delete-dialog { background: var(--surface-solid); max-height: calc(var(--vvh, 100vh) - 32px); }
 .delete-dialog .dialog-actions .btn { min-width: 0; padding-inline: 8px; }
 .log-entry { display: flex; align-items: center; gap: 8px; }
 .log-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow: visible; }

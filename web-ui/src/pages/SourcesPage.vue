@@ -632,9 +632,11 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 
 .source-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: 'name meta' 'url url';
-  gap: 2px 8px;
+  /* Metadata must never reserve a column at the expense of the source name. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: 'name' 'url' 'meta';
+  min-width: 0;
+  gap: 4px;
   padding: 10px 12px;
   text-align: left;
   border-radius: 14px;
@@ -649,6 +651,8 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 
 .source-name {
   grid-area: name;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 13.5px;
   font-weight: 700;
 }
@@ -662,13 +666,28 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 
 .source-meta {
   grid-area: meta;
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 5px;
 }
 
+.source-meta > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.source-meta .chip {
+  height: auto;
+  min-height: 20px;
+  white-space: normal;
+}
+
 .pager {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;

@@ -158,6 +158,23 @@ describe('日志独立详情', () => {
     expect(document.querySelector('.delete-overlay')).toBeNull()
     expect(store.bridge.call).not.toHaveBeenCalled()
   })
+  it('全视口背景遮罩可取消，删除进行中点击遮罩不会关闭或重复删除', async () => {
+    let release
+    const { wrapper, store } = await setup(() => result({ items: [{ id: 1 }] }), () => new Promise(resolve => { release = resolve }))
+    await button(wrapper, '删除').trigger('click')
+    const backdrop = () => new DOMWrapper(document.querySelector('.delete-overlay .scrim'))
+    expect(document.querySelector('.delete-overlay .scrim')).not.toBeNull()
+    await backdrop().trigger('click'); await flushPromises()
+    expect(document.querySelector('.delete-overlay')).toBeNull()
+    expect(store.bridge.call).not.toHaveBeenCalled()
+    await button(wrapper, '删除').trigger('click')
+    await button(wrapper, '确认删除').trigger('click'); await flushPromises()
+    await backdrop().trigger('click'); await flushPromises()
+    expect(document.querySelector('.delete-overlay')).not.toBeNull()
+    expect(store.bridge.call).toHaveBeenCalledTimes(1)
+    release({ kind: 'operation', deletedIds: [], missingIds: [], failed: [{ id: '1', code: 'delete_failed' }] })
+    await flushPromises()
+  })
   it('删除期间锁定确认、取消、Escape、系统返回及重复提交；失败项仍可重试', async () => {
     let release
     const { wrapper, store } = await setup(() => result({ items: [{ id: 1 }] }), () => new Promise(resolve => { release = resolve }))

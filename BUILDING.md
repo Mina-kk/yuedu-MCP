@@ -26,6 +26,19 @@ bash scripts/build-web.sh
 
 APK 输出至 `app/build/outputs/apk/debug/app-debug.apk`，测试报告位于 `app/build/reports/tests/testDebugUnitTest/`。另跑 `python -m unittest discover -s tests -p 'test_*.py'` 检查构建契约。`legacy-ui/` 仅保留旧 UI 迁移资料，不进入 APK 编译。
 
+### 布局与旧 WebView 回归
+
+在 `web-ui` 下使用 Node 22+ 与本地 Chromium 执行以下脚本；浏览器进程树同样需要资源限额。旧引擎只打开 localhost 的固定测试数据，不访问外部网页或真实账户。
+
+```bash
+node scripts/resolution-browser-regression.mjs # 生产 dist，导航/书源/弹窗/动态视口
+node tests/viewport-layout.mjs                # 生产构建，视口变化/安全区/缩放/短屏
+node tests/keyboard-layout.mjs                # 完整组件，短屏编辑与保存命中
+node scripts/sources-responsive-regression.mjs # 名称+完整元数据，六宽度/深浅/字放大
+```
+
+前三项可用 `CHROMIUM=/path/to/chrome` 切换实际引擎；最后一项使用 `CHROMIUM_PATH`，这些脚本通过 CDP 连接本地浏览器，不需要另装自动化库。`UI_DIST` 可指定从已发布 APK 解压的 `assets/web` 做修复前对照。脚本未替换 UA 来冒充旧内核；不支持 `dvh` 的 Chromium 102 与当前内核须分别运行。宿主桥 fixture、模拟 visualViewport、浏览器字体放大与真实 Android 安装/IME/持久化证据必须分开报告。
+
 GitHub Actions 配置见 `.github/workflows/ci.yml`，运行单元测试并构建 Debug APK，不使用 Release 签名凭据。
 
 ## 全库去重重建语料

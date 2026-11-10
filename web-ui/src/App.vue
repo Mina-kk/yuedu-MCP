@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { createStore, PAGES } from './store.js'
 import { applyTheme, watchSystem } from './theme.js'
 import { createBackHandler } from './lib/back.js'
+import { observeViewport } from './lib/viewport.js'
 import { core } from './lib/core.js'
 import AppIcon from './components/Icon.vue'
 import Sheet from './components/Sheet.vue'
@@ -67,6 +68,7 @@ watch(() => [s.themeIdx, s.mode], applyThemeNow)
 // rawIme is a visibility signal only: Android already removed its pixels from
 // the WebView. Both viewports resize together, so their difference is zero.
 let hostKeyboardOpen = false
+let hasHostInsets = false
 let keyboardFrame = 0
 function revealKeyboardFocus() {
   cancelAnimationFrame(keyboardFrame)
@@ -91,8 +93,14 @@ function syncKeyboardFlag() {
   const el = document.documentElement
   const ime = Number(s.insets && s.insets.ime) || 0
   let open = hostKeyboardOpen || ime > 0
-  if (!open && typeof window !== 'undefined' && window.visualViewport) {
-    open = window.innerHeight - window.visualViewport.height > 120
+  if (!open && !hasHostInsets && window.visualViewport) {
+    const viewport = window.visualViewport
+    const field = document.activeElement
+    const editing = field?.matches('input:not([readonly]), textarea:not([readonly]), [contenteditable="true"]')
+    // Browser chrome and pinch zoom also shrink visualViewport. Neither means
+    // an IME; native inset events, when present, are the authoritative signal.
+    open = Boolean(editing && Math.abs((viewport.scale || 1) - 1) < 0.01 &&
+      window.innerHeight - viewport.height > 120)
   }
   el.setAttribute('data-keyboard', open ? '1' : '0')
   if (open) revealKeyboardFocus()
@@ -140,6 +148,7 @@ function onHostEvent(event, payload) {
       const p = payload && typeof payload === 'object' ? payload : {}
       const rawIme = Number(p.rawIme)
       hostKeyboardOpen = Number.isFinite(rawIme) && rawIme > 0
+      hasHostInsets = true
       syncKeyboardFlag()
       const el = document.documentElement
       // 宿主已原生避让：它下发的值（通常 0/0/0）就是最终值，UI 不再叠加。
@@ -240,15 +249,11 @@ function closeSheet() {
 
 onMounted(() => {
   applyThemeNow()
-  syncKeyboardFlag()
+  unsubscribers.push(observeViewport(window, document.documentElement, syncKeyboardFlag))
   unsubscribers.push(watchSystem(() => applyThemeNow()))
   unsubscribers.push(store.bridge.onEvent(onHostEvent))
   window.addEventListener('keydown', onKeydown)
-  window.addEventListener('resize', syncKeyboardFlag)
-  window.addEventListener('focusin', revealKeyboardFocus)
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', syncKeyboardFlag)
-  }
+  window.addEventListener('focusin', syncKeyboardFlag)
   loadCore()
   store.bootstrap().then(() => {
     if (s.bootstrapOk) store.loadTools()
@@ -264,12 +269,8 @@ onBeforeUnmount(() => {
     }
   })
   window.removeEventListener('keydown', onKeydown)
-  window.removeEventListener('resize', syncKeyboardFlag)
-  window.removeEventListener('focusin', revealKeyboardFocus)
+  window.removeEventListener('focusin', syncKeyboardFlag)
   cancelAnimationFrame(keyboardFrame)
-  if (window.visualViewport) {
-    window.visualViewport.removeEventListener('resize', syncKeyboardFlag)
-  }
   store.bridge.dispose && store.bridge.dispose('unmount')
 })
 </script>

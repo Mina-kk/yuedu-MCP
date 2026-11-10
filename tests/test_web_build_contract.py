@@ -42,8 +42,8 @@ class WebBuildContractTest(unittest.TestCase):
         app = (ROOT / 'app/build.gradle.kts').read_text()
         db = (ROOT / 'app/src/main/java/com/mina/legadostudio/data/db/StudioDatabase.kt').read_text()
         self.assertIn('applicationId = "com.mina.legadostudio"', app)
-        self.assertIn('versionCode = 204', app)
-        self.assertIn('versionName = "2.0.3"', app)
+        self.assertIn('versionCode = 205', app)
+        self.assertIn('versionName = "2.0.4"', app)
         self.assertIn('"studio-v1.db"', db)
         self.assertNotIn('.fallbackToDestructiveMigration', db)
 
