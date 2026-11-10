@@ -5,7 +5,7 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`2.0.4`（versionCode 205，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.5`（versionCode 206，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
@@ -25,10 +25,14 @@ MCP 页显示服务状态、接入端点及真实工具目录；右上角**设�
    - **服务器链接（所有客户端）**：`http://127.0.0.1:58823/mcp`；客户端不在同一台设备时切「局域网」，使用 `http://<局域网IP>:58823/mcp`
    - 客户端有 **Token / Bearer Token 输入框** → 只粘贴令牌本身，不要加 `Bearer` 前缀
    - 客户端只有 **自定义请求头（名称 + 值）两个框** → 名称填 `Authorization`，值填 `Bearer <令牌>`（名称填成 `Bearer` 是常见错误，会 401）
-   - 客户端没有任何鉴权输入 → 建议换用支持鉴权的客户端；不要为局域网或远程接入关闭令牌校验
-   - **复制客户端配置**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制，跟随连接模式；令牌只写入系统剪贴板，不回显在页面
-3. 鉴权统一使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
+   - 客户端没有任何鉴权输入 → 可在本 App 的 **访问令牌校验** 开关中确认关闭，之后 Token/请求头留空即可。关闭后所有能访问该服务的设备都可能调用工具；局域网或远程使用建议保持开启
+   - **复制客户端配置**：标准 `mcpServers` JSON（Claude Code / Cline / Cherry Studio 等）整段复制，按实际鉴权开关决定是否附加请求头；令牌只写入系统剪贴板，不回显在页面
+3. 开启访问令牌校验时使用 MCP 规范的标准头：**`Authorization: Bearer <令牌>`**
 4. 调用 `get_app_info` 可查看版本、运行能力及构建标识 `buildRevision`（源码提交标识）与 `buildType`（`debug`/`release`）。反馈问题时请提供版本和构建标识，不要提交访问令牌或未脱敏日志。
+
+### 访问令牌校验
+
+MCP 首页可直接切换 **访问令牌校验**，关闭前有 Vue 确认；设置页也可调整并保存。新安装默认开启，重启保留用户选择。关闭不删除令牌，重新开启沿用原令牌。开启时点击“复制令牌”粘贴到客户端 Token 输入框（不加 Bearer 前缀），或使用标准 Authorization Bearer 请求头。这里不提供 OAuth 登录；关闭后客户端 Token/请求头留空即可。
 
 #### 连接模式：标准 / 精简（省 token）
 

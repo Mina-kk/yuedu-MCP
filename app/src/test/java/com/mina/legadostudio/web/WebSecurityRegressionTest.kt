@@ -24,11 +24,36 @@ class WebSecurityRegressionTest {
         assertTrue(WebBridgeProtocol.parseSettings(JsonObject().apply { addProperty("userAgent", "Mozilla/5.0 Test") }) is WebBridgeProtocol.SettingsParse.Ok)
     }
 
-    @Test fun serverSecuresLegacyConfigBeforeOpeningListener() {
+    @Test fun serverLoadsUsersAuthenticationChoiceBeforeOpeningListener() {
         val text = source("com/mina/legadostudio/service/McpService.kt")
         val start = text.substringAfter("private fun startServer()")
-        val guard = start.indexOf("store.requireAuthentication()")
-        assertTrue("guard must precede socket bind", guard >= 0 && guard < start.indexOf("embeddedServer("))
+        val guard = start.indexOf("store.load()")
+        assertTrue("persisted configuration must precede socket bind", guard >= 0 && guard < start.indexOf("embeddedServer("))
+        assertFalse(start.contains("requireAuthentication()"))
+        assertTrue(start.contains("configureStudioMcp(store::load, hosts, origins)"))
+    }
+
+    @Test fun trustedBridgeAdvertisesEditableAuthenticationAndCopiesActualConfig() {
+        val text = source("com/mina/legadostudio/web/StudioWebBridge.kt")
+        assertTrue(text.contains("addProperty(\"tokenRequiredLocked\", false)"))
+        assertTrue(text.contains("addProperty(\"tokenRequiredEditable\", true)"))
+        assertTrue(text.contains("McpAccess.clientConfigJson(url, config.token, tokenRequired = config.tokenRequired)"))
+        val copy = text.substringAfter("private suspend fun connectionCopy").substringBefore("// --- tools.list")
+        assertTrue(copy.contains("clipboard.setPrimaryClip(clip)"))
+        assertTrue(copy.contains("return WebBridgePolicy.copiedAck()"))
+        val state = text.substringAfter("private suspend fun serviceState").substringBefore("private suspend fun runtimeState")
+        assertFalse(state.contains("config.token)"))
+        assertTrue(state.contains("includeToken = false"))
+    }
+
+    @Test fun bridgeUsesAtomicPatchAndReadbackInsideSharedSaveLock() {
+        val text = source("com/mina/legadostudio/web/StudioWebBridge.kt")
+        val save = text.substringAfter("private suspend fun settingsSave").substringBefore("private fun applyAppearanceToHost")
+        assertTrue(save.contains("mcp.updateConnection(draft.port, draft.tokenRequired)"))
+        assertFalse(save.contains("tokenRequired = true"))
+        assertTrue(save.contains("if (draft.tokenRequired != null) failed += \"tokenRequired\""))
+        assertTrue("readback belongs to save transaction", save.indexOf("val result = bootstrap()") < save.lastIndexOf("return@withLock result"))
+        assertFalse("save lock must cover all bridge instances", text.contains("private val settingsLock = Mutex()\n\n    /** 本地工具"))
     }
 
     @Test fun safReservesOneOperationAcrossBothPickers() {

@@ -23,8 +23,8 @@ JS：`StudioBridge.postMessage(JSON.stringify({id, method, params}))`
 |---|---|---|
 | `app.bootstrap` | `{}` | `{versionName,versionCode,buildRevision,ui:"rust-vue",service:{running,starting,port,tokenRequired,endpoints,compact},runtime:{userAgent,bookSourceType},reader:{baseUrl,tokenSaved,revision},appearance:{theme,palette},capabilities:{...}}` |
 | `service.set` | `{action:"start"|"stop"|"restart"}` | 最新 service 状态（不回 token） |
-| `settings.save` | `{port?,compact?,userAgent?,bookSourceType?,readerBaseUrl?,readerToken?,appearance?}` | bootstrap 回读；所有字段先整体验证再写；readerToken 缺省保留同 origin 令牌，改 origin 则原规则清除；禁止暴露 tokenRequired=false 操作 |
-| `connection.copy` | `{kind:"url"|"token"|"json",lan?:boolean}` | `{copied:true}`；秘密直接写本机剪贴板，不向 JS 回 token；URL 取真实配置/本机地址 |
+| `settings.save` | `{port?,tokenRequired?,compact?,userAgent?,bookSourceType?,readerBaseUrl?,readerToken?,appearance?}` | bootstrap 回读；所有字段先整体验证再写；`tokenRequired` 只接受布尔值，缺省/null 保持当前选择。新安装默认开启，用户可经可信 Vue 界面确认关闭，load/start/restart 不强行改回。端口和其他设置更新保留未指定鉴权值；关闭保留原 token。readerToken 缺省保留同 origin 令牌，改 origin 则原规则清除 |
+| `connection.copy` | `{kind:"url"|"token"|"json",lan?:boolean}` | `{copied:true}`；秘密直接写本机剪贴板，不向 JS 回 token；URL 取真实配置/本机地址，JSON 仅在实际 `tokenRequired=true` 时包含 Authorization Bearer 头 |
 | `tools.list` | `{}` | `{tools:[{name,description,inputSchema,annotations}]}`；与真实 MCP 注册表共用，不造目录 |
 | `tools.call` | `{name,arguments:{...}}` | MCP CallToolResult 原形（content/isError），与真实工具 dispatch 共用；不绕过参数、日志、上下文和证据处理 |
 | `verification.list` | `{}` | `{sessions:[{id,domain,url,purpose,status,kind,imageData,finalUrl,canOpen,addressIssue,...}]}`；`addressIssue=missing_url/unsupported_url/""`，历史无地址会话保留但不可打开 |
@@ -40,6 +40,12 @@ JS：`StudioBridge.postMessage(JSON.stringify({id, method, params}))`
 | `app.exit` | `{}` | `{closing:true}`；前端先弹自有确认 |
 
 未来 profile 选择通过 sandboxProfile 字段和后续规则契约扩展，当前宿主不杜撰 profile 类型。
+
+### 可选 MCP 访问令牌
+
+`capabilities.tokenRequiredEditable=true` 表明宿主支持用户设置鉴权，`tokenRequiredLocked=false` 保留兼容字段。网络 MCP 不增加修改鉴权工具。Vue 在关闭前显示可达本机/局域网客户端无需令牌的风险与确认，取消不写；保存后严格检查 `service.tokenRequired` 回读，缺字段、partial 或不一致必须报错，不能本地伪改状态。部分保存可能已改变鉴权，失败后首页标记未知、禁用按旧值切换，完整重新读取才恢复；设置保留草稿并按重读的实际值更新比较基线。首页与设置显示实际值，busy 不可重复提交；跨保存/重读边界的旧 service.set 回包不覆盖鉴权。
+
+HTTP 每次请求按当前配置决定是否要求 Bearer：关闭时无需 Authorization，开启后无/错 token 返回401、原 token 可用。Host/Origin 与第三方 WebView 隔离继续保留。token 不进入 bootstrap/DOM/日志，只经明确复制操作写系统剪贴板；启用时指引客户端填写 Token 或 `Authorization: Bearer <令牌>`，不是 OAuth。关闭时客户端 Token/请求头留空；不删除或重置安全存储令牌。
 
 ## 真实工具复用方式
 

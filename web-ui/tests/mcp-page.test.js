@@ -56,6 +56,151 @@ async function mountPage(handlers) {
 }
 
 describe('McpPage', () => {
+  it('首页关闭访问令牌校验先Vue确认，取消不写，确认后仅保存鉴权字段并等真实回读', async () => {
+    let resolveSave
+    const initial = { ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true, tokenRequiredLocked: false } }
+    const { wrapper, store, bridge } = await mountPage({
+      'app.bootstrap': async () => initial,
+      'tools.list': async () => TOOLS,
+      'settings.save': () => new Promise(resolve => { resolveSave = resolve })
+    })
+    const toggle = wrapper.find('[role="switch"][aria-label="访问令牌校验"]')
+    expect(toggle.exists()).toBe(true)
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    await toggle.trigger('click')
+    expect(store.state.dialog?.message).toMatch(/本机|局域网/)
+    expect(store.state.dialog?.message).toMatch(/无需令牌|无令牌/)
+    store.closeDialog()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toEqual([])
+    await toggle.trigger('click')
+    const accept = store.state.dialog.onAccept
+    store.closeDialog()
+    const saving = accept()
+    await flushPromises()
+    expect(toggle.attributes('disabled')).toBeDefined()
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    await toggle.trigger('click')
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toEqual([['settings.save', { tokenRequired: false }]])
+    resolveSave({ ...initial, service: { ...BOOTSTRAP.service, tokenRequired: false } })
+    await saving; await flushPromises()
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    expect(store.state.toast?.kind).toBe('ok')
+  })
+
+  it('关闭状态指引留空Token和Authorization，复制令牌仍可用；开启直接保存不弹风险确认', async () => {
+    const off = { ...BOOTSTRAP, service: { ...BOOTSTRAP.service, tokenRequired: false }, capabilities: { tokenRequiredEditable: true } }
+    const { wrapper, store, bridge } = await mountPage({
+      'app.bootstrap': async () => off, 'tools.list': async () => TOOLS,
+      'settings.save': async ({ tokenRequired }) => ({ ...off, service: { ...off.service, tokenRequired } }),
+      'connection.copy': async () => ({ copied: true })
+    })
+    expect(wrapper.text()).toContain('免令牌')
+    expect(wrapper.text()).toContain('Token 和 Authorization 请求头留空')
+    await wrapper.findAll('button').find(b => b.text() === '复制令牌').trigger('click'); await flushPromises()
+    expect(bridge.calls).toContainEqual(['connection.copy', { kind: 'token', lan: false }])
+    await wrapper.get('[aria-label="访问令牌校验"]').trigger('click'); await flushPromises()
+    expect(store.state.dialog).toBeNull()
+    expect(bridge.calls).toContainEqual(['settings.save', { tokenRequired: true }])
+    expect(wrapper.get('[aria-label="访问令牌校验"]').attributes('aria-checked')).toBe('true')
+  })
+
+  it.each([
+    ['android', {}], ['web', { tokenRequiredEditable: true }],
+    ['android', { tokenRequiredEditable: false }]
+  ])('首页宿主%s/%j不支持更改时明确禁用，不发送写入', async (kind, capabilities) => {
+    const bridge = fakeBridge({ 'app.bootstrap': async () => ({ ...BOOTSTRAP, capabilities }), 'tools.list': async () => TOOLS })
+    bridge.kind = kind
+    const store = createStore({ bridge }); await store.bootstrap()
+    const wrapper = mount(McpPage, { props: { store } }); await flushPromises()
+    const toggle = wrapper.get('[aria-label="访问令牌校验"]')
+    expect(toggle.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('不支持更改访问令牌校验')
+    await toggle.trigger('click')
+    expect(bridge.calls.some(([m]) => m === 'settings.save')).toBe(false)
+  })
+
+  it.each(['rejected', 'mismatch', 'partial', 'missing'])('首页保存%s保留错误并标未知，不toast成功', async result => {
+    const initial = { ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true } }
+    const { wrapper, store } = await mountPage({
+      'app.bootstrap': async () => initial, 'tools.list': async () => TOOLS,
+      'settings.save': async () => {
+        if (result === 'rejected') throw new Error('host write failed')
+        if (result === 'missing') return {}
+        if (result === 'mismatch') return initial
+        return { ...initial, service: { ...initial.service, tokenRequired: false }, partial: true, failed: ['service'] }
+      }
+    })
+    await wrapper.get('[aria-label="访问令牌校验"]').trigger('click')
+    const accept = store.state.dialog.onAccept; store.closeDialog(); await accept(); await flushPromises()
+    const toggle = wrapper.get('[aria-label="访问令牌校验"]')
+    expect(toggle.attributes('aria-checked')).toBeUndefined()
+    expect(toggle.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('访问令牌校验状态未知')
+    expect(wrapper.text()).not.toMatch(/已开启 · 连接需要令牌|已关闭 · 免令牌访问|当前免令牌访问|将纯令牌粘贴/)
+    expect(wrapper.get('[role="alert"]').text()).toMatch(/failed|保存/)
+    expect(store.state.toast.kind).toBe('err')
+  })
+
+  it.each([true, false])('首页从%s部分保存后不再展示或切换旧值，重读恢复后反向写入', async initialRequired => {
+    let hostRequired = initialRequired
+    let readFails = false
+    const snapshot = () => ({ ...BOOTSTRAP, service: { ...BOOTSTRAP.service, tokenRequired: hostRequired }, capabilities: { tokenRequiredEditable: true } })
+    const { wrapper, store, bridge } = await mountPage({
+      'app.bootstrap': async () => { if (readFails) throw new Error('readback failed'); return snapshot() },
+      'tools.list': async () => TOOLS,
+      'settings.save': async payload => {
+        hostRequired = payload.tokenRequired
+        return payload.compact ? { ...snapshot(), partial: true, failed: ['compact'] } : snapshot()
+      }
+    })
+    // The settings panel can save auth successfully while compact fails.
+    await expect(store.saveSettings({ tokenRequired: !initialRequired, compact: true })).rejects.toThrow('compact')
+    await flushPromises()
+    const toggle = wrapper.get('[aria-label="访问令牌校验"]')
+    expect(toggle.attributes('aria-checked')).toBeUndefined()
+    expect(wrapper.text()).toContain('访问令牌校验状态未知')
+    expect(toggle.attributes('disabled')).toBeDefined()
+    await toggle.trigger('click')
+    expect(store.state.dialog).toBeNull()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toHaveLength(1)
+    readFails = true
+    await wrapper.findAll('button').find(b => b.text() === '重试').trigger('click'); await flushPromises()
+    expect(toggle.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('readback failed')
+    readFails = false
+    await wrapper.findAll('button').find(b => b.text() === '重试').trigger('click'); await flushPromises()
+    expect(toggle.attributes('disabled')).toBeUndefined()
+    expect(toggle.attributes('aria-checked')).toBe(String(!initialRequired))
+    await toggle.trigger('click')
+    if (!initialRequired) {
+      const accept = store.state.dialog.onAccept
+      store.closeDialog(); await accept()
+    }
+    await flushPromises()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save').at(-1)[1]).toEqual({ tokenRequired: initialRequired })
+    expect(toggle.attributes('aria-checked')).toBe(String(initialRequired))
+    expect(store.state.toast.kind).toBe('ok')
+  })
+
+  it('复制失败显示真实错误，不假报已复制', async () => {
+    const { wrapper, store } = await mountPage({ 'app.bootstrap': async () => BOOTSTRAP, 'tools.list': async () => TOOLS, 'connection.copy': async () => ({ copied: false }) })
+    await wrapper.findAll('button').find(b => b.text() === '复制令牌').trigger('click'); await flushPromises()
+    expect(store.state.toast.kind).toBe('err')
+    expect(store.state.toast.text).not.toContain('已复制')
+  })
+
+  it('共享设置保存期间首页开关禁用，即使页面重挂也不重复操作', async () => {
+    const { wrapper, store, bridge } = await mountPage({
+      'app.bootstrap': async () => ({ ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true } }), 'tools.list': async () => TOOLS
+    })
+    store.state.settingsSaving = true
+    await flushPromises()
+    expect(wrapper.get('[aria-label="访问令牌校验"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[aria-label="访问令牌校验"]').trigger('click')
+    expect(store.state.dialog).toBeNull()
+    expect(bridge.calls.some(([m]) => m === 'settings.save')).toBe(false)
+  })
+
   it('系统返回保护未保存内容，取消保留、确认才退出', async () => {
     const { wrapper, store } = await mountPage({ 'app.bootstrap': async () => BOOTSTRAP, 'tools.list': async () => TOOLS })
     await wrapper.find('.tool-row').trigger('click'); await flushPromises()
@@ -110,7 +255,10 @@ describe('McpPage', () => {
     expect(wrapper.text()).toContain('运行中')
     expect(wrapper.text()).toContain('8787')
     expect(wrapper.text()).toContain('http://127.0.0.1:8787/mcp')
-    expect(wrapper.text()).not.toMatch(/Bearer|token=/i)
+    expect(wrapper.text()).toContain('Authorization: Bearer <令牌>')
+    expect(wrapper.text()).toContain('纯令牌')
+    expect(wrapper.text()).toContain('无需 OAuth')
+    expect(wrapper.html()).not.toMatch(/token=|type="password"/i)
   })
 
   it('启动/停止按钮调用 service.set', async () => {
@@ -131,11 +279,14 @@ describe('McpPage', () => {
       'tools.list': async () => TOOLS,
       'connection.copy': async () => ({ copied: true })
     })
+    const beforeCopy = wrapper.html()
     const copyToken = wrapper.findAll('button').find((b) => b.text().includes('复制令牌'))
     await copyToken.trigger('click')
     await flushPromises()
     expect(bridge.calls.some(([m, p]) => m === 'connection.copy' && p.kind === 'token')).toBe(true)
-    expect(wrapper.html()).not.toMatch(/Bearer\s+[A-Za-z0-9]/)
+    expect(wrapper.html()).toBe(beforeCopy)
+    // “Bearer Token” is the client field label, never a credential.
+    expect(wrapper.html()).not.toMatch(/Bearer\s+(?!Token\b)[A-Za-z0-9]/)
   })
 
   it('工具目录来自 tools.list，可按名称搜索', async () => {

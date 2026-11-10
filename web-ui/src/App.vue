@@ -121,6 +121,7 @@ const rootBack = createBackHandler({
 })
 
 function handleBack() {
+  if (!s.dialog && s.settingsSaving) return
   if (s.dialog || s.sheet) return rootBack()
   if (verifyBrowserOpen.value) return closeVerifyBrowser()
   if (pageRef.value?.handleBack?.()) return
@@ -196,8 +197,9 @@ async function connectWeb({ endpoint, token }) {
 
 async function saveSettings(payload) {
   try {
-    await store.saveSettings(payload)
+    const snapshot = await store.saveSettings(payload)
     store.toast('设置已保存')
+    return snapshot
   } catch (error) {
     store.toast((error && error.message) || '保存失败', 'err')
     throw error
@@ -240,6 +242,7 @@ function acceptDialog() {
 }
 
 function closeSheet() {
+  if (s.settingsSaving) return
   if (s.sheetDirty) {
     store.requestDiscard(s.sheet)
     return
@@ -334,6 +337,10 @@ onBeforeUnmount(() => {
     >
       <SettingsPanel
         :bootstrap="s.bootstrap"
+        :bootstrap-ok="s.bootstrapOk"
+        :bridge-kind="s.bridgeKind"
+        :settings-saving="s.settingsSaving"
+        :confirm-dialog="store.confirmDialog"
         :runtime-connected="s.runtimeConnected"
         :bootstrap-error="s.bootstrapError"
         :core-status="s.coreStatus"

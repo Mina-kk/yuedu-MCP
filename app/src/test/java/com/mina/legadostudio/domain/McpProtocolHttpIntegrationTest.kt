@@ -2,6 +2,7 @@ package com.mina.legadostudio.domain
 
 import com.mina.legadostudio.mcp.McpConfigStore
 import com.mina.legadostudio.mcp.configureStudioMcp
+import com.mina.legadostudio.testsupport.McpConfigDiskFixture
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO as ClientCIO
 import io.ktor.client.plugins.HttpTimeout
@@ -45,8 +46,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 
 class McpProtocolHttpIntegrationTest {
+    @get:Rule val directory = TemporaryFolder()
     private val legacyVersions = listOf("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
     private val schema = ToolSchema(
         properties = buildJsonObject { put("step", buildJsonObject { put("type", "integer") }) },
@@ -154,7 +158,10 @@ class McpProtocolHttpIntegrationTest {
         }
     }
 
-    private fun httpTest(block: suspend Harness.() -> Unit) = runBlocking {
+    private fun httpTest(
+        config: () -> McpConfigStore.Config = { McpConfigStore.Config(1237, true, "fixture-token") },
+        block: suspend Harness.() -> Unit,
+    ) = runBlocking {
         val servers = CopyOnWriteArrayList<Server>()
         val factoryCalls = AtomicInteger()
         val client = HttpClient(ClientCIO) {
@@ -167,7 +174,7 @@ class McpProtocolHttpIntegrationTest {
         }
         val engine = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
             configureStudioMcp(
-                configProvider = { McpConfigStore.Config(1237, true, "fixture-token") },
+                configProvider = config,
                 allowedHosts = listOf("127.0.0.1", "localhost"),
                 allowedOrigins = listOf("http://127.0.0.1:1237", "http://localhost:1237"),
             ) {
@@ -224,6 +231,36 @@ class McpProtocolHttpIntegrationTest {
         assertEquals("counter=1", post(counter(8), session, "2025-03-26").result(JsonPrimitive(8))
             .getValue("content").jsonArray.single().jsonObject.getValue("text").jsonPrimitive.content)
         assertEquals(1, factoryCalls.get())
+    }
+
+    @Test(timeout = 45_000) fun persistedOffAllowsRealHttpAndReenabledAuthUsesOriginalToken() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        disk.seed("tokenRequired" to false)
+        val store = disk.store()
+        val original = store.load()
+        httpTest(config = { disk.store().load() }) {
+            val init = post(initializeBody(), authorization = null, version = null)
+            init.result(JsonPrimitive(1))
+            val session = init.headers["Mcp-Session-Id"]!!
+            assertEquals(202, post("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", session, authorization = null).status)
+            assertEquals(1, post(rpc(2, "tools/list"), session, authorization = null).result(JsonPrimitive(2)).getValue("tools").jsonArray.size)
+            assertEquals("counter=1", post(counter(3), session, authorization = null).result(JsonPrimitive(3))
+                .getValue("content").jsonArray.single().jsonObject.getValue("text").jsonPrimitive.content)
+            assertEquals(403, post(rpc(4, "tools/list"), session, authorization = null, host = "hostile.example").status)
+            assertEquals(403, post(rpc(4, "tools/list"), session, authorization = null, origin = "https://hostile.example").status)
+            store.save(original.copy(tokenRequired = true))
+            assertEquals(401, post(rpc(5, "tools/list"), session, authorization = null).status)
+            assertEquals(401, post(initializeBody(), authorization = null).status)
+            assertEquals(401, post(rpc(5, "tools/list"), session, authorization = "Bearer wrong").status)
+            post(rpc(6, "tools/list"), session, authorization = "Bearer ${original.token}").result(JsonPrimitive(6))
+            assertEquals(original.token, disk.store().load().token)
+            store.save(original.copy(tokenRequired = false))
+        }
+        // New real listener after recreation must still honor the saved off state.
+        httpTest(config = { disk.store().load() }) {
+            post(initializeBody(), authorization = null).result(JsonPrimitive(1))
+        }
+        assertEquals(0, disk.tokenWrites)
     }
 
     @Test(timeout = 45_000) fun bearerIsCheckedOnEveryRequestAndHealthIsPublicWithNoStore() = httpTest {

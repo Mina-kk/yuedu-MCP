@@ -35,6 +35,166 @@ const BOOTSTRAP = {
 }
 
 describe('store', () => {
+  it.each([true, false])('鉴权从%s部分保存后标未知，重读失败不解锁，完整重读后才能反向切换', async initialRequired => {
+    let hostRequired = initialRequired
+    let readFails = false
+    let partial = true
+    const snapshot = () => ({ ...BOOTSTRAP, service: { ...BOOTSTRAP.service, tokenRequired: hostRequired }, capabilities: { tokenRequiredEditable: true } })
+    const bridge = fakeBridge({
+      'app.bootstrap': async () => {
+        if (readFails) throw new Error('readback unavailable')
+        return snapshot()
+      },
+      'settings.save': async ({ tokenRequired }) => {
+        hostRequired = tokenRequired
+        return partial ? { ...snapshot(), partial: true, failed: ['compact'] } : snapshot()
+      }
+    })
+    const store = createStore({ bridge })
+    await store.bootstrap()
+    await expect(store.saveSettings({ tokenRequired: !initialRequired, compact: true })).rejects.toThrow(/compact/)
+    expect(hostRequired).toBe(!initialRequired)
+    expect(store.state.bootstrapOk).toBe(false)
+    expect(store.state.bootstrapError).toMatch(/compact/)
+    expect(store.state.toast?.kind).not.toBe('ok')
+    await expect(store.saveSettings({ tokenRequired: initialRequired })).rejects.toThrow()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toHaveLength(1)
+    readFails = true
+    await store.bootstrap()
+    expect(store.state.bootstrapOk).toBe(false)
+    expect(store.state.bootstrapError).toContain('readback unavailable')
+    readFails = false
+    await store.bootstrap()
+    expect(store.state.bootstrapOk).toBe(true)
+    expect(store.state.service.tokenRequired).toBe(hostRequired)
+    partial = false
+    await store.saveSettings({ tokenRequired: !store.state.service.tokenRequired })
+    expect(bridge.calls.filter(([m]) => m === 'settings.save').at(-1)[1]).toEqual({ tokenRequired: initialRequired })
+    expect(hostRequired).toBe(initialRequired)
+  })
+
+  it.each([
+    ['missing receipt', null],
+    ['empty receipt', {}],
+    ['service-only receipt', { service: { tokenRequired: false } }],
+    ['missing field', { service: { port: 8787 } }],
+    ['wrong type', { service: { tokenRequired: 'false' } }],
+    ['old state', BOOTSTRAP],
+    ['partial', { ...BOOTSTRAP, service: { tokenRequired: false }, partial: true, failed: ['service'] }],
+    ['failed fields', { ...BOOTSTRAP, service: { tokenRequired: false }, failed: ['service'] }]
+  ])('鉴权保存拒绝%s且不能本地假改状态或报成功', async (_name, reply) => {
+    const bridge = fakeBridge({
+      'app.bootstrap': async () => ({ ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true } }),
+      'settings.save': async () => reply
+    })
+    const store = createStore({ bridge })
+    await store.bootstrap()
+    await expect(store.saveSettings({ tokenRequired: false })).rejects.toThrow(/回读|保存/)
+    expect(store.state.service.tokenRequired).toBe(true)
+    expect(store.state.bootstrapOk).toBe(false)
+    expect(store.state.bootstrapError).toMatch(/回读|保存/)
+    await expect(store.saveSettings({ tokenRequired: false })).rejects.toThrow()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toHaveLength(1)
+    expect(store.state.toast?.kind).not.toBe('ok')
+    expect(bridge.calls.filter(([m]) => m === 'app.bootstrap')).toHaveLength(1)
+  })
+
+  it.each([
+    ['missing', null], ['empty', {}], ['missing auth', { ...BOOTSTRAP, service: { port: 8787 } }],
+    ['wrong auth type', { ...BOOTSTRAP, service: { tokenRequired: 'false' } }],
+    ['partial', { ...BOOTSTRAP, partial: true, failed: ['compact'] }],
+    ['failed', { ...BOOTSTRAP, failed: ['compact'] }]
+  ])('鉴权状态未知后%s重读不能复活旧状态', async (_label, badRead) => {
+    let reply = { ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true } }
+    const bridge = fakeBridge({ 'app.bootstrap': async () => reply, 'settings.save': async () => null })
+    const store = createStore({ bridge }); await store.bootstrap()
+    await expect(store.saveSettings({ tokenRequired: false })).rejects.toThrow()
+    reply = badRead
+    await store.bootstrap()
+    expect(store.state.bootstrapOk).toBe(false)
+    expect(store.state.bootstrapError).toMatch(/回读|读取/)
+    await expect(store.saveSettings({ tokenRequired: false })).rejects.toThrow()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toHaveLength(1)
+  })
+
+  it('无效的其他设置回包也不能解锁未知鉴权', async () => {
+    const initial = { ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true } }
+    const store = createStore({ bridge: fakeBridge({ 'app.bootstrap': async () => initial, 'settings.save': async () => ({}) }) })
+    await store.bootstrap()
+    await expect(store.saveSettings({ tokenRequired: false })).rejects.toThrow()
+    await expect(store.saveSettings({ compact: true })).rejects.toThrow(/回读/)
+    expect(store.state.bootstrapOk).toBe(false)
+  })
+
+  it.each([true, false])('迟到service.set不能覆盖从%s保存后的鉴权值', async initialRequired => {
+    let resolveService
+    const initial = { ...BOOTSTRAP, service: { ...BOOTSTRAP.service, tokenRequired: initialRequired }, capabilities: { tokenRequiredEditable: true } }
+    const bridge = fakeBridge({
+      'app.bootstrap': async () => initial,
+      'service.set': () => new Promise(resolve => { resolveService = resolve }),
+      'settings.save': async ({ tokenRequired }) => ({ ...initial, service: { ...initial.service, tokenRequired } })
+    })
+    const store = createStore({ bridge }); await store.bootstrap()
+    const oldService = store.setService('restart')
+    await store.saveSettings({ tokenRequired: !initialRequired })
+    resolveService(initial.service); await oldService
+    expect(store.state.service.tokenRequired).toBe(!initialRequired)
+    expect(store.state.bootstrap.service.tokenRequired).toBe(!initialRequired)
+    expect(store.state.bootstrapOk).toBe(true)
+  })
+
+  it('保存期间service.set回包不能将旧鉴权重新合入状态', async () => {
+    let resolveSave, resolveService
+    const initial = { ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true } }
+    const bridge = fakeBridge({
+      'app.bootstrap': async () => initial,
+      'service.set': () => new Promise(resolve => { resolveService = resolve }),
+      'settings.save': () => new Promise(resolve => { resolveSave = resolve })
+    })
+    const store = createStore({ bridge }); await store.bootstrap()
+    const saving = store.saveSettings({ tokenRequired: false })
+    const service = store.setService('restart')
+    resolveService({ ...initial.service, tokenRequired: false }); await service
+    expect(store.state.service.tokenRequired).toBe(true)
+    expect(store.state.bootstrap.capabilities.tokenRequiredEditable).toBe(true)
+    resolveSave({ ...initial, service: { ...initial.service, tokenRequired: false } }); await saving
+    expect(store.state.service.tokenRequired).toBe(false)
+  })
+
+  it('鉴权仅采用完整回读且阻止并发保存，旧bootstrap不能覆盖保存结果', async () => {
+    let resolveSave, resolveOld
+    let reads = 0
+    const initial = { ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true } }
+    const bridge = fakeBridge({
+      'app.bootstrap': () => ++reads === 1 ? initial : new Promise(resolve => { resolveOld = resolve }),
+      'settings.save': () => new Promise(resolve => { resolveSave = resolve })
+    })
+    const store = createStore({ bridge })
+    await store.bootstrap()
+    const oldRead = store.bootstrap()
+    const saving = store.saveSettings({ tokenRequired: false })
+    await expect(store.saveSettings({ tokenRequired: true })).rejects.toThrow(/保存中/)
+    expect(store.state.settingsSaving).toBe(true)
+    resolveSave({ ...initial, service: { ...initial.service, tokenRequired: false } })
+    await saving
+    resolveOld(initial); await oldRead
+    expect(store.state.service.tokenRequired).toBe(false)
+    expect(store.state.settingsSaving).toBe(false)
+    expect(store.state.bootstrapping).toBe(false)
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toHaveLength(1)
+  })
+
+  it.each([
+    ['android', {}], ['web', { tokenRequiredEditable: true }],
+    ['android', { tokenRequiredEditable: true, tokenRequiredLocked: true }]
+  ])('不支持的宿主%s/%j禁止发送鉴权写入', async (kind, capabilities) => {
+    const bridge = fakeBridge({ 'app.bootstrap': async () => ({ ...BOOTSTRAP, capabilities }), 'settings.save': async () => BOOTSTRAP })
+    bridge.kind = kind
+    const store = createStore({ bridge }); await store.bootstrap()
+    await expect(store.saveSettings({ tokenRequired: false })).rejects.toThrow(/不支持/)
+    expect(bridge.calls.some(([m]) => m === 'settings.save')).toBe(false)
+  })
+
   it('验证完成及迟到页面事件不会重新打开已关闭的验证视图', () => {
     const store = createStore({ bridge: fakeBridge({}) })
     for (const action of ['open', 'close', 'closed', 'completed', 'url', 'title']) {
@@ -132,6 +292,18 @@ describe('store', () => {
     await store.setService('stop')
     expect(bridge.calls.some(([m, p]) => m === 'service.set' && p.action === 'stop')).toBe(true)
     expect(store.state.service.running).toBe(false)
+  })
+
+  it.each([null, {}, { copied: false }, { copied: 'true' }])('复制回执%j不能假报成功，必须抛错', async receipt => {
+    const store = createStore({ bridge: fakeBridge({ 'connection.copy': async () => receipt }) })
+    await expect(store.copyConnection('token')).rejects.toThrow(/复制/)
+    expect(store.state.toast?.kind).not.toBe('ok')
+  })
+
+  it('复制保留宿主真实错误且不报成功', async () => {
+    const store = createStore({ bridge: fakeBridge({ 'connection.copy': async () => { throw new Error('clipboard denied') } }) })
+    await expect(store.copyConnection('token')).rejects.toThrow('clipboard denied')
+    expect(store.state.toast?.kind).not.toBe('ok')
   })
 
   it('连接复制只调用 connection.copy，不把 token 放进状态', async () => {

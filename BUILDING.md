@@ -93,7 +93,7 @@ python scripts/reconcile_corpus.py \
 
 服务使用 Streamable HTTP 传输和 `initialize` 握手，当前可协商 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25` 协议版本。尚不支持 [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle) 的逐请求版本元数据及 `server/discover` 模式。
 
-鉴权为静态 Bearer 令牌，不提供 OAuth 流程。当前 SDK 的 Host/Origin 检查按主机名匹配，不能视为严格同源或完整 CORS 策略；局域网及远程接入应保留令牌校验并限制访问范围。
+鉴权为可选的静态 Bearer 令牌，不提供 OAuth 流程。新安装默认开启；用户可经可信 Vue 界面确认关闭，重启保留选择；关闭不清除既有令牌。当前 SDK 的 Host/Origin 检查按主机名匹配，不能视为严格同源或完整 CORS 策略；局域网及远程接入建议保留令牌校验并限制访问范围。
 
 ## Release 签名构建
 

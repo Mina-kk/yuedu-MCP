@@ -482,9 +482,6 @@ internal object WebBridgeProtocol {
 
     /**
      * 已校验的设置增量。所有字段可空 = 未提供（保持原值）。
-     *
-     * [tokenRequiredLocked] 恒为 true：契约禁止任何「关闭令牌校验」的操作，
-     * 前端传入 tokenRequired 字段会被忽略而不是报错（避免暴露该开关的存在）。
      */
     data class SettingsDraft(
         val port: Int? = null,
@@ -495,7 +492,7 @@ internal object WebBridgeProtocol {
         val readerToken: String? = null,
         val appearanceTheme: String? = null,
         val appearancePalette: String? = null,
-        val tokenRequiredLocked: Boolean = true,
+        val tokenRequired: Boolean? = null,
     )
 
     sealed interface SettingsParse {
@@ -551,6 +548,7 @@ internal object WebBridgeProtocol {
         }
 
         val port = int("port", MIN_PORT..MAX_PORT)
+        val tokenRequired = bool("tokenRequired")
         val compact = bool("compact")
         val userAgent = str("userAgent")?.also { ua ->
             if (ua.trim().length !in MIN_UA..MAX_UA) errors += "userAgent 长度必须在 $MIN_UA..$MAX_UA"
@@ -608,6 +606,7 @@ internal object WebBridgeProtocol {
         return SettingsParse.Ok(
             SettingsDraft(
                 port = port,
+                tokenRequired = tokenRequired,
                 compact = compact,
                 userAgent = userAgent,
                 bookSourceType = bookSourceType,

@@ -362,11 +362,27 @@ class WebBridgeProtocolTest {
     }
 
     @Test
-    fun `settings never accept tokenRequired override`() {
-        // tokenRequired 只能由宿主保持 true；前端传 false 必须被忽略（不是报错，而是不可能生效）
-        val ok = settings("""{"port":58823,"tokenRequired":false}""") as WebBridgeProtocol.SettingsParse.Ok
-        assertTrue(ok.settings.tokenRequiredLocked)
-        assertFalse(ok.settings.toString().contains("tokenRequired=false"))
+    fun `settings preserve the explicit boolean authentication choice`() {
+        for (required in listOf(false, true)) {
+            val ok = settings("""{"port":58823,"tokenRequired":$required}""") as WebBridgeProtocol.SettingsParse.Ok
+            assertEquals(com.google.gson.JsonPrimitive(required), WebBridgeProtocol.toJson(ok.settings).asJsonObject.get("tokenRequired"))
+        }
+    }
+
+    @Test
+    fun `settings reject non boolean authentication before any write`() {
+        for (raw in listOf("\"false\"", "\"true\"", "0", "1", "[]", "{}")) {
+            assertTrue("tokenRequired=$raw must fail", settings("""{"port":58824,"tokenRequired":$raw}""") is WebBridgeProtocol.SettingsParse.Bad)
+        }
+    }
+
+    @Test
+    fun `omitted or null authentication keeps the stored choice`() {
+        for (payload in listOf("{}", """{"tokenRequired":null}""")) {
+            val ok = settings(payload) as WebBridgeProtocol.SettingsParse.Ok
+            val value = WebBridgeProtocol.toJson(ok.settings).asJsonObject.get("tokenRequired")
+            assertTrue(value == null || value.isJsonNull)
+        }
     }
 
     @Test

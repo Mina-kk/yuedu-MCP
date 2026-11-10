@@ -7,6 +7,13 @@ import { loadTheme, saveTheme, modeFrom, paletteIndex, palette } from './lib/pal
 
 export const PAGES = ['mcp', 'sources', 'skills', 'verify', 'logs']
 
+export const TOKEN_DISABLE_CONFIRM = {
+  title: '关闭访问令牌校验？',
+  message: '关闭后，能连接此 MCP 地址的本机或局域网设备将无需令牌即可访问工具和数据。仅在可信环境使用；现有令牌会保留，可随时重新开启校验。',
+  confirmLabel: '确认关闭校验',
+  danger: true
+}
+
 export function createStore({ bridge: injected, storage } = {}) {
   const bridge = injected || createBridge()
   const store = storage || (typeof localStorage !== 'undefined' ? localStorage : null)
@@ -18,6 +25,7 @@ export function createStore({ bridge: injected, storage } = {}) {
     runtimeConnected: bridge.connected,
     webEndpoint: '',
     bootstrapOk: false,
+    settingsSaving: false,
     bootstrapError: '',
     bootstrapping: false,
     bootstrap: null,
@@ -57,6 +65,7 @@ export function createStore({ bridge: injected, storage } = {}) {
   let bridgeRef = bridge
   let themeEpoch = 0
   let bootstrapSeq = 0
+  let settingsReadbackRequired = false
   let pendingAppearance = null
   let appearanceSaving = false
 
@@ -112,6 +121,13 @@ export function createStore({ bridge: injected, storage } = {}) {
     }
   }
 
+  function hasAuthSnapshot(snapshot) {
+    return snapshot && !snapshot.partial && !snapshot.failed?.length &&
+      [snapshot.service, snapshot.runtime, snapshot.reader, snapshot.capabilities]
+        .every(value => value && typeof value === 'object' && !Array.isArray(value)) &&
+      typeof snapshot.service.tokenRequired === 'boolean'
+  }
+
   async function bootstrap() {
     bootstrapSeq += 1
     const seq = bootstrapSeq
@@ -127,8 +143,12 @@ export function createStore({ bridge: injected, storage } = {}) {
       const snapshot = await bridgeRef.call('app.bootstrap', {})
       // 只接受最后一次 bootstrap 的回包，避免并发重试互相覆盖。
       if (seq !== bootstrapSeq) return snapshot
+      if ((settingsReadbackRequired || snapshot?.capabilities?.tokenRequiredEditable === true) && !hasAuthSnapshot(snapshot)) {
+        throw new Error('状态回读无效或不完整，请重新读取状态')
+      }
       applyBootstrap(snapshot)
       adoptHostAppearance(snapshot, epochAtRequest)
+      settingsReadbackRequired = false
       state.bootstrapOk = true
       return snapshot
     } catch (error) {
@@ -164,9 +184,14 @@ export function createStore({ bridge: injected, storage } = {}) {
   }
 
   async function setService(action) {
+    const seq = bootstrapSeq
     try {
       const result = await bridgeRef.call('service.set', { action })
-      if (result) applyBootstrap({ service: result })
+      // service.set also contains auth. A response crossing a save/read boundary
+      // is stale; the page will obtain a fresh bootstrap after the action.
+      if (result && seq === bootstrapSeq && !state.settingsSaving) {
+        applyBootstrap({ ...state.bootstrap, service: { ...state.service, ...result } })
+      }
       toast(action === 'stop' ? '已请求停止服务' : action === 'restart' ? '已请求重启服务' : '已请求启动服务')
       return result
     } catch (error) {
@@ -177,6 +202,7 @@ export function createStore({ bridge: injected, storage } = {}) {
 
   async function copyConnection(kind, lan = false) {
     const result = await bridgeRef.call('connection.copy', { kind, lan })
+    if (result?.copied !== true) throw new Error('复制失败：宿主未确认写入剪贴板')
     toast('已复制到剪贴板')
     return result
   }
@@ -199,22 +225,49 @@ export function createStore({ bridge: injected, storage } = {}) {
    * settings.save：宿主整体校验后返回 bootstrap 回读快照。
    * 失败必须抛出真实错误给设置面板显示，不能假装保存成功。
    */
-  async function saveSettings(payload) {
+  async function saveSettings(payload = {}) {
+    if (state.settingsSaving) throw new Error('设置保存中，请稍候')
+    const changesToken = payload.tokenRequired != null
+    if (changesToken && (bridgeRef.kind !== 'android' || !bridgeRef.connected || !state.bootstrapOk ||
+      state.capabilities.tokenRequiredEditable !== true || state.capabilities.tokenRequiredLocked === true)) {
+      throw new Error('当前宿主不支持更改访问令牌校验')
+    }
+    if (changesToken && typeof payload.tokenRequired !== 'boolean') throw new Error('访问令牌校验必须为布尔值')
+    state.settingsSaving = true
     const epochAtRequest = themeEpoch
-    const snapshot = await bridgeRef.call('settings.save', payload || {})
-    if (snapshot && typeof snapshot === 'object') {
+    // Invalidate older reads, including one started while this save is in flight.
+    bootstrapSeq += 1
+    state.bootstrapping = false
+    try {
+      const snapshot = await bridgeRef.call('settings.save', payload)
+      bootstrapSeq += 1
+      state.bootstrapping = false
+      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+        throw new Error('设置保存回读无效，未确认生效，请重新读取状态')
+      }
+      if (snapshot.partial || (Array.isArray(snapshot.failed) && snapshot.failed.length)) {
+        throw new Error(`部分设置未保存：${Array.isArray(snapshot.failed) ? snapshot.failed.join('、') || '未知字段' : '未知字段'}；请重新读取状态`)
+      }
+      if (((changesToken || settingsReadbackRequired) && !hasAuthSnapshot(snapshot)) ||
+        (changesToken && snapshot.service.tokenRequired !== payload.tokenRequired)) {
+        throw new Error('访问令牌校验保存回读不一致或缺失，未确认生效，请重新读取状态')
+      }
       applyBootstrap(snapshot)
       adoptHostAppearance(snapshot, epochAtRequest)
+      settingsReadbackRequired = false
       state.bootstrapOk = true
       state.bootstrapError = ''
-      if (snapshot.partial) {
-        throw new Error(`部分设置未保存：${(snapshot.failed || []).join('、') || '未知字段'}`)
-      }
-    } else {
-      // 宿主没回快照时显式重读，绝不假设已生效。
-      await bootstrap()
-    }
-    return snapshot
+      return snapshot
+    } catch (error) {
+      // A failed/partial write can still have changed auth on the host. Keep
+      // drafts and the last snapshot, but never treat it as current until reread.
+      bootstrapSeq += 1
+      settingsReadbackRequired = true
+      state.bootstrapping = false
+      state.bootstrapOk = false
+      state.bootstrapError = error?.message || '设置保存未确认，请重新读取状态'
+      throw error
+    } finally { state.settingsSaving = false }
   }
 
   function openSheet(name) {

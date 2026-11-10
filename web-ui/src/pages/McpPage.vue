@@ -5,6 +5,7 @@ import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ToolResult from '../components/ToolResult.vue'
 import { callToolParsed, itemsOf, prettyJson } from '../lib/tools.js'
+import { TOKEN_DISABLE_CONFIRM } from '../store.js'
 
 // MCP 连接页：真实服务状态（app.bootstrap）、启停（service.set）、连接复制（connection.copy）、
 // 工具目录（tools.list，真实注册表 73 项）与参数 JSON 调用器（tools.call）。
@@ -25,6 +26,11 @@ const result = ref(null)
 const resultError = ref('')
 const pendingConfirm = ref(null)
 const busyService = ref(false)
+const savingToken = ref(false)
+const tokenError = ref('')
+const tokenKnown = computed(() => s.runtimeConnected && s.bootstrapOk && typeof s.service?.tokenRequired === 'boolean')
+const tokenEditable = computed(() => s.bridgeKind === 'android' && s.runtimeConnected &&
+  tokenKnown.value && s.capabilities?.tokenRequiredEditable === true && s.capabilities?.tokenRequiredLocked !== true)
 
 const service = computed(() => s.service || {})
 const statusLabel = computed(() => {
@@ -110,6 +116,25 @@ async function copy(kind, lan = false) {
   } catch (error) {
     props.store.toast((error && error.message) || '复制失败', 'err')
   }
+}
+
+function toggleTokenRequired() {
+  if (!tokenEditable.value || savingToken.value || s.settingsSaving) return
+  const next = service.value.tokenRequired === false
+  const save = async () => {
+    if (!tokenEditable.value || savingToken.value || s.settingsSaving) return
+    savingToken.value = true
+    tokenError.value = ''
+    try {
+      await props.store.saveSettings({ tokenRequired: next })
+      props.store.toast(next ? '访问令牌校验已开启' : '访问令牌校验已关闭')
+    } catch (error) {
+      tokenError.value = error?.message || '访问令牌校验保存失败'
+      props.store.toast(tokenError.value, 'err')
+    } finally { savingToken.value = false }
+  }
+  if (next) return save()
+  props.store.confirmDialog({ ...TOKEN_DISABLE_CONFIRM, onAccept: save })
 }
 
 function handleBack() {
@@ -236,7 +261,7 @@ const prettyResult = computed(() => {
       <div class="stat">
         <span class="stat-label">端口</span>
         <span class="stat-value">{{ service.port || '—' }}</span>
-        <span class="stat-sub">{{ service.tokenRequired ? '需要令牌' : '无令牌' }}</span>
+        <span class="stat-sub">{{ !tokenKnown ? '鉴权状态未知' : service.tokenRequired ? '需要令牌' : '无令牌' }}</span>
       </div>
       <div class="stat">
         <span class="stat-label">客户端</span>
@@ -284,6 +309,17 @@ const prettyResult = computed(() => {
           <AppIcon name="refresh" :size="16" /><span>重启</span>
         </button>
       </div>
+      <div class="row">
+        <div class="row-text">
+          <span class="row-title">访问令牌校验</span>
+          <span class="row-sub">{{ !tokenKnown ? '访问令牌校验状态未知，请重新读取状态' : service.tokenRequired ? '已开启 · 连接需要令牌' : '已关闭 · 免令牌访问' }}</span>
+        </div>
+        <button type="button" class="switch" :role="tokenKnown ? 'switch' : 'button'" aria-label="访问令牌校验"
+          :class="{ on: tokenKnown && service.tokenRequired }" :aria-checked="tokenKnown ? String(service.tokenRequired) : undefined"
+          :aria-busy="String(savingToken || s.settingsSaving)" :disabled="!tokenEditable || savingToken || s.settingsSaving" @click="toggleTokenRequired"><i></i></button>
+      </div>
+      <p v-if="tokenKnown && !tokenEditable" class="hint">当前宿主不支持更改访问令牌校验，请在支持此功能的 Android App 内操作。</p>
+      <p v-if="tokenError" class="code-block err" role="alert">{{ tokenError }}</p>
       <div class="endpoint-list">
         <div v-for="ep in service.endpoints || []" :key="ep" class="endpoint-row">
           <code class="mono">{{ ep }}</code>
@@ -301,6 +337,11 @@ const prettyResult = computed(() => {
           <AppIcon name="copy" :size="15" /><span>复制客户端配置</span>
         </button>
       </div>
+      <p v-if="tokenKnown && service.tokenRequired" class="hint">
+        点击“复制令牌”，将纯令牌粘贴到客户端的 Token / Bearer Token 字段（不要再加 Bearer 前缀）；
+        若使用自定义请求头，填写 <code>Authorization: Bearer &lt;令牌&gt;</code>。无需 OAuth 授权。
+      </p>
+      <p v-else-if="tokenKnown" class="hint">当前免令牌访问：客户端 Token 和 Authorization 请求头留空，无需 OAuth。现有令牌仍保留，可通过“复制令牌”获取。</p>
       <p class="hint">令牌只写入本机剪贴板，不会显示在页面里。</p>
     </div>
 

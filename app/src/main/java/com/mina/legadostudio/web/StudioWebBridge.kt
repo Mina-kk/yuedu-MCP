@@ -69,9 +69,6 @@ internal class StudioWebBridge(
     private val main = Handler(Looper.getMainLooper())
     private val pending = WebBridgePending()
 
-    /** settings.save 串行化：两个并发保存不允许交错写各自的字段。 */
-    private val settingsLock = Mutex()
-
     /** 本地工具实例：每 Activity 一个，销毁释放；不是网络客户端（registerSession=false）。 */
     private val localServer: StudioMcpServer by lazy {
         StudioMcpServer(activity.applicationContext, compact = false).also { it.create(registerSession = false) }
@@ -247,7 +244,7 @@ internal class StudioWebBridge(
         obj.addProperty("running", running)
         obj.addProperty("starting", starting)
         obj.addProperty("port", config.port)
-        // 回真实值：启动/保存时已强制 tokenRequired=true，这里不靠硬编码掩盖旧设置。
+        // 用户明确选择可关闭；启动、保存和回包都读取同一持久化值。
         obj.addProperty("tokenRequired", config.tokenRequired)
         val endpointArray = JsonArray()
         endpoints.forEach { endpointArray.add(McpAccess.connectionUrl(it, compact)) }
@@ -312,7 +309,8 @@ internal class StudioWebBridge(
         obj.addProperty("saf", safHost != null)
         obj.addProperty("verificationBrowser", true)
         obj.addProperty("toolCount", withContext(Dispatchers.IO) { localTools().size })
-        obj.addProperty("tokenRequiredLocked", true)
+        obj.addProperty("tokenRequiredLocked", false)
+        obj.addProperty("tokenRequiredEditable", true)
         obj.addProperty("notificationPermission", readiness?.notificationPermission ?: false)
         obj.addProperty("notificationsEnabled", readiness?.notificationsEnabled ?: false)
         obj.addProperty("batteryUnrestricted", readiness?.batteryUnrestricted ?: false)
@@ -357,14 +355,14 @@ internal class StudioWebBridge(
         }
         val context = activity.applicationContext
         val failed = mutableListOf<String>()
-        // 写前校验必须在任何写之前（含端口/UA）：令牌单独保存需要已有 origin。
-        if (draft.readerBaseUrl == null && draft.readerToken != null) {
-            val existing = withContext(Dispatchers.IO) { ReaderWebConfigStore(context).load() }
-            if (existing == null) {
-                throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "尚未配置阅读地址，无法单独保存令牌")
+        return settingsLock.withLock {
+            // 写前校验在共享锁内且早于任何写：令牌单独保存需要已有 origin。
+            if (draft.readerBaseUrl == null && draft.readerToken != null) {
+                val existing = withContext(Dispatchers.IO) { ReaderWebConfigStore(context).load() }
+                if (existing == null) {
+                    throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "尚未配置阅读地址，无法单独保存令牌")
+                }
             }
-        }
-        settingsLock.withLock {
             withContext(Dispatchers.IO) {
                 val mcp = McpConfigStore(context)
                 val runtime = RuntimeConfigStore(context)
@@ -377,13 +375,12 @@ internal class StudioWebBridge(
                     }
                 }
 
-                // 端口：tokenRequired 恒 true，绝不写 false。
-                draft.port?.let { port ->
-                    step("port") {
-                        val current = mcp.load()
-                        if (port != current.port || !current.tokenRequired) {
-                            mcp.save(McpConfigStore.Config(port = port, tokenRequired = true, token = current.token))
-                        }
+                // 原子增量合并，不携带过期快照，不生成/重置现有令牌。
+                if (draft.port != null || draft.tokenRequired != null) {
+                    runCatching { mcp.updateConnection(draft.port, draft.tokenRequired) }.onFailure {
+                        if (draft.port != null) failed += "port"
+                        if (draft.tokenRequired != null) failed += "tokenRequired"
+                        StudioLog.add("settings.save connection failed", "W", "web", it.javaClass.simpleName)
                     }
                 }
                 draft.compact?.let { compact -> step("compact") { mcp.saveCompactMode(compact) } }
@@ -411,17 +408,17 @@ internal class StudioWebBridge(
                     step("appearancePalette") { WebAppearance.save(context, palette = palette, mode = null) }
                 }
             }
+            // 主题立即生效（系统栏），再回读 bootstrap 让前端确认落盘值。
+            withContext(Dispatchers.Main) { applyAppearanceToHost() }
+            val result = bootstrap()
+            if (failed.isNotEmpty()) {
+                result.addProperty("partial", true)
+                val array = JsonArray()
+                failed.forEach { array.add(it) }
+                result.add("failed", array)
+            }
+            return@withLock result
         }
-        // 主题立即生效（系统栏），再回读 bootstrap 让前端确认落盘值。
-        withContext(Dispatchers.Main) { applyAppearanceToHost() }
-        val result = bootstrap()
-        if (failed.isNotEmpty()) {
-            result.addProperty("partial", true)
-            val array = JsonArray()
-            failed.forEach { array.add(it) }
-            result.add("failed", array)
-        }
-        return result
     }
 
     private fun applyAppearanceToHost() {
@@ -451,7 +448,7 @@ internal class StudioWebBridge(
             ConnectionKind.URL -> url
             // 「复制令牌」= 纯 token（Vue 文案如此），不是 Authorization 头。
             ConnectionKind.TOKEN -> config.token
-            ConnectionKind.JSON -> McpAccess.clientConfigJson(url, config.token, tokenRequired = true)
+            ConnectionKind.JSON -> McpAccess.clientConfigJson(url, config.token, tokenRequired = config.tokenRequired)
         }
         val label = when (kind) {
             ConnectionKind.URL -> "MCP Endpoint"
@@ -821,6 +818,8 @@ internal class StudioWebBridge(
     internal class BridgeFailure(val code: String, message: String?) : RuntimeException(message)
 
     companion object {
+        /** Settings writes AND bootstrap readback are serialized across Activity recreation. */
+        private val settingsLock = Mutex()
         const val BRIDGE_OBJECT = "StudioBridge"
         private const val TAG = "StudioWebBridge"
 

@@ -64,6 +64,109 @@ afterEach(() => {
 })
 
 describe('App shell', () => {
+  it.each([true, false])('设置从%s部分保存保留草稿和错误，首页及面板禁用直到可信重读', async initialRequired => {
+    let hostRequired = initialRequired
+    let readFails = false
+    const snapshot = () => ({ ...BOOTSTRAP, service: { ...BOOTSTRAP.service, tokenRequired: hostRequired }, capabilities: { tokenRequiredEditable: true } })
+    const bridge = installStudioBridge(handlers({
+      'app.bootstrap': async () => { if (readFails) throw new Error('readback unavailable'); return snapshot() },
+      'settings.save': async payload => {
+        if (typeof payload.tokenRequired === 'boolean') hostRequired = payload.tokenRequired
+        return { ...snapshot(), partial: true, failed: ['compact'] }
+      }
+    }))
+    const wrapper = mount(App); await flushPromises()
+    const selector = '[aria-label="访问令牌校验"]'
+    await wrapper.get('button[aria-label="设置"]').trigger('click'); await flushPromises()
+    const sheet = () => wrapper.get('.sheet-layer:not(.dialog-layer)')
+    await sheet().get(selector).trigger('click')
+    await sheet().get('input[inputmode="numeric"]').setValue('8788')
+    await sheet().findAll('button').find(b => b.text() === '保存设置').trigger('click')
+    if (initialRequired) await wrapper.get('[role="alertdialog"]').findAll('button').find(b => b.text().includes('确认关闭')).trigger('click')
+    await flushPromises()
+    expect(hostRequired).toBe(!initialRequired)
+    expect(sheet().get('input[inputmode="numeric"]').element.value).toBe('8788')
+    expect(sheet().get(selector).attributes('aria-checked')).toBe(String(!initialRequired))
+    expect(sheet().get(selector).attributes('disabled')).toBeDefined()
+    expect(sheet().text()).toContain('当前鉴权状态未知')
+    expect(wrapper.get('.page').text()).toContain('访问令牌校验状态未知')
+    expect(wrapper.text()).not.toContain('设置已保存')
+    await sheet().findAll('button').find(b => b.text() === '保存设置').trigger('click'); await flushPromises()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toHaveLength(1)
+    readFails = true
+    await sheet().findAll('button').find(b => b.text() === '重新读取状态').trigger('click'); await flushPromises()
+    expect(sheet().get(selector).attributes('disabled')).toBeDefined()
+    readFails = false
+    await sheet().findAll('button').find(b => b.text() === '重新读取状态').trigger('click'); await flushPromises()
+    expect(sheet().get(selector).attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('.page').get(selector).attributes('aria-checked')).toBe(String(!initialRequired))
+    expect(sheet().get('input[inputmode="numeric"]').element.value).toBe('8788')
+    expect(sheet().text()).toContain('compact')
+    // The readback is the new baseline; the next draft toggle must not be
+    // mistaken for returning to the pre-save value and omitted from payload.
+    await sheet().get(selector).trigger('click')
+    await sheet().findAll('button').find(b => b.text() === '保存设置').trigger('click')
+    if (!initialRequired) await wrapper.get('[role="alertdialog"]').findAll('button').find(b => b.text().includes('确认关闭')).trigger('click')
+    await flushPromises()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save').at(-1)[1].tokenRequired).toBe(initialRequired)
+    expect(hostRequired).toBe(initialRequired)
+    dispatchHostEvent('studio:back', {}); await flushPromises()
+    expect(wrapper.get('[role="alertdialog"]').text()).toContain('放弃未保存')
+    wrapper.unmount()
+  })
+
+  it('首页与设置关闭校验走Vue确认，Back取消不写；设置保存忙碌保护返回和关闭', async () => {
+    let resolveSave
+    const initial = { ...BOOTSTRAP, service: { ...BOOTSTRAP.service, tokenRequired: true }, capabilities: { ...BOOTSTRAP.capabilities, tokenRequiredEditable: true } }
+    const bridge = installStudioBridge(handlers({
+      'app.bootstrap': async () => initial,
+      'settings.save': () => new Promise(resolve => { resolveSave = resolve })
+    }))
+    const nativeConfirm = vi.spyOn(window, 'confirm').mockImplementation(() => { throw new Error('no native confirm') })
+    const wrapper = mount(App); await flushPromises()
+    const selector = '[role="switch"][aria-label="访问令牌校验"]'
+    expect(wrapper.find(selector).exists()).toBe(true)
+    await wrapper.get(selector).trigger('click')
+    expect(wrapper.get('[role="alertdialog"]').text()).toContain('无需令牌')
+    await wrapper.get('[role="alertdialog"]').findAll('button').find(b => b.text() === '取消').trigger('click')
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toEqual([])
+    await wrapper.get(selector).trigger('click')
+    dispatchHostEvent('studio:back', {}); await flushPromises()
+    expect(wrapper.find('[role="alertdialog"]').exists()).toBe(false)
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toEqual([])
+    await wrapper.get('button[aria-label="设置"]').trigger('click'); await flushPromises()
+    const sheet = () => wrapper.get('.sheet-layer:not(.dialog-layer)')
+    expect(sheet().find(selector).exists()).toBe(true)
+    await sheet().get(selector).trigger('click')
+    const save = () => sheet().findAll('button').find(b => b.text() === '保存设置')
+    await save().trigger('click')
+    expect(wrapper.get('[role="alertdialog"]').text()).toContain('关闭访问令牌校验')
+    expect(wrapper.text()).not.toContain('设置已保存')
+    await wrapper.get('[role="alertdialog"]').findAll('button').find(b => b.text() === '取消').trigger('click')
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toEqual([])
+    await save().trigger('click')
+    dispatchHostEvent('studio:back', {}); await flushPromises()
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toEqual([])
+    expect(sheet().get(selector).attributes('aria-checked')).toBe('false')
+    await save().trigger('click')
+    await wrapper.get('[role="alertdialog"]').findAll('button').find(b => b.text().includes('确认关闭')).trigger('click')
+    await flushPromises()
+    dispatchHostEvent('studio:back', {}); await flushPromises()
+    expect(wrapper.find('[role="alertdialog"]').exists()).toBe(false)
+    expect(sheet().exists()).toBe(true)
+    await sheet().findAll('button').find(b => b.text() === '关闭').trigger('click')
+    expect(sheet().exists()).toBe(true)
+    expect(bridge.calls.filter(([m]) => m === 'settings.save')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('设置已保存')
+    resolveSave({ ...initial, service: { ...initial.service, tokenRequired: false } }); await flushPromises()
+    expect(wrapper.text()).toContain('设置已保存')
+    dispatchHostEvent('studio:back', {}); await flushPromises()
+    expect(wrapper.find('.sheet-layer').exists()).toBe(false)
+    expect(wrapper.get(selector).attributes('aria-checked')).toBe('false')
+    expect(nativeConfirm).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it.each(['host-first', 'reply-first'])('顶部完成后当前列表立即回读已完成（%s），无需重进', async order => {
     let rows = [{ id: 'finish-qa', domain: 'example.org', url: 'https://example.org/', status: 'WAITING', kind: 'webview', canOpen: true }]
     const bridge = installStudioBridge(handlers({

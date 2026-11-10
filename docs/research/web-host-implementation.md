@@ -30,7 +30,7 @@
      **只在真正创建过 localServer 时**才 `releaseLocal()`（`localToolsSnapshot != null`），
      不再触发未初始化的 lazy。
 3. **设置与令牌**（`StudioWebBridge.settingsSave`、`WebBridgeProtocol`）
-   - `service.tokenRequired` 回真实值；保存端口时强制 `tokenRequired = true`（旧 false 会被纠正）。
+   - 历史实现曾在保存端口时强制 `tokenRequired = true`；该行为已被用户明确要求撤销。当前契约以 `docs/WEB_UI_CONTRACT.md` 为准：默认开启但可显式关闭，端口更新保留未指定的鉴权值，`service.tokenRequired` 回真实值。
    - 写前完成全部校验：`parseSettings` 聚合所有字段错误；`readerToken` 单独保存需要已存在 origin
      的检查**移到任何写之前**（原先在端口/UA 写之后）。
    - 写入串行化：`Mutex settingsLock`；每个字段独立 `step()`，IO 失败记日志并在回包里

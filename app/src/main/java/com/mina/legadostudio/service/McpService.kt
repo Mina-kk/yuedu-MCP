@@ -155,7 +155,7 @@ class McpService : Service() {
         com.mina.legadostudio.mcp.McpToolUsageRegistry.current = com.mina.legadostudio.mcp.McpToolUsage()
         try {
             val store = McpConfigStore(this)
-            val config = store.requireAuthentication()
+            val config = store.load()
             val addresses = McpAccess.localAddresses()
             lastAddresses = addresses.map { it.hostAddress ?: "" }.toSet()
             val hosts = McpAccess.allowedHosts(addresses)

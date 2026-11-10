@@ -1,78 +1,114 @@
 package com.mina.legadostudio.mcp
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.mina.legadostudio.security.SecureStringStore
 import java.security.SecureRandom
 
-class McpConfigStore(
-    context: Context,
-    private val onTokenChanged: (() -> Unit)? = null,
+class McpConfigStore internal constructor(
+    private val prefs: SharedPreferences,
+    private val readToken: () -> String?,
+    private val writeToken: (String) -> Unit,
+    private val onTokenChanged: () -> Unit,
 ) {
-    private val appContext = context.applicationContext
-    private val prefs = context.getSharedPreferences("mcp_config", Context.MODE_PRIVATE)
-    private val secure = SecureStringStore(context, "studio_mcp_token_v1", "secure_mcp_token_v1")
+    constructor(context: Context, onTokenChanged: (() -> Unit)? = null) : this(
+        context, SecureStringStore(context, "studio_mcp_token_v1", "secure_mcp_token_v1"), onTokenChanged,
+    )
+
+    private constructor(context: Context, secure: SecureStringStore, changed: (() -> Unit)?) : this(
+        context.getSharedPreferences("mcp_config", Context.MODE_PRIVATE),
+        { secure.get("token") },
+        { token ->
+            secure.put("token", token)
+            // commit also waits for preceding apply writes on these encrypted preferences.
+            check(context.getSharedPreferences("secure_mcp_token_v1", Context.MODE_PRIVATE).edit().commit()) {
+                "无法持久化 MCP 令牌"
+            }
+            check(secure.get("token") == token) { "无法确认 MCP 令牌写入" }
+        },
+        changed ?: {
+            kotlin.runCatching {
+                (context.applicationContext as? com.mina.legadostudio.StudioApplication)?.contextEpoch?.bump()
+                    ?: ContextEpochStore(context.applicationContext).bump()
+            }
+            Unit
+        },
+    )
     data class Config(val port: Int, val tokenRequired: Boolean, val token: String)
 
-    fun load(): Config {
-        if (!prefs.getBoolean("v1SecurityInitialized", false) || !prefs.getBoolean("tokenRequired", true)) {
-            check(prefs.edit().putBoolean("tokenRequired", true).putBoolean("v1SecurityInitialized", true).commit()) {
+    fun load(): Config = synchronized(configLock) {
+        if (!prefs.getBoolean("v1SecurityInitialized", false)) {
+            check(prefs.edit().putBoolean("tokenRequired", prefs.getBoolean("tokenRequired", true))
+                .putBoolean("v1SecurityInitialized", true).commit()) {
                 "无法持久化 MCP 鉴权配置"
             }
         }
         if (!prefs.getBoolean("v2DefaultPortMigrated", false)) {
             val storedPort = prefs.getInt("port", LEGACY_DEFAULT_PORT)
-            prefs.edit()
+            check(prefs.edit()
                 .putInt("port", migrateLegacyDefaultPort(storedPort))
                 .putBoolean("v2DefaultPortMigrated", true)
-                .apply()
+                .commit()) { "无法持久化 MCP 端口配置" }
         }
-        val token = secure.get("token")?.takeIf { it.isNotBlank() }
-            ?: prefs.getString("token", null)?.takeIf { it.isNotBlank() }?.also { secure.put("token", it); prefs.edit().remove("token").apply() }
-            ?: generateToken().also { secure.put("token", it) }
-        return Config(
+        val token = readToken()?.takeIf { it.isNotBlank() }
+            ?: prefs.getString("token", null)?.takeIf { it.isNotBlank() }?.also {
+                writeToken(it)
+                check(prefs.edit().remove("token").commit()) { "无法迁移 MCP 令牌" }
+            }
+            ?: generateToken().also { writeToken(it) }
+        Config(
             port = prefs.getInt("port", DEFAULT_PORT).takeIf { it in 1024..65530 } ?: DEFAULT_PORT,
-            tokenRequired = true,
+            tokenRequired = prefs.getBoolean("tokenRequired", true),
             token = token,
         )
     }
 
-    /** Every start/restart path must secure legacy configurations before binding a public listener. */
-    fun requireAuthentication(): Config = load().also {
-        check(it.tokenRequired && it.token.isNotBlank()) { "MCP 鉴权尚未就绪" }
-    }
-
-    fun save(config: Config) {
+    fun save(config: Config) = synchronized(configLock) {
         require(config.port in 1024..65530) { "端口必须在 1024..65530" }
-        require(config.tokenRequired && config.token.isNotBlank()) { "MCP 必须启用非空访问令牌校验" }
-        val oldToken = secure.get("token")
-        prefs.edit().putInt("port", config.port).putBoolean("tokenRequired", config.tokenRequired).apply()
-        secure.put("token", config.token)
+        require(!config.tokenRequired || config.token.isNotBlank()) { "启用访问令牌校验时，访问令牌不能为空" }
+        val oldToken = readToken()
+        if (oldToken != config.token) writeToken(config.token)
+        check(prefs.edit().putInt("port", config.port).putBoolean("tokenRequired", config.tokenRequired)
+            .putBoolean("v1SecurityInitialized", true).putBoolean("v2DefaultPortMigrated", true).commit()) {
+            "无法持久化 MCP 配置"
+        }
+        check(prefs.getInt("port", DEFAULT_PORT) == config.port &&
+            prefs.getBoolean("tokenRequired", true) == config.tokenRequired) { "无法确认 MCP 配置写入" }
         if (oldToken != null && oldToken != config.token) {
             triggerTokenChanged()
         }
     }
 
+    /** Merge under the same process-wide lock as load/save: no stale port-only snapshot can re-enable auth. */
+    fun updateConnection(port: Int?, tokenRequired: Boolean?): Config = synchronized(configLock) {
+        require(port == null || port in 1024..65530) { "端口必须在 1024..65530" }
+        val current = load()
+        if (port != null || tokenRequired != null) {
+            save(current.copy(port = port ?: current.port, tokenRequired = tokenRequired ?: current.tokenRequired))
+        }
+        load()
+    }
+
     /** 客户端接入信息的连接模式偏好（精简 tools/list）。只影响生成给客户端复制的地址，
      *  与安全配置、令牌和服务运行态无关，改动不触发 epoch/服务重启。 */
-    fun loadCompactMode(): Boolean = prefs.getBoolean("compactMode", false)
+    fun loadCompactMode(): Boolean = synchronized(configLock) { prefs.getBoolean("compactMode", false) }
 
-    fun saveCompactMode(compact: Boolean) {
-        prefs.edit().putBoolean("compactMode", compact).apply()
+    fun saveCompactMode(compact: Boolean) = synchronized(configLock) {
+        check(prefs.edit().putBoolean("compactMode", compact).commit()) { "无法持久化 MCP 连接模式" }
     }
 
     private fun triggerTokenChanged() {
-        onTokenChanged?.invoke() ?: runCatching {
-            (appContext as? com.mina.legadostudio.StudioApplication)?.contextEpoch?.bump()
-                ?: ContextEpochStore(appContext).bump()
-        }
+        onTokenChanged()
     }
 
     private fun generateToken(): String {
         val bytes = ByteArray(24).also(SecureRandom()::nextBytes)
-        return android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE)
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
 
     companion object {
+        // All instances (WebView, service and request providers) share the same storage.
+        private val configLock = Any()
         const val DEFAULT_PORT = 58823
         internal const val LEGACY_DEFAULT_PORT = 1237
 
