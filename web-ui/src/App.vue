@@ -61,15 +61,38 @@ function applyThemeNow() {
 
 watch(() => [s.themeIdx, s.mode], applyThemeNow)
 
-// 键盘弹起时隐藏底部导航，避免遮住保存按钮；宿主 insets.ime 与浏览器 visualViewport 都覆盖。
+// rawIme is a visibility signal only: Android already removed its pixels from
+// the WebView. Both viewports resize together, so their difference is zero.
+let hostKeyboardOpen = false
+let keyboardFrame = 0
+function revealKeyboardFocus() {
+  cancelAnimationFrame(keyboardFrame)
+  keyboardFrame = requestAnimationFrame(() => {
+    if (document.documentElement.dataset.keyboard !== '1') return
+    const main = rootRef.value?.querySelector('main')
+    const field = document.activeElement
+    if (!main?.contains(field) || !field.matches('input, textarea, [contenteditable="true"]')) return
+    const area = main.getBoundingClientRect()
+    const bounds = field.getBoundingClientRect()
+    const backHeight = main.querySelector('.detail-navigation')?.getBoundingClientRect().height || 0
+    const top = area.top + backHeight + 4
+    const bottom = area.bottom - 4
+    // Oversized textareas align below the sticky Vue Back row. Scroll only the
+    // main pane, never the document (which would pan the shell header away).
+    if (bounds.top >= bottom || bounds.bottom <= top || bounds.top < top) {
+      main.scrollTop += bounds.top - top
+    }
+  })
+}
 function syncKeyboardFlag() {
   const el = document.documentElement
   const ime = Number(s.insets && s.insets.ime) || 0
-  let open = ime > 0
+  let open = hostKeyboardOpen || ime > 0
   if (!open && typeof window !== 'undefined' && window.visualViewport) {
     open = window.innerHeight - window.visualViewport.height > 120
   }
   el.setAttribute('data-keyboard', open ? '1' : '0')
+  if (open) revealKeyboardFocus()
 }
 
 watch(() => s.insets, syncKeyboardFlag, { deep: true })
@@ -112,6 +135,9 @@ function onHostEvent(event, payload) {
     case 'studio:insets': {
       store.applyInsets(payload)
       const p = payload && typeof payload === 'object' ? payload : {}
+      const rawIme = Number(p.rawIme)
+      hostKeyboardOpen = Number.isFinite(rawIme) && rawIme > 0
+      syncKeyboardFlag()
       const el = document.documentElement
       // 宿主已原生避让：它下发的值（通常 0/0/0）就是最终值，UI 不再叠加。
       const set = (name, value) => {
@@ -215,6 +241,8 @@ onMounted(() => {
   unsubscribers.push(watchSystem(() => applyThemeNow()))
   unsubscribers.push(store.bridge.onEvent(onHostEvent))
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('resize', syncKeyboardFlag)
+  window.addEventListener('focusin', revealKeyboardFocus)
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', syncKeyboardFlag)
   }
@@ -233,6 +261,9 @@ onBeforeUnmount(() => {
     }
   })
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('resize', syncKeyboardFlag)
+  window.removeEventListener('focusin', revealKeyboardFocus)
+  cancelAnimationFrame(keyboardFrame)
   if (window.visualViewport) {
     window.visualViewport.removeEventListener('resize', syncKeyboardFlag)
   }

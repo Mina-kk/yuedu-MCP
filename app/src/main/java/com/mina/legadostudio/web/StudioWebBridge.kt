@@ -591,7 +591,7 @@ internal class StudioWebBridge(
                     }
                 }
             }
-            WebBridgeProtocol.toJson(WebBridgeProtocol.deleteLogs(request, store))
+            logDeleteReceiptJson(WebBridgeProtocol.deleteLogs(request, store))
         }
     }
 
@@ -830,4 +830,19 @@ internal data class SafImportResult(val name: String, val text: String)
 internal interface SafHost {
     suspend fun export(request: SafRequest.Export)
     suspend fun import(): SafImportResult
+}
+
+/** Wire keys must not depend on R8-renamable DTO fields, including nested failures. */
+internal fun logDeleteReceiptJson(result: WebBridgeProtocol.LogDeleteResult): JsonObject = JsonObject().apply {
+    addProperty("kind", result.kind)
+    add("deletedIds", JsonArray().apply { result.deletedIds.forEach { add(it) } })
+    add("missingIds", JsonArray().apply { result.missingIds.forEach { add(it) } })
+    add("failed", JsonArray().apply {
+        result.failed.forEach { failure ->
+            add(JsonObject().apply {
+                addProperty("id", failure.id)
+                addProperty("code", failure.code)
+            })
+        }
+    })
 }

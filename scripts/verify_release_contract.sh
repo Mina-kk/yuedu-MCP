@@ -2,6 +2,45 @@
 set -euo pipefail
 MAP="${1:-app/build/outputs/mapping/release/mapping.txt}"
 [[ -f "$MAP" ]] || { echo "mapping missing: $MAP" >&2; exit 1; }
+# logs.delete uses explicit JSON, not reflected DTO names. Mapping cannot prove
+# this contract: R8 may freely rename/remove both DTOs. Guard the actual bridge
+# path as well as every nested key; JVM contract tests assert values/types.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+python3 - "$ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+source = (pathlib.Path(sys.argv[1]) / "app/src/main/java/com/mina/legadostudio/web/StudioWebBridge.kt").read_text()
+def require(condition, message):
+    if not condition:
+        sys.exit("logs.delete explicit JSON contract lost: " + message)
+
+start = source.index("    private suspend fun logsDelete(")
+end = source.index("    // --- verification.", start)
+body = source[start:end]
+require("logDeleteReceiptJson(WebBridgeProtocol.deleteLogs(request, store))" in body,
+        "bridge must use the explicit receipt writer")
+require("WebBridgeProtocol.toJson(" not in body, "reflective DTO serialization")
+# The writer is deliberately a tiny top-level function at EOF, with no generic
+# serializer calls. Fail closed if its structure changes; review this gate then.
+marker = "internal fun logDeleteReceiptJson("
+require(marker in source, "missing receipt writer")
+writer = source[source.index(marker):]
+require(not re.search(r"\b(?:toJson|toJsonTree|gson|Gson)\b", writer), "reflection in receipt writer")
+for expression in (
+    'addProperty("kind", result.kind)',
+    'add("deletedIds", JsonArray().apply { result.deletedIds.forEach { add(it) } })',
+    'add("missingIds", JsonArray().apply { result.missingIds.forEach { add(it) } })',
+    'add("failed", JsonArray().apply {',
+    'result.failed.forEach { failure ->',
+    'addProperty("id", failure.id)',
+    'addProperty("code", failure.code)',
+):
+    require(expression in writer, "missing explicit expression: " + expression)
+print("LOG_DELETE_EXPLICIT_JSON_SOURCE_OK")
+PY
+
 # MCP + Runtime JSON 契约类保持不混淆。
 classes=(
   com.mina.legadostudio.skills.SkillRepository\$SkillInfo

@@ -171,6 +171,30 @@ html[data-keyboard='1'] .page-body {
   padding-bottom: calc(24px + var(--safe-bottom));
 }
 
+/* A resized Android IME can leave only 156 CSS px. Keep the shell header
+   to one line and give the detail's own sticky Back + editor the rest.
+   Do not alter the native verification overlay's fixed 96px toolbar. */
+@media (max-height: 400px) {
+  html[data-keyboard='1'] .app-shell:not(.verify-open) > .shell-head {
+    flex-wrap: nowrap;
+    gap: 4px;
+    padding: 2px max(8px, var(--safe-right)) 2px max(8px, var(--safe-left));
+  }
+  html[data-keyboard='1'] .app-shell:not(.verify-open) .app-title {
+    font-size: 16px;
+    white-space: nowrap;
+  }
+  html[data-keyboard='1'] .app-shell:not(.verify-open) .app-sub,
+  html[data-keyboard='1'] .app-shell:not(.verify-open) .head-actions > .chip {
+    display: none;
+  }
+  html[data-keyboard='1'] .app-shell:not(.verify-open) > .page-body {
+    padding-top: 0;
+    padding-bottom: 4px;
+    scroll-padding-block: 4px;
+  }
+}
+
 /* Console alerts contain a title, explanation and action, not one inline row. */
 .page > .banner {
   display: flex;
