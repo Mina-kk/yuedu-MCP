@@ -47,6 +47,48 @@ async function setup(rows = [row('a')], overrides = {}) {
   return { wrapper, store, cookies }
 }
 
+describe('VerifyPage completion refresh', () => {
+  it('关闭/完成重读以最后回包为准，迟到待处理快照不覆盖已完成', async () => {
+    let resolveStale
+    let reads = 0
+    const { wrapper, store } = await setup([row('qa')], {
+      'verification.list': () => {
+        reads++
+        if (reads === 2) return new Promise(resolve => { resolveStale = resolve })
+        return { sessions: [row('qa', reads > 2 ? 'COMPLETED' : 'WAITING')] }
+      }
+    })
+    store.state.verificationBrowser = { open: true, sessionId: 'qa', action: 'open' }
+    await flushPromises()
+    store.state.verificationBrowser = { open: false, sessionId: 'qa', action: 'closed' }
+    await flushPromises()
+    store.state.verificationBrowser = { open: false, sessionId: 'qa', action: 'completed' }
+    await flushPromises()
+    expect(wrapper.get('.session').text()).toContain('已完成')
+    resolveStale({ sessions: [row('qa', 'WAITING')] })
+    await flushPromises()
+    expect(wrapper.get('.session').text()).toContain('已完成')
+    expect(wrapper.get('.session').text()).not.toContain('待处理')
+  })
+
+  it('完成后重读失败明确报错，不凭事件伪造完成标签', async () => {
+    let reads = 0
+    const { wrapper, store } = await setup([row('qa')], {
+      'verification.list': () => {
+        if (++reads > 1) throw new Error('本轮回读失败')
+        return { sessions: [row('qa')] }
+      }
+    })
+    store.state.verificationBrowser = { open: true, sessionId: 'qa', action: 'open' }
+    await flushPromises()
+    store.state.verificationBrowser = { open: false, sessionId: 'qa', action: 'completed' }
+    await flushPromises()
+    expect(wrapper.text()).toContain('本轮回读失败')
+    expect(wrapper.text()).not.toContain('已完成')
+    expect(button(wrapper, '刷新').element.disabled).toBe(false)
+  })
+})
+
 describe('VerifyPage address eligibility', () => {
   it.each([
     ['缺少验证地址', { url: '', domain: '', canOpen: false, addressIssue: 'missing_url' }],

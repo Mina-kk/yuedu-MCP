@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { formatTime } from '../lib/tools.js'
@@ -27,8 +27,16 @@ const activeSession = computed(() => {
 })
 
 onMounted(() => load())
+// The toolbar lives in App, so its successful completion does not run this
+// page's act(). Re-read persisted rows when the isolated view returns instead
+// of displaying an optimistic COMPLETED tag or waiting for a page re-entry.
+watch(() => [browserOpen.value, s.verificationBrowser?.action], ([open, action], [wasOpen, previousAction]) => {
+  if (!open && (wasOpen || (action === 'completed' && previousAction !== 'completed'))) load()
+})
+let loadSequence = 0
 
 async function load() {
+  const sequence = ++loadSequence
   if (s.bridgeKind !== 'android') {
     listError.value = '验证中心需要 Android 宿主：浏览器模式没有隔离 WebView，无法打开外站验证页。'
     sessions.value = []
@@ -38,13 +46,15 @@ async function load() {
   listError.value = ''
   try {
     const result = await props.store.bridge.call('verification.list', {})
+    if (sequence !== loadSequence) return
     sessions.value = Array.isArray(result && result.sessions) ? result.sessions : []
     selectedIds.value = selectedIds.value.filter(id => sessions.value.some(x => x.id === id))
   } catch (error) {
+    if (sequence !== loadSequence) return
     sessions.value = []
     listError.value = (error && error.message) || '验证会话读取失败'
   } finally {
-    loading.value = false
+    if (sequence === loadSequence) loading.value = false
   }
 }
 

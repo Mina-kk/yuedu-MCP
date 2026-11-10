@@ -64,6 +64,38 @@ afterEach(() => {
 })
 
 describe('App shell', () => {
+  it.each(['host-first', 'reply-first'])('顶部完成后当前列表立即回读已完成（%s），无需重进', async order => {
+    let rows = [{ id: 'finish-qa', domain: 'example.org', url: 'https://example.org/', status: 'WAITING', kind: 'webview', canOpen: true }]
+    const bridge = installStudioBridge(handlers({
+      'verification.list': async () => ({ sessions: rows.map(row => ({ ...row })) }),
+      'verification.complete': async () => {
+        rows = rows.map(row => ({ ...row, status: 'COMPLETED' }))
+        if (order === 'host-first') {
+          for (const action of ['close', 'closed', 'completed']) dispatchHostEvent('studio:verification-browser', { action, id: 'finish-qa' })
+        }
+        return rows[0]
+      }
+    }))
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.findAll('.tab')[3].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.session').text()).toContain('待处理')
+    dispatchHostEvent('studio:verification-browser', { action: 'open', id: 'finish-qa' })
+    await flushPromises()
+    await wrapper.find('header').findAll('button').find(button => button.text() === '完成').trigger('click')
+    await flushPromises()
+    if (order === 'reply-first') {
+      for (const action of ['close', 'closed', 'completed']) dispatchHostEvent('studio:verification-browser', { action, id: 'finish-qa' })
+      await flushPromises()
+    }
+    expect(wrapper.classes()).not.toContain('verify-open')
+    expect(wrapper.get('.session').text()).toContain('已完成')
+    expect(wrapper.get('.session').text()).not.toContain('待处理')
+    expect(bridge.calls.filter(([method]) => method === 'verification.list').length).toBeGreaterThan(1)
+    wrapper.unmount()
+  })
+
   it.each(['loaded', 'failed'])('Rust %s时页头仍显示bootstrap的APK版本，不混用Rust版本', async status => {
     vi.spyOn(core, 'load').mockResolvedValue(status === 'loaded' ? {} : null)
     vi.spyOn(core, 'status').mockReturnValue(status)
