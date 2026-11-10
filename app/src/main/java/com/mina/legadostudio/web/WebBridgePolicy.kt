@@ -72,26 +72,33 @@ internal object WebBridgePolicy {
         val jobId: String,
     )
 
-    fun verificationListPayload(rows: List<VerificationRow>): JsonObject {
-        val sessions = JsonArray()
-        rows.forEach { row ->
-            val obj = JsonObject()
-            obj.addProperty("id", row.id)
-            obj.addProperty("domain", row.domain)
-            obj.addProperty("url", row.url)
-            obj.addProperty("purpose", row.purpose)
-            obj.addProperty("status", row.status)
-            obj.addProperty("kind", row.kind)
-            obj.addProperty("imageData", row.imageData)
-            obj.addProperty("finalUrl", row.finalUrl)
-            obj.addProperty("answer", row.answer)
-            obj.addProperty("createdAt", row.createdAt)
-            obj.addProperty("updatedAt", row.updatedAt)
-            obj.addProperty("jobId", row.jobId)
-            sessions.add(obj)
-        }
-        return JsonObject().apply { add("sessions", sessions) }
+    fun verificationSessionPayload(row: VerificationRow): JsonObject = JsonObject().apply {
+        addProperty("id", row.id)
+        addProperty("domain", row.domain)
+        addProperty("url", row.url)
+        addProperty("purpose", row.purpose)
+        addProperty("status", row.status)
+        addProperty("kind", row.kind)
+        addProperty("imageData", row.imageData)
+        addProperty("finalUrl", row.finalUrl)
+        addProperty("answer", row.answer)
+        addProperty("createdAt", row.createdAt)
+        addProperty("updatedAt", row.updatedAt)
+        addProperty("jobId", row.jobId)
+        addProperty("canOpen", isVerificationUrlAllowed(row.url))
+        addProperty("addressIssue", when {
+            row.url.isBlank() -> "missing_url"
+            !isVerificationUrlAllowed(row.url) -> "unsupported_url"
+            else -> ""
+        })
     }
+
+    fun verificationListPayload(rows: List<VerificationRow>): JsonObject = JsonObject().apply {
+        add("sessions", JsonArray().apply { rows.forEach { add(verificationSessionPayload(it)) } })
+    }
+
+    fun canCompleteVerification(kind: String, url: String): Boolean =
+        kind == "image_code" || isVerificationUrlAllowed(url)
 
     /**
      * 隔离验证页只接受公网 http(s)：拒绝自定义 scheme、回环、私网、链路本地、
@@ -105,32 +112,31 @@ internal object WebBridgePolicy {
         val parsed = runCatching { url.toHttpUrlOrNull() }.getOrNull() ?: return false
         if (parsed.scheme != "http" && parsed.scheme != "https") return false
         if (parsed.username.isNotEmpty() || parsed.password.isNotEmpty()) return false
-        val host = parsed.host.lowercase()
+        // Check the same decoded/canonical host the HTTP client will use, never the raw URL.
+        val host = parsed.host.trimEnd('.')
         if (host == "localhost" || host.endsWith(".localhost")) return false
         if (host == "appassets.androidplatform.net") return false
-        if (com.mina.legadostudio.domain.LogFilterUtils.isLoopbackOrPrivate(url)) return false
-        return true
+        return !isPrivateOrLoopbackHost(host)
     }
 
     private fun isPrivateOrLoopbackHost(host: String): Boolean {
-        // IPv6：OkHttp 返回的主机名不带方括号。
-        if (host == "::1" || host == "0:0:0:0:0:0:0:1") return true
-        if (host == "::ffff:127.0.0.1") return true
-        if (host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd")) return true
-        val parts = host.split('.')
-        if (parts.size != 4) return false
-        val octets = parts.map { it.toIntOrNull() ?: return false }
-        if (octets.any { it !in 0..255 }) return false
-        val (a, b) = octets
-        return when {
-            a == 0 || a == 10 || a == 127 -> true
-            a == 169 && b == 254 -> true
-            a == 172 && b in 16..31 -> true
-            a == 192 && b == 168 -> true
-            a == 100 && b in 64..127 -> true
-            a >= 224 -> true
-            else -> false
+        if (':' in host) {
+            // OkHttp has already validated this IPv6 literal. The restricted alphabet and colon
+            // gate guarantee getByName cannot resolve a hostname or a scoped interface on the UI
+            // thread. InetAddress also decodes IPv4-mapped IPv6 before the connection policy.
+            if (host.any { it !in "0123456789abcdefABCDEF:." }) return true
+            val address = runCatching { java.net.InetAddress.getByName(host) }.getOrNull() ?: return true
+            return !PinnedPublicConnection.isPublic(address)
         }
+        // Only numeric candidates enter the legacy IPv4 parser: its IPv6 prefix checks would
+        // otherwise incorrectly reject public names such as fc-public.example.
+        if (host.split('.').all { it.matches(Regex("(?:[0-9]+|0[xX][0-9a-fA-F]+)")) }) {
+            if (com.mina.legadostudio.domain.LogFilterUtils.isLoopbackOrPrivate(host)) return true
+            // Multicast is not a public unicast destination.
+            val first = host.substringBefore('.').toIntOrNull()
+            if (first != null && first in 224..255) return true
+        }
+        return false
     }
 
     /** 剪贴板回包：固定形状，绝不回传被复制的秘密。 */

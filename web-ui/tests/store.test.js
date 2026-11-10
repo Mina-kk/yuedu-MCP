@@ -35,6 +35,33 @@ const BOOTSTRAP = {
 }
 
 describe('store', () => {
+  it('验证完成及迟到页面事件不会重新打开已关闭的验证视图', () => {
+    const store = createStore({ bridge: fakeBridge({}) })
+    for (const action of ['open', 'close', 'closed', 'completed', 'url', 'title']) {
+      store.applyVerificationBrowser({ action, id: 'qa-session' })
+    }
+    expect(store.state.verificationBrowser.open).toBe(false)
+  })
+
+  it('旧会话完成不能关闭新会话，未登记事件不改变视图', () => {
+    const store = createStore({ bridge: fakeBridge({}) })
+    store.applyVerificationBrowser({ action: 'open', id: 'new-session' })
+    store.applyVerificationBrowser({ action: 'completed', id: 'old-session' })
+    expect(store.state.verificationBrowser).toMatchObject({ open: true, sessionId: 'new-session' })
+    store.applyVerificationBrowser({ action: 'unknown', id: 'other' })
+    expect(store.state.verificationBrowser).toMatchObject({ open: true, sessionId: 'new-session' })
+    store.applyVerificationBrowser({ action: 'closed' })
+    expect(store.state.verificationBrowser.open).toBe(false)
+  })
+
+  it('有效完成事件关闭当前验证视图，不依赖Promise回包先后', () => {
+    const store = createStore({ bridge: fakeBridge({}) })
+    store.applyVerificationBrowser({ action: 'open', id: 'qa-session' })
+    store.applyVerificationBrowser({ action: 'completed', id: 'qa-session' })
+    expect(store.state.verificationBrowser.open).toBe(false)
+    store.applyVerificationBrowser({ action: 'title', id: 'qa-session' })
+    expect(store.state.verificationBrowser.open).toBe(false)
+  })
   it('bootstrap 成功写入真实快照', async () => {
     const bridge = fakeBridge({ 'app.bootstrap': async () => BOOTSTRAP })
     const store = createStore({ bridge })

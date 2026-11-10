@@ -19,6 +19,7 @@ import com.google.gson.JsonParser
 import com.mina.legadostudio.BuildConfig
 import com.mina.legadostudio.StudioApplication
 import com.mina.legadostudio.data.db.VerificationSessionEntity
+import com.mina.legadostudio.verification.VerificationSessionNotFoundException
 import com.mina.legadostudio.device.DeviceReadiness
 import com.mina.legadostudio.mcp.McpAccess
 import com.mina.legadostudio.mcp.McpConfigStore
@@ -170,6 +171,8 @@ internal class StudioWebBridge(
                         WebBridgeProtocol.success(parsed.id, result)
                     } catch (cancelled: CancellationException) {
                         WebBridgeProtocol.failure(parsed.id, WebBridgeProtocol.ERR_CANCELLED, "请求已取消")
+                    } catch (missing: VerificationSessionNotFoundException) {
+                        WebBridgeProtocol.failure(parsed.id, WebBridgeProtocol.ERR_NOT_FOUND, "验证任务不存在")
                     } catch (failure: BridgeFailure) {
                         WebBridgeProtocol.failure(parsed.id, failure.code, failure.message.orEmpty())
                     } catch (error: Throwable) {
@@ -197,6 +200,7 @@ internal class StudioWebBridge(
         WebBridgeProtocol.M_LOGS_DELETE -> logsDelete(params)
         WebBridgeProtocol.M_VERIFICATION_LIST -> verificationList()
         WebBridgeProtocol.M_VERIFICATION_OPEN -> verificationOpen(params)
+        WebBridgeProtocol.M_VERIFICATION_REPAIR -> verificationRepairAddress(params)
         WebBridgeProtocol.M_VERIFICATION_COMPLETE -> verificationComplete(params)
         WebBridgeProtocol.M_VERIFICATION_CLEAR -> verificationClear(params)
         WebBridgeProtocol.M_VERIFICATION_CLOSE -> verificationClose(params)
@@ -619,6 +623,20 @@ internal class StudioWebBridge(
         return JsonObject().apply { addProperty("opened", true) }
     }
 
+    private suspend fun verificationRepairAddress(params: JsonObject): JsonElement {
+        val parsed = WebBridgeProtocol.parseVerificationRepair(params)
+            ?: throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "需要会话 id 和有效的公网 http(s) 地址；不允许私网、本地地址或内嵌凭据")
+        val repaired = try {
+            withContext(Dispatchers.IO) { app.verification.repairAddress(parsed.id, parsed.url) }
+        } catch (error: IllegalArgumentException) {
+            throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, error.message ?: "地址修复被拒绝")
+        }
+        return JsonObject().apply {
+            addProperty("repaired", true)
+            add("session", WebBridgePolicy.verificationSessionPayload(repaired.toRow()))
+        }
+    }
+
     @Volatile private var verificationOpener: (suspend (VerificationSessionEntity) -> Unit)? = null
 
     fun setVerificationBrowserOpener(block: suspend (VerificationSessionEntity) -> Unit) {
@@ -638,6 +656,9 @@ internal class StudioWebBridge(
         }
         val session = withContext(Dispatchers.IO) { app.database.dao().verificationSession(parsed.id) }
             ?: throw BridgeFailure(WebBridgeProtocol.ERR_NOT_FOUND, "验证任务不存在")
+        if (!WebBridgePolicy.canCompleteVerification(session.kind, session.url)) {
+            throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "该验证记录缺少有效地址，请先补全地址并重新验证")
+        }
         val live = observedUrlProvider?.invoke(session.id)
         val observed = pickFinalUrl(live, session.finalUrl, session.url)
         val completed = withContext(Dispatchers.IO) {
@@ -647,7 +668,7 @@ internal class StudioWebBridge(
             onRequestCloseVerificationBrowser()
             emitVerificationBrowser("completed", completed.id)
         }
-        return JsonParser.parseString(app.gson.toJson(completed.toRow()))
+        return WebBridgePolicy.verificationSessionPayload(completed.toRow())
     }
 
     /** 宿主注入：返回隔离验证页当前真实观察地址（没有打开中的页面时返回 null）。 */

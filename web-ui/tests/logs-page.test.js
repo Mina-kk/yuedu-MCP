@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { DOMWrapper, mount, flushPromises } from '@vue/test-utils'
 import LogsPage from '../src/pages/LogsPage.vue'
 
+// Teleported dialogs are deliberately outside the page's clipped scroll host.
+const dialog = () => new DOMWrapper(document.querySelector('.delete-overlay [role="dialog"]'))
 const button = (w, text) => w.findAll('button').find(b => b.text() === text)
+  || [...document.querySelectorAll('.delete-overlay button')].map(el => new DOMWrapper(el)).find(b => b.text() === text)
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] })
 const mounted = []
-afterEach(() => mounted.splice(0).forEach(w => w.unmount()))
+afterEach(() => {
+  mounted.splice(0).forEach(w => w.unmount())
+  vi.useRealTimers()
+})
 async function setup(handler, bridgeHandler, bridgeKind = 'android') {
   const store = { state: { bridgeKind }, bridge: { call: vi.fn(bridgeHandler) }, callTool: vi.fn(handler), toast: vi.fn(), confirmDialog: vi.fn() }
   const host = document.createElement('main')
@@ -115,7 +121,7 @@ describe('日志独立详情', () => {
       return { kind: args.kind, deletedIds: args.ids, missingIds: [], failed: [] }
     })
     await button(wrapper, '删除').trigger('click')
-    expect(wrapper.find('[role="dialog"]').text()).toContain('1 条')
+    expect(dialog().text()).toContain('1 条')
     expect(store.bridge.call).not.toHaveBeenCalled()
     await button(wrapper, '取消').trigger('click')
     expect(store.bridge.call).not.toHaveBeenCalled()
@@ -127,12 +133,80 @@ describe('日志独立详情', () => {
     expect(wrapper.find('.log-row').exists()).toBe(false)
     expect(wrapper.text()).toContain('已删除 1 条')
   })
+  it('Vue 确认框脱离主滚动区，焦点默认取消，Escape 和系统返回不删除', async () => {
+    const { wrapper, store, host } = await setup(() => result({ items: [{ id: 1 }] }))
+    const opener = button(wrapper, '删除')
+    opener.element.focus()
+    await opener.trigger('click'); await flushPromises()
+    expect(host.contains(dialog().element)).toBe(false)
+    expect(document.body.contains(dialog().element)).toBe(true)
+    expect(dialog().attributes('aria-modal')).toBe('true')
+    expect(document.activeElement).toBe(button(wrapper, '取消').element)
+    await button(wrapper, '取消').trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(button(wrapper, '确认删除').element)
+    await button(wrapper, '确认删除').trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(button(wrapper, '取消').element)
+    await button(wrapper, '取消').trigger('keydown', { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(button(wrapper, '确认删除').element)
+    await button(wrapper, '取消').trigger('keydown', { key: 'Escape' }); await flushPromises()
+    expect(document.querySelector('.delete-overlay')).toBeNull()
+    expect(document.activeElement).toBe(opener.element)
+    expect(store.bridge.call).not.toHaveBeenCalled()
+    await opener.trigger('click')
+    expect(wrapper.vm.handleBack()).toBe(true)
+    await flushPromises()
+    expect(document.querySelector('.delete-overlay')).toBeNull()
+    expect(store.bridge.call).not.toHaveBeenCalled()
+  })
+  it('删除期间锁定确认、取消、Escape、系统返回及重复提交；失败项仍可重试', async () => {
+    let release
+    const { wrapper, store } = await setup(() => result({ items: [{ id: 1 }] }), () => new Promise(resolve => { release = resolve }))
+    await button(wrapper, '删除').trigger('click')
+    await button(wrapper, '确认删除').trigger('click'); await flushPromises()
+    expect(dialog().attributes('aria-busy')).toBe('true')
+    expect(button(wrapper, '取消').element.disabled).toBe(true)
+    expect(button(wrapper, '正在删除').element.disabled).toBe(true)
+    await button(wrapper, '正在删除').trigger('click')
+    await dialog().trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(dialog().element)
+    await dialog().trigger('keydown', { key: 'Escape' })
+    expect(wrapper.vm.handleBack()).toBe(true)
+    await flushPromises()
+    expect(dialog().exists()).toBe(true)
+    expect(store.bridge.call).toHaveBeenCalledTimes(1)
+    release({ kind: 'operation', deletedIds: [], missingIds: [], failed: [{ id: '1', code: 'delete_failed' }] })
+    await flushPromises()
+    expect(document.querySelector('.delete-overlay')).toBeNull()
+    expect(wrapper.text()).toContain('已选 1 条')
+    expect(wrapper.text()).toContain('delete_failed')
+    await button(wrapper, '删除所选').trigger('click')
+    expect(dialog().text()).toContain('1 条')
+    expect(button(wrapper, '确认删除').element.disabled).toBe(false)
+  })
+  it('确认框卸载恢复滚动和背景 inert，不遗留遮罩', async () => {
+    const { wrapper, host } = await setup(() => result({ items: [{ id: 1 }] }))
+    const shell = document.createElement('div')
+    shell.className = 'app-shell'
+    host.replaceWith(shell)
+    shell.appendChild(host)
+    mounted.push({ unmount: () => shell.remove() })
+    host.style.overflowY = 'auto'
+    await button(wrapper, '删除').trigger('click')
+    expect(host.style.overflowY).toBe('hidden')
+    expect(shell.hasAttribute('inert')).toBe(true)
+    wrapper.unmount()
+    expect(host.style.overflowY).toBe('auto')
+    expect(shell.hasAttribute('inert')).toBe(false)
+    expect(document.querySelector('.delete-overlay')).toBeNull()
+  })
   it('操作日志不发送未支持的 offset，也不显示伪下一页', async () => {
     const { wrapper, store } = await setup(() => result({ items: Array.from({ length: 20 }, (_, i) => ({ id: i + 1 })) }))
     expect(store.callTool).toHaveBeenLastCalledWith('get_logs', { limit: 20 })
     expect(button(wrapper, '下一页')).toBeUndefined()
   })
-  it('全部筛选采用 Vue 控件，中文级别及严格日期校验', async () => {
+  it('全部筛选采用 Vue 控件，日期上一天、今天、下一天显示本地年月日', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2024, 2, 1, 0, 15))
     const { wrapper, store } = await setup(async () => result({ items: [] }))
     expect(wrapper.find('select').exists()).toBe(false)
     await button(wrapper, '警告').trigger('click')
@@ -141,16 +215,54 @@ describe('日志独立详情', () => {
     await button(wrapper, 'HTTP').trigger('click')
     await flushPromises()
     expect(wrapper.find('input[type="date"]').exists()).toBe(false)
-    const input = wrapper.find('input[aria-label="日期"]')
-    await input.setValue('2026-02-30')
-    const calls = store.callTool.mock.calls.length
-    await button(wrapper, '应用日期').trigger('click')
-    expect(store.callTool).toHaveBeenCalledTimes(calls)
-    expect(wrapper.text()).toContain('请输入有效日期')
-    await input.setValue('2024-02-29')
-    await button(wrapper, '应用日期').trigger('click')
+    expect(wrapper.find('input[aria-label="日期"]').exists()).toBe(false)
+    expect(button(wrapper, '上一天')).toBeDefined()
+    expect(button(wrapper, '今天')).toBeDefined()
+    expect(button(wrapper, '下一天')).toBeDefined()
+    expect(wrapper.get('[aria-label="日志日期"]').text()).toContain('2024-03-01')
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', { limit: 20, offset: 0, date: '2024-03-01' })
+    await button(wrapper, '上一天').trigger('click')
     await flushPromises()
     expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', expect.objectContaining({ date: '2024-02-29' }))
+    expect(wrapper.get('[aria-label="日志日期"]').text()).toContain('2024-02-29')
+    await button(wrapper, '下一天').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', expect.objectContaining({ date: '2024-03-01' }))
+    await button(wrapper, '下一天').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', expect.objectContaining({ date: '2024-03-02' }))
+    await button(wrapper, '今天').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', expect.objectContaining({ date: '2024-03-01' }))
+  })
+  it('日期切换重置分页、保留查询与抓包条件，全部日期和快速重复点击安全', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 0, 1, 0, 15))
+    let release
+    let hold = false
+    const response = () => result({ items: Array.from({ length: 20 }, (_, i) => ({ id: i + 1 })), total: 99 })
+    const { wrapper, store } = await setup(() => hold ? new Promise(resolve => { release = resolve }) : response())
+    await button(wrapper, 'HTTP').trigger('click'); await flushPromises()
+    await wrapper.get('input[type="search"]').setValue('  example.test  ')
+    await button(wrapper, '排除抓包事务').trigger('click'); await flushPromises()
+    await button(wrapper, '下一页').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', { limit: 20, offset: 20, date: '2026-01-01', query: 'example.test', includeCapture: true })
+    hold = true
+    const count = store.callTool.mock.calls.length
+    const prev = button(wrapper, '上一天').element
+    prev.click(); prev.click(); prev.click()
+    await flushPromises()
+    expect(store.callTool).toHaveBeenCalledTimes(count + 1)
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', { limit: 20, offset: 0, date: '2025-12-31', query: 'example.test', includeCapture: true })
+    expect(wrapper.get('[aria-label="日志日期"]').text()).toContain('2025-12-31')
+    for (const label of ['上一天', '今天', '下一天', '全部日期']) expect(button(wrapper, label)?.element.disabled).toBe(true)
+    hold = false
+    release(response()); await flushPromises()
+    await button(wrapper, '全部日期').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', { limit: 20, offset: 0, query: 'example.test', includeCapture: true })
+    expect(wrapper.get('[aria-label="日志日期"]').text()).toContain('全部日期')
+    await button(wrapper, '上一天').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', expect.objectContaining({ date: '2025-12-31' }))
+    vi.setSystemTime(new Date(2026, 0, 2, 0, 15))
+    await button(wrapper, '今天').trigger('click'); await flushPromises()
+    expect(store.callTool).toHaveBeenLastCalledWith('get_http_logs', expect.objectContaining({ date: '2026-01-02' }))
   })
   it('详情加载期间可系统返回，迟到结果不能重开详情', async () => {
     let release

@@ -3,6 +3,7 @@ package com.mina.legadostudio.mcp
 import com.google.gson.JsonParser
 import com.mina.legadostudio.network.HttpFetcher
 import com.mina.legadostudio.network.HttpOrigin
+import com.mina.legadostudio.verification.VerificationRequestPolicy
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.serialization.json.JsonObject
@@ -13,7 +14,9 @@ import kotlinx.serialization.json.putJsonObject
 internal fun StudioMcpServer.registerVerificationTools(server: Server) {
     server.tool("browser_verify", "创建站点验证会话（验证码/登录/WAF/CF）。默认 webview 会话（真实页面）；传 imageUrl 时创建 image_code 图文验证码会话（拉图给用户看，等用户回输入）。waitSec=0 立即返回；1..120 阻塞等待用户在验证中心完成；webview 完成后自动取证返回 evidence，image_code 完成后返回用户输入的 answer", schema(mapOf("url" to "验证 URL（image_code 时可为验证码图所在页 URL，用于定域）", "purpose" to "用途说明", "waitSec" to "0..120，阻塞等待完成的最长秒数", "imageUrl" to "可选：验证码图片 URL，传入后创建 image_code 图文验证码会话"), listOf("url")), toolAnnotations = openWrite) { req ->
         runCatching {
-            val url = req.arguments.str("url") ?: return@tool err("url 不能为空")
+            // Validate before image I/O as well as before create(): an image URL cannot supply
+            // the missing page URL, and rejected requests must not leave a WAITING record.
+            val url = VerificationRequestPolicy.requireUrl(req.arguments.str("url"))
             val imageUrl = req.arguments.str("imageUrl").orEmpty().trim()
             val isImageCode = imageUrl.isNotEmpty()
             val imageData = if (isImageCode) runCatching {

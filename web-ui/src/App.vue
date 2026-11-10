@@ -42,7 +42,10 @@ const PAGES_MAP = {
 
 const activePage = computed(() => PAGES_MAP[s.page] || McpPage)
 const verifyBrowserOpen = computed(() => Boolean(s.verificationBrowser && s.verificationBrowser.open))
-const coreOnline = computed(() => s.coreStatus === 'loaded')
+const appVersion = computed(() => {
+  const name = s.bootstrap?.versionName
+  return typeof name === 'string' && name.trim() ? `APK ${name}` : '版本未知'
+})
 const rootRef = ref(null)
 const unsubscribers = []
 
@@ -291,8 +294,8 @@ onBeforeUnmount(() => {
           </button>
         </template>
         <template v-else>
-          <span v-if="coreOnline" class="chip ok" :title="s.coreVersion">
-            <AppIcon name="code" :size="12" />Rust {{ s.coreVersion || '已加载' }}
+          <span class="chip" :title="`应用版本：${appVersion}`">
+            {{ appVersion }}
           </span>
           <button class="icon-btn" type="button" title="设置" aria-label="设置" @click="store.openSheet('settings')">
             <AppIcon name="gear" :size="19" />

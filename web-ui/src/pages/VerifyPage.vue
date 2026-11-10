@@ -16,6 +16,7 @@ const listError = ref('')
 const busyId = ref('')
 const actionError = ref('')
 const answers = ref({})
+const repairUrls = ref({})
 const selectedIds = ref([])
 const locked = computed(() => loading.value || Boolean(busyId.value))
 
@@ -64,13 +65,85 @@ async function act(method, params, label) {
   }
 }
 
+// 新宿主决定 URL 是否可打开；旧宿主仅兜底空地址，不在 Vue 重写安全策略。
+function canOpen(session) {
+  return typeof session.canOpen === 'boolean' ? session.canOpen : Boolean(session.url?.trim())
+}
+
+function canComplete(session) {
+  return String(session.status).toUpperCase() !== 'COMPLETED' && (session.kind === 'image_code' || canOpen(session))
+}
+
+function addressMessage(session) {
+  if (session.addressIssue === 'missing_url' || !session.url?.trim()) return '缺少验证地址'
+  if (session.addressIssue === 'unsupported_url' || !canOpen(session)) return '验证地址不受支持'
+  return ''
+}
+
+function canRepair(session) {
+  return ['WAITING', 'COMPLETED'].includes(String(session.status).toUpperCase()) && session.kind !== 'image_code' && !canOpen(session)
+}
+
+function askRepair(session) {
+  const url = repairUrls.value[session.id] || ''
+  if (locked.value || !canRepair(session) || !url.trim()) return
+  let accepted = false
+  props.store.confirmDialog({
+    kind: 'repair',
+    title: '补全验证地址？',
+    name: session.domain || session.id,
+    message: `${String(session.status).toUpperCase() === 'COMPLETED' ? '补全会将已完成记录重置为待验证。' : ''}仅补全当前历史记录，已保存的 Cookie 不受影响。保存后不会自动打开，请手动打开验证页。`,
+    confirmLabel: '确认补全',
+    danger: false,
+    onAccept: () => {
+      if (accepted || locked.value) return
+      accepted = true
+      return repairAddress(session.id, url)
+    }
+  })
+}
+
+function isRepairedSession(session, id, url) {
+  return session?.id === id && session.url === url && session.canOpen === true &&
+    session.status === 'WAITING' && session.addressIssue === '' && session.finalUrl === '' && session.answer === ''
+}
+
+async function repairAddress(id, url) {
+  const session = sessions.value.find(x => x.id === id)
+  if (locked.value || !session || !canRepair(session)) return
+  busyId.value = id
+  actionError.value = ''
+  try {
+    // 原样提交用户输入，URL/私网校验由宿主负责；不能用 domain/finalUrl 猜地址。
+    const receipt = await props.store.bridge.call('verification.repairAddress', { id, url })
+    const result = await props.store.bridge.call('verification.list', {})
+    if (receipt?.repaired !== true || !isRepairedSession(receipt.session, id, url)) {
+      throw new Error('地址补全回执无效')
+    }
+    if (!Array.isArray(result?.sessions)) throw new Error('会话列表格式无效')
+    const matches = result.sessions.filter(x => x.id === id)
+    if (matches.length !== 1 || !isRepairedSession(matches[0], id, url)) {
+      throw new Error('回读未确认同一记录的验证地址')
+    }
+    sessions.value = result.sessions
+    selectedIds.value = selectedIds.value.filter(key => sessions.value.some(x => x.id === key))
+    delete repairUrls.value[id]
+    props.store.toast('验证地址已补全，请手动打开验证页')
+  } catch (error) {
+    actionError.value = `无法确认地址补全结果：${error?.message || '补全失败'}`
+  } finally {
+    busyId.value = ''
+  }
+}
+
 async function open(session) {
+  if (!canOpen(session)) return
   const result = await act('verification.open', { id: session.id }, '打开验证页')
   if (result) props.store.toast('已在隔离 WebView 打开验证页')
 }
 
 async function complete(session) {
-  if (String(session.status).toUpperCase() === 'COMPLETED') return
+  if (!canComplete(session)) return
   const answer = (answers.value[session.id] || '').trim()
   const params = { id: session.id }
   if (answer) params.answer = answer
@@ -177,7 +250,7 @@ const statusChip = (status) => {
           v-if="activeSession && String(activeSession.status).toUpperCase() !== 'COMPLETED'"
           class="btn btn-primary"
           type="button"
-          :disabled="locked"
+          :disabled="locked || !canComplete(activeSession)"
           @click="complete(activeSession)"
         >
           <AppIcon name="check" :size="16" /><span>标记完成</span>
@@ -221,6 +294,7 @@ const statusChip = (status) => {
           </header>
           <p v-if="session.purpose" class="session-purpose">{{ session.purpose }}</p>
           <p class="session-url mono">{{ session.finalUrl || session.url }}</p>
+          <p v-if="addressMessage(session)" class="hint">{{ addressMessage(session) }}</p>
           <p class="muted small">
             <span v-if="session.createdAt">{{ formatTime(session.createdAt) }}</span>
             <span v-if="session.answer"> · 已输入答案</span>
@@ -241,11 +315,31 @@ const statusChip = (status) => {
               spellcheck="false"
             />
           </label>
+          <div v-if="canRepair(session)" class="repair-address">
+            <label class="field">
+              <span class="flabel">验证地址</span>
+              <input
+                v-model="repairUrls[session.id]"
+                class="input"
+                type="text"
+                inputmode="url"
+                aria-label="验证地址"
+                placeholder="输入完整的 http(s) 验证地址"
+                autocapitalize="off"
+                spellcheck="false"
+                :disabled="locked"
+              />
+              <span class="fhint">请提供真实验证地址，由宿主校验。补全不会自动打开网页。</span>
+            </label>
+            <div class="actions">
+              <button class="btn btn-ghost btn-sm" type="button" :disabled="locked || !(repairUrls[session.id] || '').trim()" @click="askRepair(session)">补全地址</button>
+            </div>
+          </div>
           <div class="actions">
-            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="open(session)">
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked || !canOpen(session)" @click="open(session)">
               <AppIcon name="link" :size="15" /><span>打开验证页</span>
             </button>
-            <button v-if="String(session.status).toUpperCase() !== 'COMPLETED'" class="btn btn-primary btn-sm" type="button" :disabled="locked" @click="complete(session)">
+            <button v-if="String(session.status).toUpperCase() !== 'COMPLETED'" class="btn btn-primary btn-sm" type="button" :disabled="locked || !canComplete(session)" @click="complete(session)">
               <AppIcon name="check" :size="15" /><span>标记完成</span>
             </button>
             <button class="btn btn-ghost btn-sm danger" type="button" :disabled="locked" @click="askDelete(session)">

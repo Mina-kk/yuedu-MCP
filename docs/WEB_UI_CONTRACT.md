@@ -27,11 +27,12 @@ JS：`StudioBridge.postMessage(JSON.stringify({id, method, params}))`
 | `connection.copy` | `{kind:"url"|"token"|"json",lan?:boolean}` | `{copied:true}`；秘密直接写本机剪贴板，不向 JS 回 token；URL 取真实配置/本机地址 |
 | `tools.list` | `{}` | `{tools:[{name,description,inputSchema,annotations}]}`；与真实 MCP 注册表共用，不造目录 |
 | `tools.call` | `{name,arguments:{...}}` | MCP CallToolResult 原形（content/isError），与真实工具 dispatch 共用；不绕过参数、日志、上下文和证据处理 |
-| `verification.list` | `{}` | `{sessions:[{id,domain,url,purpose,status,kind,imageData,finalUrl,...}]}` |
-| `verification.open` | `{id}` | `{opened:true}`；仅打开现存验证任务的 URL 到无 privileged bridge 的独立 WebView |
-| `verification.complete` | `{id,answer?}` | 更新后 session；webview finalUrl 来自宿主实际观察，不信任 JS 传地址 |
-| `verification.clear` | `{id}` | `{cleared:true}` |
-| `verification.close` | `{id}` | `{closed:true}` |
+| `verification.list` | `{}` | `{sessions:[{id,domain,url,purpose,status,kind,imageData,finalUrl,canOpen,addressIssue,...}]}`；`addressIssue=missing_url/unsupported_url/""`，历史无地址会话保留但不可打开 |
+| `verification.open` | `{id}` | `{opened:true}`；仅打开现存验证任务的合法公网 URL 到无 privileged bridge 的独立 WebView，不代表挑战成功 |
+| `verification.repairAddress` | `{id,url}` | `{repaired:true,session:{...}}`；仅修复旧的无效地址会话；显式确认后保留 id、Cookie，将状态重置为 WAITING，清空旧 finalUrl/answer，写后回读；合法地址会话不可借此改站 |
+| `verification.complete` | `{id,answer?}` | 更新后 session 的显式 JSON；webview 原地址无效时拒绝，finalUrl 来自宿主实际观察，不信任 JS 传地址；image_code 保留答案输入 |
+| `verification.clear` | `{id}` | `{cleared:true}`；清 Cookie 并重置待验证，不用于删除记录 |
+| `verification.close` | `{id}` | `{closed:true}`；删除会话记录、保留 Cookie |
 | `verification.browser.close` | `{}` | `{closed:true}`；销毁隔离验证页返回 web 控制台 |
 | `file.export` | `{name,text,mime?}` | `{saved:true}` 或取消状态；系统 SAF，不接受路径 |
 | `file.import` | `{}` | `{name,text}` 或取消状态；限制 2MB，系统 SAF |

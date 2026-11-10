@@ -1,9 +1,10 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { callToolParsed, formatTime, itemsOf, prettyJson, redactForDisplay } from '../lib/tools.js'
 import { exportText } from '../lib/files.js'
+import { localDateKey, shiftLocalDate } from '../lib/log-dates.js'
 
 // 日志页：真实工具分页读取 + 详情 + 导出。
 //  operation → get_logs(limit, category, level, query)  {count, items[]}
@@ -34,13 +35,14 @@ const listError = ref('')
 const query = ref('')
 const level = ref('')
 const category = ref('')
-const date = ref('')
-const dateInput = ref('')
-const dateError = ref('')
+const date = ref(localDateKey())
 const includeCapture = ref(false)
 const selected = ref([])
 const pendingDelete = ref(null)
 const deleting = ref(false)
+const deletePanel = ref(null)
+let deleteOpener = null
+let restoreDeleteBackground = null
 const deleteMessage = ref('')
 const localDelete = computed(() => s.bridgeKind === 'android')
 const locked = computed(() => loading.value || deleting.value || !!pendingDelete.value)
@@ -71,7 +73,47 @@ function askDelete(item) {
   if (!localDelete.value || locked.value) return
   const loaded = new Set(items.value.map(logId).filter(Boolean))
   const ids = [...new Set(item ? [logId(item)] : selected.value)].filter(id => loaded.has(id)).slice(0, 100)
-  if (ids.length) pendingDelete.value = { kind: deleteKind.value, ids }
+  if (ids.length) {
+    deleteOpener = document.activeElement
+    pendingDelete.value = { kind: deleteKind.value, ids }
+  }
+}
+
+// A local Vue dialog is needed here: the shared ConfirmDialog does not expose
+// busy/disabled actions. Keep its visual classes without changing other pages.
+watch(pendingDelete, request => {
+  if (request) {
+    const host = scrollHost()
+    const shell = pageRoot.value?.closest('.app-shell')
+    const overflow = host?.style.overflowY || ''
+    const wasInert = shell?.hasAttribute('inert') || false
+    if (host) host.style.overflowY = 'hidden'
+    shell?.setAttribute('inert', '')
+    restoreDeleteBackground = () => {
+      if (host) host.style.overflowY = overflow
+      if (shell && !wasInert) shell.removeAttribute('inert')
+    }
+    deletePanel.value?.querySelector('button')?.focus({ preventScroll: true })
+  } else {
+    restoreDeleteBackground?.()
+    restoreDeleteBackground = null
+    if (deleteOpener?.isConnected) deleteOpener.focus({ preventScroll: true })
+    deleteOpener = null
+  }
+}, { flush: 'post' })
+watch(deleting, busy => {
+  if (busy) deletePanel.value?.focus({ preventScroll: true })
+}, { flush: 'post' })
+onBeforeUnmount(() => restoreDeleteBackground?.())
+
+function trapDeleteFocus(event) {
+  const buttons = [...(deletePanel.value?.querySelectorAll('button:not(:disabled)') || [])]
+  event.preventDefault()
+  if (!buttons.length) { deletePanel.value?.focus(); return }
+  const index = buttons.indexOf(document.activeElement)
+  const next = index < 0 ? (event.shiftKey ? buttons.length - 1 : 0)
+    : (index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length
+  buttons[next].focus()
 }
 
 async function confirmDelete() {
@@ -102,17 +144,10 @@ async function confirmDelete() {
   }
 }
 
-
-function applyDate() {
+function changeDate(action) {
   if (locked.value) return
-  const value = dateInput.value.trim()
-  const parsed = new Date(`${value}T00:00:00Z`)
-  if (value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value)) {
-    dateError.value = '请输入有效日期（YYYY-MM-DD）'
-    return
-  }
-  dateError.value = ''
-  date.value = value
+  date.value = action === 'all' ? '' : action === 'today' ? localDateKey()
+    : shiftLocalDate(date.value || localDateKey(), action)
   load(true)
 }
 
@@ -201,9 +236,7 @@ function switchTab(key) {
   query.value = ''
   level.value = ''
   category.value = ''
-  date.value = ''
-  dateInput.value = ''
-  dateError.value = ''
+  date.value = localDateKey()
   includeCapture.value = false
   load(true)
 }
@@ -304,7 +337,7 @@ function itemSub(item) {
         <h3 class="section-title">日志</h3>
         <span class="section-sub">{{ total === null ? items.length : `${items.length} / ${total}` }}</span>
       </div>
-      <div class="segmented wrap">
+      <div class="segmented log-tabs" role="group" aria-label="日志分类">
         <button
           v-for="t in TABS"
           :key="t.key"
@@ -312,6 +345,7 @@ function itemSub(item) {
           class="seg"
           :disabled="locked"
           :class="{ on: tab === t.key }"
+          :aria-pressed="tab === t.key"
           @click="switchTab(t.key)"
         >
           {{ t.label }}
@@ -338,14 +372,23 @@ function itemSub(item) {
         <input v-model="category" :disabled="locked" class="input" placeholder="category（如 tool/mcp）" aria-label="分类" @keyup.enter="load(true)" />
       </div>
       <div v-if="tab === 'http'" class="filter-row">
-        <input v-model="dateInput" :disabled="locked" class="input" type="text" placeholder="YYYY-MM-DD（留空不限）" aria-label="日期" :aria-invalid="!!dateError" @keyup.enter="applyDate" />
-        <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="applyDate">应用日期</button>
+        <div class="log-date-filter" role="group" aria-label="日志日期">
+          <div class="log-date-actions">
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="changeDate(-1)">上一天</button>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="changeDate('today')">今天</button>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="changeDate(1)">下一天</button>
+          </div>
+          <div class="log-date-value" aria-live="polite">
+            <time v-if="date" :datetime="date">{{ date }}</time>
+            <span v-else>全部日期</span>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" :aria-pressed="!date" @click="changeDate('all')">全部日期</button>
+          </div>
+        </div>
         <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" :class="{ on: includeCapture }" @click="includeCapture = !includeCapture; load(true)">
           {{ includeCapture ? '含抓包事务' : '排除抓包事务' }}
         </button>
       </div>
 
-      <p v-if="dateError" class="code-block err" role="alert">{{ dateError }}</p>
       <div class="actions">
         <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="load(true)">
           <AppIcon name="refresh" :size="15" /><span>刷新</span>
@@ -396,14 +439,21 @@ function itemSub(item) {
 
     <p v-if="!localDelete" class="muted small">当前非 Android 宿主，不支持删除日志</p>
     <p v-if="deleteMessage" role="status" class="code-block">{{ deleteMessage }}</p>
-    <div v-if="pendingDelete" class="delete-overlay" @keydown.esc.stop.prevent="handleBack">
-      <div role="dialog" aria-modal="true" aria-label="确认删除日志" class="section delete-dialog">
-        <h3>删除 {{ pendingDelete.ids.length }} 条日志？</h3>
-        <p>仅删除确认的已加载记录，此操作不可撤销。</p>
-        <button class="btn btn-ghost" :disabled="deleting" @click="pendingDelete = null">取消</button>
-        <button class="btn" :disabled="deleting" @click="confirmDelete">{{ deleting ? '正在删除' : '确认删除' }}</button>
+    <Teleport to="body">
+      <div v-if="pendingDelete" class="sheet-layer delete-overlay" @click.self="handleBack" @keydown.esc.stop.prevent="handleBack" @keydown.tab="trapDeleteFocus">
+        <div class="dialog-wrap">
+          <div ref="deletePanel" role="dialog" aria-modal="true" aria-label="确认删除日志" :aria-busy="deleting" tabindex="-1" class="dialog delete-dialog">
+            <div class="dialog-ico"><AppIcon name="trash" :size="22" /></div>
+            <h3 class="dialog-title">删除 {{ pendingDelete.ids.length }} 条日志？</h3>
+            <p class="dialog-text">仅删除确认的已加载记录，此操作不可撤销。</p>
+            <div class="dialog-actions">
+              <button class="btn btn-ghost" type="button" :disabled="deleting" @click="handleBack">取消</button>
+              <button class="btn btn-danger" type="button" :disabled="deleting" @click="confirmDelete">{{ deleting ? '正在删除' : '确认删除' }}</button>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
+    </Teleport>
     <div v-if="detailOpen" class="section log-detail" data-testid="log-detail">
       <button class="btn btn-ghost btn-sm" type="button" @click="handleBack">返回日志列表</button>
       <div class="section-head">
@@ -414,18 +464,33 @@ function itemSub(item) {
       <p v-if="detailError" class="code-block err">{{ detailError }}</p>
       <pre v-if="detail" class="code-block tall">{{ detail }}</pre>
       <EmptyState v-if="!detailBusy && !detailError && !detail" title="详情为空" text="工具未返回正文" />
-      <button class="btn btn-ghost btn-sm" type="button" :disabled="detailBusy || !detail" @click="exportCurrent">导出详情</button>
+      <div class="actions log-detail-actions">
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="detailBusy || !detail" @click="exportCurrent">导出详情</button>
+        <button class="btn btn-ghost btn-sm" type="button" @click="handleBack">返回日志列表</button>
+      </div>
     </div>
   </section>
 </template>
 
 <style scoped>
-.delete-overlay { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: #0008; padding: 20px; }
-.delete-dialog { width: min(100%, 420px); background: var(--surface); }
+.delete-overlay { position: fixed; inset: 0; height: 100dvh; z-index: 80; align-items: center; background: #0008; padding: 16px; }
+.delete-overlay .dialog-wrap { width: min(100%, 420px); max-height: 100%; }
+.delete-dialog { background: var(--surface-solid); max-height: calc(100dvh - 32px); }
+.delete-dialog .dialog-actions .btn { min-width: 0; padding-inline: 8px; }
 .log-entry { display: flex; align-items: center; gap: 8px; }
+.log-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow: visible; }
+.log-tabs .seg { min-width: 0; padding-inline: 0; justify-content: center; }
 .log-entry .log-row { flex: 1; min-width: 0; }
 .detail-link { display: flex; align-items: center; align-self: flex-end; gap: 4px; color: var(--accent); }
-.log-detail .code-block { max-height: none; overflow-wrap: anywhere; white-space: pre-wrap; }
+/* The page body owns vertical scrolling. An unbounded overflow:auto block
+   still traps touch scroll chaining when the global overscroll is contain. */
+.log-detail .code-block {
+  max-height: none;
+  overflow: visible;
+  overscroll-behavior: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .filter-row {
   display: flex;
   flex-wrap: wrap;
@@ -437,6 +502,11 @@ function itemSub(item) {
   flex: 1;
   min-width: 0;
 }
+
+.log-date-filter { width: 100%; min-width: 0; display: grid; gap: 8px; text-align: center; }
+.log-date-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.log-date-actions .btn { min-width: 0; padding-inline: 4px; }
+.log-date-value { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
 
 .log-list {
   display: flex;

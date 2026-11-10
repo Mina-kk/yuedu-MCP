@@ -292,11 +292,20 @@ export function createStore({ bridge: injected, storage } = {}) {
   function applyVerificationBrowser(payload) {
     const p = payload && typeof payload === 'object' ? payload : {}
     const action = typeof p.action === 'string' ? p.action : ''
-    state.verificationBrowser = {
-      open: action !== 'close' && action !== 'closed' ? true : false,
-      sessionId: typeof p.id === 'string' ? p.id : state.verificationBrowser.sessionId,
-      action
+    const id = typeof p.id === 'string' ? p.id : ''
+    const current = state.verificationBrowser
+    if (action === 'open') {
+      if (id) state.verificationBrowser = { open: true, sessionId: id, action }
+      return
     }
+    if (!['close', 'closed', 'completed', 'url', 'title'].includes(action)) return
+    if (id && id !== current.sessionId) return
+    if (action === 'url' || action === 'title') {
+      // Metadata can arrive after destroy; it must never resurrect a closed page.
+      if (current.open) state.verificationBrowser = { ...current, action }
+      return
+    }
+    state.verificationBrowser = { ...current, open: false, action }
   }
 
   /** 浏览器模式：显式配置 MCP 地址后替换桥接并重读状态。 */

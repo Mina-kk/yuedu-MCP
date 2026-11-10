@@ -54,6 +54,7 @@ internal object WebBridgeProtocol {
     const val M_LOGS_DELETE = "logs.delete"
     const val M_VERIFICATION_LIST = "verification.list"
     const val M_VERIFICATION_OPEN = "verification.open"
+    const val M_VERIFICATION_REPAIR = "verification.repairAddress"
     const val M_VERIFICATION_COMPLETE = "verification.complete"
     const val M_VERIFICATION_CLEAR = "verification.clear"
     const val M_VERIFICATION_CLOSE = "verification.close"
@@ -66,7 +67,7 @@ internal object WebBridgeProtocol {
     val METHODS: Set<String> = linkedSetOf(
         M_BOOTSTRAP, M_SERVICE_SET, M_SETTINGS_SAVE, M_CONNECTION_COPY,
         M_TOOLS_LIST, M_TOOLS_CALL, M_LOGS_DELETE,
-        M_VERIFICATION_LIST, M_VERIFICATION_OPEN, M_VERIFICATION_COMPLETE,
+        M_VERIFICATION_LIST, M_VERIFICATION_OPEN, M_VERIFICATION_REPAIR, M_VERIFICATION_COMPLETE,
         M_VERIFICATION_CLEAR, M_VERIFICATION_CLOSE, M_VERIFICATION_BROWSER_CLOSE,
         M_FILE_EXPORT, M_FILE_IMPORT, M_THEME, M_EXIT,
     )
@@ -448,6 +449,16 @@ internal object WebBridgeProtocol {
             return CompleteParse.Bad(ERR_BAD_PARAMS, "answer 超过 $MAX_VERIFICATION_ANSWER_CHARS 字符")
         }
         return CompleteParse.Ok(id, answer)
+    }
+
+    data class VerificationRepair(val id: String, val url: String)
+
+    fun parseVerificationRepair(params: JsonObject): VerificationRepair? {
+        if (params.keySet() != setOf("id", "url")) return null
+        val id = parseVerificationId(params)?.takeUnless { it.any(Char::isISOControl) } ?: return null
+        val url = params.get("url")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString ?: return null
+        if (url.length > 8192 || !WebBridgePolicy.isVerificationUrlAllowed(url)) return null
+        return VerificationRepair(id, url)
     }
 
     fun parseVerificationId(params: JsonObject): String? {

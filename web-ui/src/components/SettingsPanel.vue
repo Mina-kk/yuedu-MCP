@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import AppIcon from './Icon.vue'
 
 // 设置：主题（本地立即生效）+ 运行时/阅读端字段（settings.save 整体校验后回读）。
@@ -15,6 +15,11 @@ const props = defineProps({
   saveSettings: { type: Function, default: null }
 })
 const emit = defineEmits(['close', 'pick-theme', 'pick-mode', 'dirty', 'retry', 'connect-web', 'exit'])
+const coreStatusLabel = computed(() => ({ idle: '尚未加载', loading: '加载中', loaded: '已加载', failed: '加载失败' }[props.coreStatus] || '状态未知'))
+
+function versionValue(value, fallback = '未知') {
+  return value == null || !String(value).trim() ? fallback : String(value)
+}
 
 const SOURCE_TYPES = [
   [-1, '自动'],
@@ -81,6 +86,17 @@ function connectWeb() {
 <template>
   <div class="section">
     <div class="section-head">
+      <h3 class="section-title">应用版本（APK）</h3>
+    </div>
+    <dl class="version-details">
+      <div><dt>版本名称（versionName）</dt><dd>{{ versionValue(bootstrap?.versionName, '版本未知') }}</dd></div>
+      <div><dt>版本代码（versionCode）</dt><dd>{{ versionValue(bootstrap?.versionCode) }}</dd></div>
+      <div><dt>构建修订（buildRevision）</dt><dd class="mono">{{ versionValue(bootstrap?.buildRevision) }}</dd></div>
+    </dl>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
       <h3 class="section-title">运行时</h3>
       <span class="section-sub">{{ runtimeConnected ? '已连接宿主' : '未连接' }}</span>
     </div>
@@ -110,12 +126,16 @@ function connectWeb() {
   <div class="section">
     <div class="section-head">
       <h3 class="section-title">Rust 前端核</h3>
-      <span class="section-sub">{{ coreVersion || coreStatus }}</span>
+      <span class="section-sub">{{ coreStatusLabel }}</span>
     </div>
+    <dl class="version-details">
+      <div><dt>Rust 核心版本</dt><dd class="mono">{{ versionValue(coreVersion, '版本未知') }}</dd></div>
+    </dl>
     <p class="hint">
-      <template v-if="coreStatus === 'loaded'">已加载真实 wasm（{{ coreVersion }}）。书源分析/对比/筛选/证据分级由 Rust 计算。</template>
+      <template v-if="coreStatus === 'loaded'">已加载真实 wasm。书源分析/对比/筛选/证据分级由 Rust 计算，与 APK 应用版本分别记录。</template>
       <template v-else-if="coreStatus === 'failed'">Rust 核不可用：wasm 未构建或加载失败。依赖它的分析功能会明确报错，不会用 JS 假替代。</template>
-      <template v-else>Rust 核加载中…</template>
+      <template v-else-if="coreStatus === 'loading'">Rust 核加载中…</template>
+      <template v-else>Rust 核尚未加载。</template>
     </p>
   </div>
 
@@ -216,6 +236,20 @@ function connectWeb() {
 
 
 <style scoped>
+.version-details {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+.version-details dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.version-details dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
 .err-text {
   color: var(--bad);
 }

@@ -1,6 +1,7 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import App from '../src/App.vue'
+import { core } from '../src/lib/core.js'
 
 // 外壳：5 页导航、宿主事件 {event,payload}、Back 顺序、验证隔离页工具栏。
 // App.vue 内部自建 store，测试走真实 Android 宿主桥路径（window.StudioBridge），
@@ -63,6 +64,86 @@ afterEach(() => {
 })
 
 describe('App shell', () => {
+  it.each(['loaded', 'failed'])('Rust %s时页头仍显示bootstrap的APK版本，不混用Rust版本', async status => {
+    vi.spyOn(core, 'load').mockResolvedValue(status === 'loaded' ? {} : null)
+    vi.spyOn(core, 'status').mockReturnValue(status)
+    vi.spyOn(core, 'error').mockReturnValue('')
+    vi.spyOn(core, 'version').mockReturnValue('2.0.0-core-fixture')
+    installStudioBridge(handlers({
+      'app.bootstrap': async () => ({ ...BOOTSTRAP, versionName: '7.4.2', versionCode: 70402, buildRevision: 'revision-fixture' })
+    }))
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(wrapper.find('.app-head').text()).toContain('APK 7.4.2')
+    expect(wrapper.find('.app-head').text()).not.toContain('2.0.0-core-fixture')
+    expect(wrapper.find('.app-head').text()).not.toContain('Rust')
+    wrapper.unmount()
+  })
+
+  it.each([undefined, null, '', '  '])('应用versionName为%s时明确显示版本未知，不回退到核心或写死版本', async versionName => {
+    vi.spyOn(core, 'load').mockResolvedValue({})
+    vi.spyOn(core, 'status').mockReturnValue('loaded')
+    vi.spyOn(core, 'error').mockReturnValue('')
+    vi.spyOn(core, 'version').mockReturnValue('2.0.0-core-fixture')
+    installStudioBridge(handlers({ 'app.bootstrap': async () => ({ ...BOOTSTRAP, versionName }) }))
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(wrapper.find('.app-head').text()).toContain('版本未知')
+    expect(wrapper.find('.app-head').text()).not.toContain('2.0.0')
+    wrapper.unmount()
+  })
+
+  it('历史已完成记录通过真实Vue确认补全，取消无写入、同ID回读后仅手动打开', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => { throw new Error('禁止原生 alert') })
+    const confirm = vi.spyOn(window, 'confirm').mockImplementation(() => { throw new Error('禁止原生 confirm') })
+    const prompt = vi.spyOn(window, 'prompt').mockImplementation(() => { throw new Error('禁止原生 prompt') })
+    const broken = {
+      id: 'completed-history', jobId: 'mcp', url: '', domain: '', status: 'COMPLETED', kind: 'webview',
+      purpose: '历史验证', finalUrl: '', answer: '', imageData: '', createdAt: 1, updatedAt: 1,
+      canOpen: false, addressIssue: 'missing_url'
+    }
+    const repaired = { ...broken, url: 'https://verify.example/challenge', domain: 'verify.example', status: 'WAITING', canOpen: true, addressIssue: '', updatedAt: 2 }
+    let records = [broken]
+    const bridge = installStudioBridge(handlers({
+      'verification.list': async () => ({ sessions: records }),
+      'verification.repairAddress': async ({ id, url }) => {
+        expect({ id, url }).toEqual({ id: broken.id, url: repaired.url })
+        records = [repaired]
+        return { repaired: true, session: repaired }
+      },
+      'verification.open': async () => ({ opened: true })
+    }))
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.findAll('.tab')[3].trigger('click')
+    await flushPromises()
+    const click = async text => {
+      await wrapper.findAll('button').find(button => button.text() === text).trigger('click')
+      await flushPromises()
+    }
+    await wrapper.get('input[aria-label="验证地址"]').setValue(repaired.url)
+    await click('补全地址')
+    expect(wrapper.get('[role="alertdialog"]').text()).toContain('已完成记录重置为待验证')
+    await click('取消')
+    expect(bridge.calls.some(([method]) => method === 'verification.repairAddress')).toBe(false)
+    await click('补全地址')
+    await click('确认补全')
+    expect(wrapper.find('[role="alertdialog"]').exists()).toBe(false)
+    expect(wrapper.findAll('.session')).toHaveLength(1)
+    expect(wrapper.get('.session').text()).toContain(repaired.url)
+    expect(wrapper.get('.session').text()).toContain('待处理')
+    expect(bridge.calls.filter(([method]) => method.startsWith('verification.'))).toEqual([
+      ['verification.list', {}], ['verification.repairAddress', { id: broken.id, url: repaired.url }], ['verification.list', {}]
+    ])
+    await click('打开验证页')
+    expect(bridge.calls.some(([method, params]) => method === 'verification.open' && params.id === broken.id)).toBe(true)
+    expect(bridge.calls.some(([method]) => method === 'verification.clear')).toBe(false)
+    expect(alert).not.toHaveBeenCalled()
+    expect(confirm).not.toHaveBeenCalled()
+    expect(prompt).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('系统返回先关闭当前工具详情而不是退出应用', async () => {
     installStudioBridge(handlers({ 'tools.list': async () => ({ tools: [{ name: 'get_app_info', description: '应用信息', inputSchema: { type: 'object', properties: {} } }] }) }))
     const wrapper = mount(App)

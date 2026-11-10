@@ -1,11 +1,11 @@
 # 阅读书源 MCP
 
-> **本分支为 2.0.0 重构开发快照，尚未完成验收，不是正式发布版。** Rust/WASM + Vue 界面和阅读规则运行时仍在集成；可使用 GitHub-hosted Actions 或有资源限额的本机构建。Debug APK 不等于正式签名，不据打包成功推定运行时通过。`main` 与既有 Releases 不受此分支影响。
+> **本分支为 Rust/WASM + Vue 重构分支。** 当前源码可能包含尚未发布的修复；可下载包和对应验收边界以 Releases 为准。使用 GitHub-hosted Actions 或有资源限额的本机构建；Debug APK 不等于正式签名，不据打包成功推定运行时通过。`main` 不受此分支影响。
 
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`2.0.2`（versionCode 203，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.3`（versionCode 204，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
