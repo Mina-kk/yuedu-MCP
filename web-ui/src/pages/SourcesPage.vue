@@ -35,7 +35,13 @@ const analysis = ref(null)
 const analysisError = ref('')
 const readback = ref('')
 const readbackDiff = ref(null)
-const pendingDelete = ref(null)
+const deleteBusy = ref(false)
+const deleteError = ref('')
+const selectedIds = ref([])
+const allPageSelected = computed(() => items.value.length > 0 && items.value.every((row) => selectedIds.value.includes(row.projectId)))
+function selectPage(event) {
+  selectedIds.value = event.target.checked ? [...new Set([...selectedIds.value, ...items.value.map((row) => row.projectId)])] : selectedIds.value.filter((id) => !items.value.some((row) => row.projectId === id))
+}
 const importError = ref('')
 
 const dirty = computed(() => editing.value !== null && draft.value !== original.value)
@@ -87,6 +93,7 @@ function prevPage() {
 }
 
 async function open(row) {
+  if (deleteBusy.value) return
   if (dirty.value) {
     props.store.confirmDialog({
       kind: 'discard',
@@ -121,6 +128,7 @@ async function open(row) {
 }
 
 function closeEditor() {
+  if (deleteBusy.value) return
   if (dirty.value) {
     props.store.confirmDialog({
       kind: 'discard',
@@ -180,6 +188,7 @@ function validateJson() {
 }
 
 async function save() {
+  if (deleteBusy.value) return
   saveError.value = ''
   conflict.value = null
   readback.value = ''
@@ -258,6 +267,7 @@ async function exportList() {
 }
 
 async function doImport() {
+  if (deleteBusy.value) return
   importError.value = ''
   let picked
   try {
@@ -290,6 +300,85 @@ async function doImport() {
 }
 
 function askDelete(row) {
+  askDeleteIds([row.projectId])
+}
+
+function askDeleteIds(ids) {
+  if (!ids.length || deleteBusy.value || loading.value || loadingSource.value || saveBusy.value) return
+  const targets = [...new Set(ids)]
+  if (dirty.value) {
+    props.store.confirmDialog({
+      kind: 'discard', title: '放弃未保存的修改？', danger: true, confirmLabel: '放弃并继续',
+      message: '继续删除前将丢弃当前未保存的编辑；之后仍需确认删除。',
+      onAccept: () => { draft.value = original.value; askDeleteIds(targets) }
+    })
+    return
+  }
+  props.store.confirmDialog({
+    kind: 'delete', title: '删除书源？', danger: true, confirmLabel: '确认删除',
+    message: `删除选中的 ${targets.length} 条书源项目：${targets.join('、')}，不可恢复；不删除阅读端已导入的书源。`,
+    onAccept: () => deleteSources(targets)
+  })
+}
+
+async function deleteSources(ids) {
+  if (deleteBusy.value) return
+  if (dirty.value) { askDeleteIds(ids); return }
+  deleteBusy.value = true
+  deleteError.value = ''
+  const receipt = await callToolParsed(props.store, 'delete_projects', { ids })
+  const match = /^已删除 (\d+) 个项目$/.exec(receipt.text)
+  try {
+    // 无过滤、无版本折叠地遍历摘要，不能把当前页未出现当成已删除。
+    const remaining = new Set()
+    let readOffset = 0
+    let expectedTotal = null
+    while (true) {
+      const r = await callToolParsed(props.store, 'list_sources', { limit: PAGE, offset: readOffset, latestOnly: false })
+      if (r.threw || r.isError || !Array.isArray(r.data?.items) || typeof r.data.hasMore !== 'boolean') {
+        throw new Error(r.threw || r.text || '列表回读格式错误')
+      }
+      if (!Number.isInteger(r.data.total) || r.data.total < 0 || (expectedTotal !== null && expectedTotal !== r.data.total)) {
+        throw new Error('列表总数无效或回读期间发生变化，请刷新后核对')
+      }
+      expectedTotal = r.data.total
+      for (const row of r.data.items) {
+        if (typeof row.projectId !== 'string' || !row.projectId || remaining.has(row.projectId)) {
+          throw new Error('列表分页重复或项目 ID 无效，无法确认删除')
+        }
+        remaining.add(row.projectId)
+      }
+      if (!r.data.hasMore) {
+        if (remaining.size !== expectedTotal) throw new Error('列表回读总数不一致，无法确认删除')
+        break
+      }
+      if (remaining.size >= expectedTotal) throw new Error('列表分页与总数不一致')
+      if (!r.data.items.length) throw new Error('列表分页未前进')
+      readOffset += r.data.items.length
+    }
+    const absent = ids.filter((id) => !remaining.has(id))
+    selectedIds.value = selectedIds.value.filter((id) => !absent.includes(id))
+    if (absent.includes(editing.value?.projectId)) { editing.value = null; draft.value = ''; original.value = ''; props.store.markPageDirty(false) }
+    await load(true)
+    while (!listError.value && !items.value.length && offset.value > 0) {
+      offset.value = Math.max(0, offset.value - PAGE)
+      await load(true)
+    }
+    if (listError.value) throw new Error(`列表刷新失败：${listError.value}`)
+    if (receipt.threw || receipt.isError || !match || Number(match[1]) !== ids.length || ids.some((id) => remaining.has(id))) {
+      throw new Error(`${receipt.threw || receipt.text || '删除结果无法确认'}；请求 ${ids.length} 条，回读已不存在 ${absent.length} 条，仍存在 ${ids.length - absent.length} 条。未确认条目保留选择。`)
+    }
+    props.store.toast(`已删除 ${ids.length} 条书源并回读确认`)
+  } catch (error) {
+    deleteError.value = `删除未完全确认：${error.message}`
+    props.store.toast(deleteError.value, 'err')
+  } finally {
+    deleteBusy.value = false
+  }
+}
+
+function askArchive(row) {
+  if (deleteBusy.value) return
   props.store.confirmDialog({
     kind: 'delete',
     title: '清理旧版本？',
@@ -332,6 +421,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 
 <template>
   <section class="page">
+    <fieldset class="source-controls" :disabled="deleteBusy" :aria-busy="deleteBusy">
     <div class="section">
       <div class="section-head">
         <h3 class="section-title">书源</h3>
@@ -369,7 +459,15 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           <AppIcon name="download" :size="15" /><span>导出列表</span>
         </button>
       </div>
+      <div class="actions source-selection">
+        <label><input type="checkbox" aria-label="全选当前页" :checked="allPageSelected" :indeterminate="!allPageSelected && items.some((row) => selectedIds.includes(row.projectId))" @change="selectPage" />全选当前页（仅已加载条目）</label>
+        <span>已选 {{ selectedIds.length }} 条</span>
+        <button class="btn btn-ghost btn-sm" type="button" @click="selectedIds = []">取消选择</button>
+        <button class="btn btn-ghost danger" type="button" :disabled="!selectedIds.length || loading || loadingSource || saveBusy" @click="askDeleteIds(selectedIds)">删除选中</button>
+      </div>
       <p v-if="importError" class="code-block err">{{ importError }}</p>
+      <p v-if="deleteBusy" role="status">正在删除并回读校验，请勿重复操作…</p>
+      <p v-if="deleteError" class="code-block err" role="alert">{{ deleteError }}</p>
       <p v-if="listError" class="code-block err">{{ listError }}</p>
       <EmptyState v-if="loading" title="正在读取书源" text="来自宿主项目库" :busy="true" />
       <EmptyState
@@ -379,9 +477,9 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         icon="book"
       />
       <div v-else class="source-list">
+        <div v-for="row in items" :key="row.projectId" class="source-entry">
+        <input v-model="selectedIds" type="checkbox" :value="row.projectId" :aria-label="`选择书源 ${row.bookSourceName || '未命名'}（${row.projectId}）`" />
         <button
-          v-for="row in items"
-          :key="row.projectId"
           type="button"
           class="source-row"
           :class="{ on: editing && editing.projectId === row.projectId }"
@@ -395,6 +493,8 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
             <span class="muted small">{{ formatTime(row.updatedAt) }}</span>
           </span>
         </button>
+        <button class="btn btn-ghost danger" type="button" :disabled="loading || loadingSource || saveBusy" @click="askDelete(row)">删除书源</button>
+        </div>
       </div>
       <div class="pager">
         <button class="btn btn-ghost btn-sm" type="button" :disabled="offset <= 0 || loading" @click="prevPage">
@@ -486,11 +586,12 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
       </div>
 
       <div class="actions">
-        <button class="btn btn-ghost danger" type="button" @click="askDelete({ bookSourceName: editing.name, bookSourceUrl: editing.url })">
+        <button class="btn btn-ghost danger" type="button" @click="askArchive({ bookSourceName: editing.name, bookSourceUrl: editing.url })">
           <AppIcon name="trash" :size="16" /><span>清理旧版本</span>
         </button>
       </div>
     </div>
+    </fieldset>
   </section>
 </template>
 

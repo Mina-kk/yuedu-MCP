@@ -26,9 +26,76 @@ body {
 
 .app-shell {
   position: relative;
-  min-height: 100dvh;
+  height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   isolation: isolate;
 }
+
+/* Reserve real space for navigation instead of painting it over the editor. */
+.app-shell > .shell-head { flex: none; }
+.app-shell > .page-body {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 24px;
+  scroll-padding-block: 16px;
+}
+.app-shell > .tabbar {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  transform: none;
+  flex: none;
+  align-self: center;
+  margin: 8px auto calc(14px + var(--safe-bottom));
+}
+
+/* These fields do not also carry .input; textarea must own its complete style. */
+.textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--field);
+  color: var(--text);
+  outline: none;
+}
+.textarea:focus {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-soft);
+}
+.textarea[readonly] { resize: none; }
+.source-controls {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.source-entry {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.source-entry > .btn { grid-column: 2; justify-self: end; }
+.source-entry > input[type='checkbox'], .source-selection input[type='checkbox'] {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--c1);
+}
+.source-selection label { display: flex; align-items: center; gap: 8px; }
+.dialog-text { overflow-wrap: anywhere; max-height: 45dvh; overflow-y: auto; }
+html[data-keyboard='1'] .app-shell > .tabbar { display: none; }
 
 /* 页头：吸顶玻璃条，内容滚动时保持可见 */
 .shell-head {
@@ -79,7 +146,13 @@ body {
 /* 验证隔离页打开时：主 Web 只留 96 CSSpx 工具栏区（宿主 native 已在顶部 96dp 之下放独立 WebView）。
    本页不创建 iframe，只把自己的内容收进工具栏高度，避免与原生验证页抢空间。 */
 .app-shell.verify-open .page-body {
-  padding-top: 4px;
+  display: none;
+}
+.app-shell.verify-open .shell-head {
+  height: 96px;
+  box-sizing: border-box;
+  overflow: auto;
+  align-content: center;
 }
 
 .app-shell.verify-open .tabbar {

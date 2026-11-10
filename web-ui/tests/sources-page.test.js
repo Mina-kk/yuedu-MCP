@@ -46,7 +46,156 @@ async function mountPage(handlers) {
   return { wrapper, store, bridge }
 }
 
+const result = (data) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }] })
+const button = (wrapper, text) => wrapper.findAll('button').find((b) => b.text() === text)
+async function acceptDialog(store) {
+  const accept = store.state.dialog.onAccept
+  store.closeDialog()
+  await accept()
+  await flushPromises()
+}
+
 describe('SourcesPage', () => {
+  it('回读总数与枚举不一致不能清除选择或报成功', async () => {
+    let deleted = false
+    const { wrapper, store } = await mountPage({
+      list_sources: async () => result(deleted ? { total: 1, hasMore: false, items: [] } : LIST),
+      delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
+    })
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await button(wrapper, '删除选中').trigger('click'); await acceptDialog(store)
+    expect(store.state.toast.kind).toBe('err')
+    expect(wrapper.text()).toContain('已选 1 条')
+  })
+  it('回读重复分页时停止并保留选择，不把分页不完整当作删除成功', async () => {
+    let deleted = false
+    let reads = 0
+    const { wrapper, store } = await mountPage({
+      list_sources: async () => {
+        if (!deleted) return result(LIST)
+        reads += 1
+        // 第三页是保护测试的有限边界；实现应在第二次重复页即停止。
+        return result({ total: 3, hasMore: reads < 3, items: [{ ...LIST.items[0], projectId: 'other' }] })
+      },
+      delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
+    })
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await button(wrapper, '删除选中').trigger('click'); await acceptDialog(store)
+    expect(store.state.toast.kind).toBe('err')
+    expect(reads).toBe(2)
+    expect(wrapper.text()).toContain('已选 1 条')
+  })
+  it('列表刷新返回非 JSON 不可宣称删除成功', async () => {
+    let deleted = false
+    let reads = 0
+    const { wrapper, store } = await mountPage({
+      list_sources: async () => !deleted ? result(LIST) : (++reads === 1 ? result({ total: 0, hasMore: false, items: [] }) : result('非法回包')),
+      delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
+    })
+    await button(wrapper, '删除书源').trigger('click'); await acceptDialog(store)
+    expect(store.state.toast.kind).toBe('err')
+    expect(wrapper.text()).toContain('列表刷新失败')
+  })
+  it('未保存编辑必须先确认丢弃，取消保留草稿，删除与回读期间锁定操作并防重复', async () => {
+    let resolveDelete
+    let deleted = false
+    const { wrapper, store, bridge } = await mountPage({
+      list_sources: async () => result(deleted ? { total: 0, hasMore: false, items: [] } : LIST),
+      get_source: async () => result(RAW),
+      delete_projects: () => new Promise((resolve) => { resolveDelete = () => { deleted = true; resolve(result('已删除 1 个项目')) } })
+    })
+    await wrapper.find('.source-row').trigger('click'); await flushPromises()
+    await wrapper.find('textarea').setValue(RAW + ' ')
+    await button(wrapper, '删除书源').trigger('click')
+    expect(store.state.dialog.kind).toBe('discard')
+    store.closeDialog()
+    expect(wrapper.find('textarea').element.value).toBe(RAW + ' ')
+    await button(wrapper, '删除书源').trigger('click'); await acceptDialog(store)
+    expect(store.state.dialog.kind).toBe('delete')
+    const accept = store.state.dialog.onAccept
+    store.closeDialog()
+    const pending = accept(); await flushPromises()
+    expect(wrapper.find('fieldset').element.disabled).toBe(true)
+    await accept()
+    expect(bridge.calls.filter(([m]) => m === 'delete_projects')).toHaveLength(1)
+    resolveDelete(); await pending; await flushPromises()
+    expect(wrapper.find('fieldset').element.disabled).toBe(false)
+    expect(wrapper.find('textarea').exists()).toBe(false)
+  })
+  it.each(['partial', 'error', 'readback', 'malformed', 'still-present'])('删除 %s 不假成功，保留未确认选择并显示持久错误', async (mode) => {
+    let attempted = false
+    const rows = [LIST.items[0], { ...LIST.items[0], projectId: 'p2' }]
+    const { wrapper, store } = await mountPage({
+      list_sources: async () => {
+        if (attempted && mode === 'readback') throw new Error('回读断线')
+        const remaining = attempted && mode === 'partial' ? [rows[1]] : rows
+        return result({ total: remaining.length, hasMore: false, items: remaining })
+      },
+      delete_projects: async () => {
+        attempted = true
+        if (mode === 'error') throw new Error('删除断线')
+        return result(mode === 'malformed' ? '{"deleted":2}' : `已删除 ${mode === 'partial' ? 1 : 2} 个项目`)
+      }
+    })
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await button(wrapper, '删除选中').trigger('click'); await acceptDialog(store)
+    expect(store.state.toast.kind).toBe('err')
+    expect(wrapper.text()).toContain('删除未完全确认')
+    expect(wrapper.text()).toContain(mode === 'partial' ? '已选 1 条' : '已选 2 条')
+  })
+  it('删除末页后回退有效页，全库回读不受搜索和最新版本折叠影响', async () => {
+    let deleted = false
+    const { wrapper, store, bridge } = await mountPage({
+      list_sources: async ({ offset }) => result({ total: deleted ? 20 : 21, hasMore: offset === 0 && !deleted, items: offset === 20 ? (deleted ? [] : LIST.items) : Array.from({ length: 20 }, (_, i) => ({ ...LIST.items[0], projectId: `other-${i}` })) }),
+      delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
+    })
+    await button(wrapper, '下一页').trigger('click'); await flushPromises()
+    await button(wrapper, '删除书源').trigger('click'); await acceptDialog(store)
+    expect(wrapper.text()).toContain('偏移 0')
+    expect(wrapper.findAll('.source-row')).toHaveLength(20)
+    const calls = bridge.calls.slice(bridge.calls.findIndex(([m]) => m === 'delete_projects') + 1)
+    expect(calls[0]).toEqual(['list_sources', { limit: 20, offset: 0, latestOnly: false }])
+  })
+  it('全选仅当前页、取消和计数，批量确认后精确删除选中项目', async () => {
+    const rows = [LIST.items[0], { ...LIST.items[0], projectId: 'p2' }]
+    let deleted = false
+    const { wrapper, store, bridge } = await mountPage({
+      list_sources: async () => result({ total: deleted ? 1 : 3, hasMore: !deleted, items: deleted ? [{ ...rows[0], projectId: 'unloaded' }] : rows }),
+      delete_projects: async () => { deleted = true; return result('已删除 2 个项目') }
+    })
+    expect(wrapper.find('input[aria-label="全选当前页"]').exists()).toBe(true)
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    expect(wrapper.text()).toContain('已选 2 条')
+    await button(wrapper, '取消选择').trigger('click')
+    expect(wrapper.text()).toContain('已选 0 条')
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await button(wrapper, '删除选中').trigger('click')
+    expect(store.state.dialog.message).toContain('2 条')
+    await acceptDialog(store)
+    expect(bridge.calls.find(([m]) => m === 'delete_projects')[1]).toEqual({ ids: ['p1', 'p2'] })
+    expect(wrapper.text()).toContain('已选 0 条')
+  })
+  it('单条删除精确 projectId，确认不可恢复且不删除阅读端，真实文本回执后回读', async () => {
+    let deleted = false
+    const { wrapper, store, bridge } = await mountPage({
+      list_sources: async () => result(deleted ? { total: 0, hasMore: false, items: [] } : LIST),
+      delete_projects: async ({ ids }) => { expect(ids).toEqual(['p1']); deleted = true; return result('已删除 1 个项目') }
+    })
+    expect(button(wrapper, '删除书源')).toBeTruthy()
+    await button(wrapper, '删除书源').trigger('click')
+    expect(store.state.dialog.message).toContain('不可恢复')
+    expect(store.state.dialog.message).toContain('不删除阅读端')
+    expect(store.state.dialog.message).toContain('p1')
+    expect(deleted).toBe(false)
+    store.closeDialog()
+    expect(deleted).toBe(false)
+    await button(wrapper, '删除书源').trigger('click')
+    await acceptDialog(store)
+    expect(bridge.calls.find(([m]) => m === 'delete_projects')[1]).toEqual({ ids: ['p1'] })
+    expect(bridge.calls.filter(([m]) => m === 'list_sources').length).toBeGreaterThan(1)
+    expect(wrapper.findAll('.source-row')).toHaveLength(0)
+    expect(store.state.toast.text).toContain('已删除')
+  })
   it('导入数组逐项提交原文字符串，保留大整数与转义文本', async () => {
     const SECOND = '{ "bookSourceName": "另一源", "bookSourceUrl": "https://b.example", "weight": 12345678901234567891 }'
     const { wrapper, bridge } = await mountPage({
