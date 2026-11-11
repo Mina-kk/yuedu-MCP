@@ -21,7 +21,7 @@ import com.mina.legadostudio.MainActivity
 /**
  * 常驻圆形悬浮球（圆底 + 「M」字样），业务 UI 全部由**受控本地 WebView** 渲染：
  * - 页面是 [VerificationOverlayPage] 生成的纯 HTML/CSS 字符串（无 JS、无外链、无 JS interface），
- *   经 `loadDataWithBaseURL(about:blank, …)` 离线加载，WebView 关闭 JS/文件/content/网络访问，
+ *   经固定 .invalid URL 的主框架本地响应离线加载，WebView 关闭 JS/文件/content/网络访问，
  *   并拦截一切非文档自身导航与子资源请求；
  * - 常态蓝底白 M；验证时橙底白 M 与域名提示；
  * - 可自由拖拽；近边停靠后延时裁切半球（窗口始终留在屏内），
@@ -185,9 +185,16 @@ object VerificationOverlayManager {
             override fun shouldOverrideUrlLoading(v: WebView, url: String?): Boolean =
                 !VerificationOverlayPage.isAllowedNavigation(url)
 
-            // 子资源一律拒绝：页面本身不引用任何资源，出现请求即视为异常
-            override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): WebResourceResponse? =
-                BLOCKED_RESPONSE
+            // 仅宿主固定文档的主框架 GET 返回离线 HTML；绝不回退到网络。
+            override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): WebResourceResponse {
+                val html = lastPage
+                return if (request.isForMainFrame && request.method == "GET" &&
+                    request.url.toString() == VerificationOverlayPage.BASE_URL && html != null
+                ) WebResourceResponse(
+                    "text/html", "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store"),
+                    html.byteInputStream(Charsets.UTF_8),
+                ) else BLOCKED_RESPONSE
+            }
 
             @Deprecated("Deprecated in Java")
             override fun shouldInterceptRequest(v: WebView, url: String?): WebResourceResponse? = BLOCKED_RESPONSE
@@ -225,18 +232,12 @@ object VerificationOverlayManager {
         s.userAgentString = OVERLAY_USER_AGENT
     }
 
-    private var lastPage: String? = null
+    @Volatile private var lastPage: String? = null
     private fun loadPage(view: WebView, html: String) {
         if (lastPage == html) return
         lastPage = html
         runCatching {
-            view.loadDataWithBaseURL(
-                VerificationOverlayPage.baseUrl(),
-                html,
-                "text/html",
-                "utf-8",
-                null,
-            )
+            view.loadUrl(VerificationOverlayPage.baseUrl())
         }
     }
 

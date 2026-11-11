@@ -108,7 +108,11 @@ class VerificationOverlayPageTest {
         assertFalse(html.contains("null"))
     }
 
-    @Test fun baseUrlIsOpaqueAndNavigationBlocked() {
+    @Test fun baseUrlIsFixedOfflineDocumentAndNavigationBlocked() {
+        // A host-owned request must be distinguishable from arbitrary data: documents.
+        assertEquals("https://overlay.invalid/index.html", VerificationOverlayPage.baseUrl())
+        assertFalse(VerificationOverlayPage.isAllowedNavigation("data:text/html;base64,WA=="))
+        assertFalse(VerificationOverlayPage.isAllowedNavigation("about:blank"))
         assertEquals(VerificationOverlayPage.BASE_URL, VerificationOverlayPage.baseUrl())
         assertTrue(VerificationOverlayPage.baseUrl().startsWith(VerificationOverlayPage.BASE_URL))
         // 自身文档放行，其它一切拦截

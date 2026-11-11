@@ -43,10 +43,10 @@ object VerificationOverlayPage {
     const val ALERT_WINDOW_MAX_HEIGHT_CSS_PX = 110
 
     /**
-     * loadDataWithBaseURL 的 baseURL：不透明、不可解析为任何真实 origin。
+     * 固定的保留 .invalid 文档地址：仅由宿主拦截主框架 GET 并返回本地 HTML。
      * 只允许文档自身（含 fragment）导航，其它一律拦截。
      */
-    const val BASE_URL = "about:blank"
+    const val BASE_URL = "https://overlay.invalid/index.html"
 
     /** 圆球常态页：蓝色圆底 + 「M」。 */
     fun normalPage(hiddenSide: Int = 0): String = document(
