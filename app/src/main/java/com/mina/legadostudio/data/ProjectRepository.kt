@@ -18,6 +18,8 @@ class ProjectRepository(private val dao: StudioDao) {
         return next
     }
     suspend fun delete(ids: List<String>): Int = if (ids.isEmpty()) 0 else dao.deleteProjects(ids.distinct())
+    suspend fun deleteFromSnapshot(expected: List<ProjectEntity>, ids: List<String>): Int =
+        dao.deleteProjectsFromSnapshot(expected, ids)
     suspend fun export(id: String): String = dao.project(id)?.sourceJson ?: error("项目不存在")
 
     /** 保守去重扫描入口（纯函数包装）：只出报告，绝不删数据。供 MCP/UI 稍后接线。 */

@@ -27,10 +27,8 @@ class McpConfigStore internal constructor(
             check(secure.get("token") == token) { "无法确认 MCP 令牌写入" }
         },
         changed ?: {
-            kotlin.runCatching {
-                (context.applicationContext as? com.mina.legadostudio.StudioApplication)?.contextEpoch?.bump()
-                    ?: ContextEpochStore(context.applicationContext).bump()
-            }
+            (context.applicationContext as? com.mina.legadostudio.StudioApplication)?.contextEpoch?.bump()
+                ?: ContextEpochStore(context.applicationContext).bump()
             Unit
         },
     )
@@ -67,26 +65,63 @@ class McpConfigStore internal constructor(
         require(config.port in 1024..65530) { "端口必须在 1024..65530" }
         require(!config.tokenRequired || config.token.isNotBlank()) { "启用访问令牌校验时，访问令牌不能为空" }
         val oldToken = readToken()
-        if (oldToken != config.token) writeToken(config.token)
+        replaceToken(oldToken, config.token)
         check(prefs.edit().putInt("port", config.port).putBoolean("tokenRequired", config.tokenRequired)
             .putBoolean("v1SecurityInitialized", true).putBoolean("v2DefaultPortMigrated", true).commit()) {
             "无法持久化 MCP 配置"
         }
         check(prefs.getInt("port", DEFAULT_PORT) == config.port &&
             prefs.getBoolean("tokenRequired", true) == config.tokenRequired) { "无法确认 MCP 配置写入" }
-        if (oldToken != null && oldToken != config.token) {
+    }
+
+    // Invalidation precedes ordinary prefs: a failed commit does not undo a secure write.
+    // Even a throwing secure writer may have changed memory/disk. Invalidate conservatively.
+    private fun replaceToken(oldToken: String?, token: String) {
+        try {
+            if (oldToken != token || tokenWriteUnconfirmed) {
+                if (oldToken != null && oldToken != token) tokenInvalidationPending = true
+                tokenWriteUnconfirmed = true
+                try {
+                    writeToken(token)
+                    check(readToken() == token) { "无法确认 MCP 令牌写入" }
+                    tokenWriteUnconfirmed = false
+                } finally {
+                    flushTokenInvalidation()
+                }
+            } else {
+                flushTokenInvalidation()
+            }
+        } catch (_: Exception) {
+            // Never propagate storage errors containing the submitted secret.
+            throw IllegalStateException("MCP 令牌保存或失效确认失败，结果未知")
+        }
+    }
+
+    private fun flushTokenInvalidation() {
+        if (tokenInvalidationPending) {
             triggerTokenChanged()
+            tokenInvalidationPending = false
         }
     }
 
     /** Merge under the same process-wide lock as load/save: no stale port-only snapshot can re-enable auth. */
-    fun updateConnection(port: Int?, tokenRequired: Boolean?): Config = synchronized(configLock) {
+    fun updateConnection(port: Int?, tokenRequired: Boolean?, mcpToken: String? = null): Config = synchronized(configLock) {
         require(port == null || port in 1024..65530) { "端口必须在 1024..65530" }
-        val current = load()
-        if (port != null || tokenRequired != null) {
-            save(current.copy(port = port ?: current.port, tokenRequired = tokenRequired ?: current.tokenRequired))
+        val replacement = mcpToken?.takeIf { it.isNotEmpty() }
+        require(replacement == null || isValidReplacementToken(replacement)) { "mcpToken 格式无效" }
+        try {
+            val current = load()
+            if (replacement != null) replaceToken(current.token, replacement)
+            if (port != null || tokenRequired != null) {
+                save(current.copy(port = port ?: current.port, tokenRequired = tokenRequired ?: current.tokenRequired,
+                    token = replacement ?: current.token))
+            }
+            load().also { saved ->
+                check(replacement == null || saved.token == replacement) { "无法确认 MCP 令牌写入" }
+            }
+        } catch (_: Exception) {
+            throw IllegalStateException("MCP 连接配置保存失败，结果可能部分生效")
         }
-        load()
     }
 
     /** 客户端接入信息的连接模式偏好（精简 tools/list）。只影响生成给客户端复制的地址，
@@ -109,6 +144,11 @@ class McpConfigStore internal constructor(
     companion object {
         // All instances (WebView, service and request providers) share the same storage.
         private val configLock = Any()
+        private var tokenInvalidationPending = false
+        private var tokenWriteUnconfirmed = false
+        fun isValidReplacementToken(token: String): Boolean =
+            token.length in 1..4096 && token.matches(Regex("[A-Za-z0-9._~+/-]+=*"))
+
         const val DEFAULT_PORT = 58823
         internal const val LEGACY_DEFAULT_PORT = 1237
 

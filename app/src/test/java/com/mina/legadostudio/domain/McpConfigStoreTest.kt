@@ -18,7 +18,128 @@ class McpConfigStoreTest {
 
     private fun update(store: McpConfigStore, json: String): McpConfigStore.Config {
         val draft = (WebBridgeProtocol.parseSettings(JsonParser.parseString(json).asJsonObject) as WebBridgeProtocol.SettingsParse.Ok).settings
-        return store.updateConnection(draft.port, draft.tokenRequired)
+        return store.updateConnection(draft.port, draft.tokenRequired, draft.mcpToken)
+    }
+
+    @Test fun uncertainSecureWriteRequiresConfirmedRewriteOnRetry() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        val old = disk.store().load()
+        disk.afterTokenWrite = { error("private storage detail") }
+        assertThrows(IllegalStateException::class.java) {
+            update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        }
+        assertTrue(disk.store().load().token != old.token)
+        assertEquals(1, disk.tokenChanges)
+        disk.afterTokenWrite = null
+        update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        assertEquals(2, disk.tokenWrites)
+    }
+
+    @Test fun epochFailureIsNotAcknowledgedAndRetryFlushesPendingInvalidation() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        disk.store().load()
+        disk.beforeEpoch = { error("private callback detail") }
+        val error = assertThrows(IllegalStateException::class.java) {
+            update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        }
+        assertFalse(error.message.orEmpty().contains("private"))
+        assertEquals(0, disk.tokenChanges)
+        disk.beforeEpoch = null
+        update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        assertEquals(1, disk.tokenChanges)
+        assertEquals(1, disk.tokenWrites)
+    }
+
+    @Test fun writeBeforeFailureInvalidatesConservativelyAndCanRetry() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        val old = disk.store().load()
+        disk.beforeTokenWrite = { error("private storage detail") }
+        assertThrows(IllegalStateException::class.java) {
+            update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        }
+        assertTrue(disk.store().load().token == old.token)
+        assertEquals(1, disk.tokenChanges)
+        disk.beforeTokenWrite = null
+        update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        assertEquals(1, disk.tokenWrites)
+    }
+
+    @Test fun emptyPatchNeverRegeneratesAndEnabledPatchPreservesPort() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        val old = disk.store().load()
+        update(disk.store(), """{"mcpToken":""}""")
+        update(disk.store(), """{"mcpToken":null}""")
+        assertTrue(disk.store().load().token == old.token)
+        assertEquals(0, disk.tokenWrites)
+        val patched = update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        assertTrue(patched.tokenRequired)
+        assertEquals(old.port, patched.port)
+        assertTrue(patched.token != old.token)
+    }
+
+    @Test fun tokenAndAuthAndPortPatchesSerializeAcrossInstances() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        disk.store().load()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val started = CountDownLatch(2)
+        val pool = Executors.newFixedThreadPool(3)
+        disk.beforeTokenWrite = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+        try {
+            val token = pool.submit { update(disk.store(), """{"mcpToken":"fixture-replacement"}""") }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val auth = pool.submit { started.countDown(); update(disk.store(), """{"tokenRequired":false}""") }
+            val port = pool.submit { started.countDown(); update(disk.store(), """{"port":45678}""") }
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            release.countDown()
+            listOf(token, auth, port).forEach { it.get(5, TimeUnit.SECONDS) }
+            val saved = disk.store().load()
+            assertFalse(saved.tokenRequired)
+            assertEquals(45678, saved.port)
+            assertTrue(saved.token == "fixture-replacement")
+            assertEquals(1, disk.tokenWrites)
+            assertEquals(1, disk.tokenChanges)
+        } finally { release.countDown(); pool.shutdownNow() }
+    }
+
+    @Test fun invalidOtherFieldPreventsTokenWrite() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        disk.store().load()
+        assertTrue(WebBridgeProtocol.parseSettings(JsonParser.parseString(
+            """{"mcpToken":"fixture-replacement","port":80}""").asJsonObject) is WebBridgeProtocol.SettingsParse.Bad)
+        assertThrows(IllegalArgumentException::class.java) {
+            disk.store().updateConnection(80, null, "fixture-replacement")
+        }
+        assertEquals(0, disk.tokenWrites)
+    }
+
+    @Test fun mismatchedReadbackIsNotSuccessAndRetryConfirmsDisk() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        val old = disk.store().load()
+        disk.afterTokenWrite = { disk.tokenReadOverride = { old.token } }
+        assertThrows(IllegalStateException::class.java) {
+            update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        }
+        assertEquals(1, disk.tokenChanges)
+        disk.afterTokenWrite = null
+        disk.tokenReadOverride = null
+        val saved = update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        assertTrue(saved.token != old.token)
+        assertEquals(2, disk.tokenWrites)
+    }
+
+    @Test fun tokenPatchPreservesExplicitOffAndIsIdempotent() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        update(disk.store(), """{"tokenRequired":false}""")
+        disk.failCommit = true // token-only must not touch unrelated prefs
+        val patched = update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        assertTrue(patched.token == "fixture-replacement")
+        assertFalse(patched.tokenRequired)
+        assertEquals(McpConfigStore.DEFAULT_PORT, patched.port)
+        update(disk.store(), """{"mcpToken":"fixture-replacement"}""")
+        assertEquals(1, disk.tokenWrites)
+        assertEquals(1, disk.tokenChanges)
+        assertTrue(disk.store().load().token == patched.token)
     }
 
     @Test fun incrementalBridgeSettingsPreserveOffAndNeverRewriteToken() {
@@ -126,6 +247,17 @@ class McpConfigStoreTest {
         assertEquals(1, disk.tokenWrites)
         assertEquals(0, disk.tokenChanges)
         assertEquals(0, disk.applyCalls)
+    }
+
+    @Test fun changedTokenInvalidatesEpochEvenWhenPreferencesCommitFails() {
+        val disk = McpConfigDiskFixture(directory.newFolder())
+        val original = disk.store().load()
+        disk.failCommit = true
+        assertThrows(IllegalStateException::class.java) {
+            disk.store().save(original.copy(port = 45678, token = "fixture-replacement"))
+        }
+        assertTrue(disk.store().load().token != original.token)
+        assertEquals(1, disk.tokenChanges)
     }
 
     @Test fun failedCommitIsNotReportedAsSuccessfulSave() {

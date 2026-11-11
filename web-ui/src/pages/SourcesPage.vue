@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useDetailNavigation } from '../lib/detail-navigation.js'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
+import SourceManagement from '../components/sourceManagement.vue'
 import { callToolParsed, formatTime, itemsOf, prettyJson, redactForDisplay } from '../lib/tools.js'
 import { core } from '../lib/core.js'
 import { exportText, importText, sourceJsonSlices } from '../lib/files.js'
@@ -275,11 +276,18 @@ async function exportCurrent() {
 
 async function exportList() {
   try {
+    const sources = []
+    for (const row of [...items.value]) {
+      const r = await callToolParsed(props.store, 'get_source', { key: row.projectId })
+      if (r.threw || r.isError) throw new Error(r.threw || r.text || '读取原文失败')
+      const slices = sourceJsonSlices(r.raw)
+      if (slices.length !== 1 || Array.isArray(JSON.parse(r.raw))) throw new Error('书源原文回执无效')
+      sources.push(r.raw)
+    }
     const res = await exportText(props.store, {
-      name: 'book-sources.json',
-      text: prettyJson(items.value)
+      name: 'book-sources.json', text: `[\n${sources.join(',\n')}\n]`
     })
-    if (res && res.saved) props.store.toast('已导出列表摘要')
+    if (res && res.saved) props.store.toast('已导出当前页完整书源数组')
   } catch (error) {
     props.store.toast((error && error.message) || '导出失败', 'err')
   }
@@ -453,6 +461,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           {{ total === null ? items.length : `${items.length} / ${total}` }} 条
         </span>
       </div>
+      <SourceManagement v-if="!detailOpen" :store="store" @changed="load()" />
       <div class="search">
         <AppIcon name="search" :size="16" class="search-ico" />
         <input
@@ -480,7 +489,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           <AppIcon name="upload" :size="15" /><span>导入</span>
         </button>
         <button class="btn btn-ghost btn-sm" type="button" :disabled="!items.length" @click="exportList">
-          <AppIcon name="download" :size="15" /><span>导出列表</span>
+          <AppIcon name="download" :size="15" /><span>导出当前页完整书源</span>
         </button>
       </div>
       <div class="actions source-selection">
@@ -554,6 +563,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         ></textarea>
       </label>
       <p class="fhint">保存时原样提交你的 JSON 文本，不做重新序列化，避免大整数精度丢失。</p>
+      <SourceManagement :store="store" :source="draft" />
 
       <div class="actions">
         <button class="btn btn-primary" type="button" :disabled="saveBusy || !s.runtimeConnected" @click="save">

@@ -4,17 +4,25 @@ import { useDetailNavigation } from '../lib/detail-navigation.js'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ToolResult from '../components/ToolResult.vue'
+import FeatureGuide from '../components/FeatureGuide.vue'
 import { callToolParsed, itemsOf, prettyJson } from '../lib/tools.js'
 import { TOKEN_DISABLE_CONFIRM } from '../store.js'
 
 // MCP 连接页：真实服务状态（app.bootstrap）、启停（service.set）、连接复制（connection.copy）、
 // 工具目录（tools.list，真实注册表 73 项）与参数 JSON 调用器（tools.call）。
-// 不猜端口、不造目录；token 永不出现在 DOM，只通过宿主剪贴板接口复制。
+// 不猜端口、不造目录；已存令牌不下发，只通过宿主剪贴板接口复制。
 const props = defineProps({ store: { type: Object, required: true } })
 const s = props.store.state
 const { pageRef, detailOpen, enterDetail, leaveDetail } = useDetailNavigation()
 
 const search = ref('')
+const guideOpen = ref(false)
+const connectionLan = ref(false)
+const copying = ref(false)
+const headerCopySupported = computed(() => s.bridgeKind === 'android' && s.capabilities?.connectionHeaderCopy === true)
+const headerCopyDisabled = computed(() => copyDisabled.value || !headerCopySupported.value || !tokenKnown.value || !service.value.tokenRequired)
+const copyDisabled = computed(() => !s.runtimeConnected || s.settingsSaving || savingToken.value || copying.value)
+function openGuide() { enterDetail(); guideOpen.value = true }
 const selected = ref('')
 const argsText = ref('{}')
 const originalArgs = ref('{}')
@@ -111,11 +119,20 @@ async function restartService() {
 }
 
 async function copy(kind, lan = false) {
+  if (copyDisabled.value) return
+  const header = ['header-name', 'header-value', 'header-line'].includes(kind)
+  if (header && headerCopyDisabled.value) return
+  copying.value = true
   try {
-    await props.store.copyConnection(kind, lan)
+    if (header) {
+      // Do not use the legacy store helper: it toasts before validating kind.
+      const receipt = await props.store.bridge.call('connection.copy', { kind, lan: false })
+      if (receipt?.copied !== true || receipt?.kind !== kind) throw new Error('unconfirmed')
+      props.store.toast('已复制到剪贴板')
+    } else await props.store.copyConnection(kind, lan)
   } catch (error) {
-    props.store.toast((error && error.message) || '复制失败', 'err')
-  }
+    props.store.toast('复制失败：宿主未确认写入剪贴板，请检查连接与宿主支持。', 'err')
+  } finally { copying.value = false }
 }
 
 function toggleTokenRequired() {
@@ -138,6 +155,7 @@ function toggleTokenRequired() {
 }
 
 function handleBack() {
+  if (guideOpen.value) { guideOpen.value = false; leaveDetail(); return true }
   if (!detailOpen.value) return false
   if (calling.value) return true
   const close = () => {
@@ -252,6 +270,7 @@ const prettyResult = computed(() => {
       <button data-detail-back class="btn btn-ghost" type="button" @click="handleBack"><AppIcon name="chevron-left" :size="16" /><span>返回列表</span></button>
     </div>
     <div v-show="!detailOpen">
+    <div class="actions"><button class="btn btn-ghost" type="button" @click="openGuide">功能指南</button></div>
     <div class="stat-grid">
       <div class="stat">
         <span class="stat-label">服务</span>
@@ -323,26 +342,41 @@ const prettyResult = computed(() => {
       <div class="endpoint-list">
         <div v-for="ep in service.endpoints || []" :key="ep" class="endpoint-row">
           <code class="mono">{{ ep }}</code>
-          <button class="icon-btn" type="button" title="复制地址" aria-label="复制地址" @click="copy('url', /192\.168|10\.|172\.(1[6-9]|2\d|3[01])\./.test(ep))">
-            <AppIcon name="copy" :size="15" />
-          </button>
         </div>
         <p v-if="!(service.endpoints || []).length" class="muted small">宿主没有返回可用端点。</p>
       </div>
       <div class="actions">
-        <button class="btn btn-ghost btn-sm" type="button" :disabled="!s.runtimeConnected" @click="copy('token')">
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="s.settingsSaving || copying" @click="props.store.openSheet('settings')">
+          <AppIcon name="gear" :size="15" /><span>修改访问令牌</span>
+        </button>
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="copyDisabled" @click="copy('token')">
           <AppIcon name="copy" :size="15" /><span>复制令牌</span>
         </button>
-        <button class="btn btn-ghost btn-sm" type="button" :disabled="!s.runtimeConnected" @click="copy('json')">
+      </div>
+      <div class="actions" role="group" aria-label="客户端连接位置">
+        <button data-connection-local class="btn btn-ghost btn-sm" type="button" :aria-pressed="!connectionLan" :disabled="copying" @click="connectionLan = false">同机客户端</button>
+        <button data-connection-lan class="btn btn-ghost btn-sm" type="button" :aria-pressed="connectionLan" :disabled="copying" @click="connectionLan = true">局域网客户端</button>
+      </div>
+      <p class="hint">{{ connectionLan ? '局域网配置：宿主复制时获取当前首个可用局域网地址；无地址会报错，不回退为同机。客户端需在可信同一网络。' : '同机配置：仅用于本设备的客户端，其他设备请选择局域网。' }}</p>
+      <div class="actions">
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="copyDisabled" @click="copy('url', connectionLan)">复制所选连接地址</button>
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="copyDisabled" @click="copy('json', connectionLan)">
           <AppIcon name="copy" :size="15" /><span>复制客户端配置</span>
         </button>
       </div>
       <p v-if="tokenKnown && service.tokenRequired" class="hint">
         点击“复制令牌”，将纯令牌粘贴到客户端的 Token / Bearer Token 字段（不要再加 Bearer 前缀）；
-        若使用自定义请求头，填写 <code>Authorization: Bearer &lt;令牌&gt;</code>。无需 OAuth 授权。
+        若使用自定义请求头，名称填写 <code>Authorization</code>，值填写 <code>Bearer &lt;令牌&gt;</code>；整行格式为 <code>Authorization: Bearer &lt;令牌&gt;</code>。无需 OAuth 授权，本服务不支持 OAuth。
       </p>
-      <p v-else-if="tokenKnown" class="hint">当前免令牌访问：客户端 Token 和 Authorization 请求头留空，无需 OAuth。现有令牌仍保留，可通过“复制令牌”获取。</p>
-      <p class="hint">令牌只写入本机剪贴板，不会显示在页面里。</p>
+      <div class="actions">
+        <button data-copy-kind="header-name" class="btn btn-ghost btn-sm" type="button" :disabled="headerCopyDisabled" @click="copy('header-name')">复制请求头名</button>
+        <button data-copy-kind="header-value" class="btn btn-ghost btn-sm" type="button" :disabled="headerCopyDisabled" @click="copy('header-value')">复制请求头值</button>
+        <button data-copy-kind="header-line" class="btn btn-ghost btn-sm" type="button" :disabled="headerCopyDisabled" @click="copy('header-line')">复制整行请求头</button>
+      </div>
+      <p v-if="!headerCopySupported" class="hint">宿主尚未支持请求头复制；请求头名可手动填写 Authorization，令牌请使用上方“复制令牌”。</p>
+      <p v-if="tokenKnown && !service.tokenRequired" class="hint">当前免令牌访问：客户端 Token 和 Authorization 请求头留空，无需 OAuth，本服务不支持 OAuth。现有令牌仍保留，可通过“复制令牌”获取。</p>
+      <p class="hint">“复制令牌”只含纯令牌；“复制请求头值”含 Bearer 前缀；“复制整行请求头”还含 Authorization:，仅用于接受完整请求头行的客户端，不能粘贴到 Token 字段。</p>
+      <p class="hint">已存令牌仅由宿主复制到本机剪贴板，不会回显；修改入口位于设置的 MCP 服务区。</p>
     </div>
 
     <div class="section">
@@ -387,6 +421,7 @@ const prettyResult = computed(() => {
     </div>
 
     </div>
+    <FeatureGuide v-if="guideOpen" :bootstrap="s.bootstrap" />
     <div v-if="selectedTool" class="section">
       <div class="section-head">
         <h3 class="section-title mono">{{ selectedTool.name }}</h3>

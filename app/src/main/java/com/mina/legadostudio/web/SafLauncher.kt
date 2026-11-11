@@ -107,6 +107,40 @@ internal class SafLauncher(private val activity: ComponentActivity) {
         }
     }
 
+    /** Internal file only; no JS-supplied paths. Keep reservation through copy and readback. */
+    suspend fun exportFile(file: java.io.File, name: String, mime: String): Uri {
+        val pending = Pending(exporting = true)
+        try {
+            withContext(Dispatchers.Main) {
+                if (released) throw Cancelled()
+                val launcher = exportLauncher ?: error("SAF 未注册")
+                if (!operations.reserve(pending)) throw Busy()
+                try {
+                    launcher.launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE); type = mime; putExtra(Intent.EXTRA_TITLE, name)
+                    })
+                } catch (error: Exception) { operations.finish(pending); throw error }
+            }
+            val uri = pending.deferred.await() ?: throw Cancelled()
+            withContext(Dispatchers.IO) {
+                val expected = java.security.MessageDigest.getInstance("SHA-256")
+                activity.contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                    java.security.DigestInputStream(file.inputStream(), expected).use { it.copyTo(output) }
+                } ?: throw IOException("无法打开目标文件")
+                val actual = java.security.MessageDigest.getInstance("SHA-256")
+                activity.contentResolver.openInputStream(uri)?.use { input ->
+                    val buffer = ByteArray(65536)
+                    while (true) { val n = input.read(buffer); if (n < 0) break; actual.update(buffer, 0, n) }
+                } ?: throw IOException("无法回读目标文件")
+                if (!expected.digest().contentEquals(actual.digest())) throw IOException("导出回读不一致")
+            }
+            return uri
+        } finally {
+            pending.deferred.cancel()
+            if (pending.pickerReturned) operations.finish(pending)
+        }
+    }
+
     /** @return (文件名, 文本)；用户取消时抛 [Cancelled]。 */
     suspend fun import(): Pair<String, String> {
         val pending = Pending(exporting = false)

@@ -11,6 +11,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import ToastHost from './components/ToastHost.vue'
 import ThemePicker from './components/ThemePicker.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import InteractiveCaptureWorkbench from './components/InteractiveCaptureWorkbench.vue'
 import McpPage from './pages/McpPage.vue'
 import SourcesPage from './pages/SourcesPage.vue'
 import SkillsPage from './pages/SkillsPage.vue'
@@ -109,6 +110,21 @@ function syncKeyboardFlag() {
 watch(() => s.insets, syncKeyboardFlag, { deep: true })
 
 const pageRef = ref(null)
+const settingsRef = ref(null)
+const captureWorkbench = ref(null)
+const bridgeCall = (method, args) => store.bridge.call(method, args)
+function setCaptureViewport(rect) {
+  bridgeCall('capture.browser.viewport', rect ? { rect: { ...rect, viewportWidth: window.innerWidth } } : {})
+    .catch(() => {})
+}
+function closeCaptureWorkbench() { setCaptureViewport(null); store.closeCaptureWorkbench() }
+async function refreshVerifyBrowser() {
+  const id = s.verificationBrowser.sessionId
+  try {
+    const result = await bridgeCall('verification.browser.refresh', { id })
+    if (result?.refreshed !== true || result.sessionId !== id) throw new Error('刷新未确认')
+  } catch { store.toast('刷新验证页失败', 'err') }
+}
 const rootBack = createBackHandler({
   state: s,
   actions: {
@@ -121,7 +137,8 @@ const rootBack = createBackHandler({
 })
 
 function handleBack() {
-  if (!s.dialog && s.settingsSaving) return
+  if (s.captureWorkbenchOpen) { captureWorkbench.value?.back(); return }
+  if (!s.dialog && (s.settingsSaving || settingsRef.value?.handleBack?.())) return
   if (s.dialog || s.sheet) return rootBack()
   if (verifyBrowserOpen.value) return closeVerifyBrowser()
   if (pageRef.value?.handleBack?.()) return
@@ -165,9 +182,9 @@ function onHostEvent(event, payload) {
       break
     }
     case 'studio:service':
-      if (payload && typeof payload === 'object') {
-        store.state.service = { ...store.state.service, ...payload }
-      }
+      // Permissions can change while the service is stopped. Re-read the host,
+      // never merge an event payload over a newer settings/auth snapshot.
+      if (!s.settingsSaving) store.bootstrap()
       break
     case 'studio:verification-browser':
       store.applyVerificationBrowser(payload)
@@ -235,14 +252,14 @@ function acceptDialog() {
       .then(fn)
       .catch((error) => store.toast((error && error.message) || '操作失败', 'err'))
   } else if (dialog && dialog.action === 'app.exit') {
-    Promise.resolve(store.bridge.call('app.exit', {})).catch((error) =>
+    Promise.resolve(store.exitApp(dialog.stopService === true)).catch((error) =>
       store.toast((error && error.message) || '退出失败', 'err')
     )
   }
 }
 
 function closeSheet() {
-  if (s.settingsSaving) return
+  if (s.settingsSaving || settingsRef.value?.handleBack?.()) return
   if (s.sheetDirty) {
     store.requestDiscard(s.sheet)
     return
@@ -280,7 +297,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="rootRef" class="app-shell" :class="{ 'verify-open': verifyBrowserOpen }">
-    <header class="app-head shell-head">
+    <header v-show="!s.captureWorkbenchOpen" class="app-head shell-head">
       <div class="brand-line">
         <div class="head-text">
           <h1 class="app-title">阅读书源 MCP</h1>
@@ -293,6 +310,7 @@ onBeforeUnmount(() => {
           <button class="btn btn-ghost btn-sm" type="button" @click="closeVerifyBrowser">
             <AppIcon name="chevron-left" :size="15" /><span>返回</span>
           </button>
+          <button class="btn btn-ghost btn-sm" type="button" @click="refreshVerifyBrowser">刷新</button>
           <button class="btn btn-primary btn-sm" type="button" @click="completeVerifyBrowser">
             <AppIcon name="check" :size="15" /><span>完成</span>
           </button>
@@ -308,11 +326,14 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="shell with-tabs page-body">
-      <component ref="pageRef" :is="activePage" :store="store" :key="s.page" />
+    <div v-if="s.captureWorkbenchOpen" class="capture-shell" style="position:fixed;inset:0;z-index:50;background:var(--bg)">
+      <InteractiveCaptureWorkbench ref="captureWorkbench" :call="bridgeCall" @close="closeCaptureWorkbench" @viewport="setCaptureViewport" />
+    </div>
+    <main v-show="!s.captureWorkbenchOpen" class="shell with-tabs page-body">
+      <component ref="pageRef" :is="activePage" :store="store" :key="s.page" @open-capture-browser="store.openCaptureWorkbench" />
     </main>
 
-    <nav class="tabbar" aria-label="主导航">
+    <nav v-show="!s.captureWorkbenchOpen" class="tabbar" aria-label="主导航">
       <button
         v-for="t in TABS"
         :key="t.key"
@@ -336,6 +357,7 @@ onBeforeUnmount(() => {
       @close="closeSheet"
     >
       <SettingsPanel
+        ref="settingsRef"
         :bootstrap="s.bootstrap"
         :bootstrap-ok="s.bootstrapOk"
         :bridge-kind="s.bridgeKind"
@@ -350,6 +372,8 @@ onBeforeUnmount(() => {
         @close="closeSheet"
         @retry="store.bootstrap"
         :save-settings="saveSettings"
+        :host-action="store.hostAction"
+        :reader-status="() => store.callTool('reader_web_status', {})"
         @dirty="store.markDirty"
         @connect-web="connectWeb"
         @exit="store.requestExit"
@@ -365,7 +389,19 @@ onBeforeUnmount(() => {
       </SettingsPanel>
     </Sheet>
 
-    <ConfirmDialog v-if="s.dialog" :dialog="s.dialog" @close="store.closeDialog" @accept="acceptDialog" />
+    <div v-if="s.dialog?.kind === 'exit'" class="sheet-layer dialog-layer">
+      <div class="scrim" @click="store.closeDialog"></div>
+      <div class="dialog-wrap"><div class="dialog" role="alertdialog" aria-modal="true" aria-label="退出阅读书源 MCP？">
+        <h3 class="dialog-title">{{ s.dialog.title }}</h3>
+        <p class="dialog-text">{{ s.dialog.message }}</p>
+        <label class="row"><span>同时停止 MCP 服务</span><input v-model="s.dialog.stopService" type="checkbox" /></label>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-ghost" @click="store.closeDialog">取消</button>
+          <button type="button" class="btn btn-danger" @click="acceptDialog">退出</button>
+        </div>
+      </div></div>
+    </div>
+    <ConfirmDialog v-else-if="s.dialog" :dialog="s.dialog" @close="store.closeDialog" @accept="acceptDialog" />
 
     <ToastHost :toast="s.toast" />
   </div>

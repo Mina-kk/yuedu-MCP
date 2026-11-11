@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -15,6 +16,27 @@ interface StudioDao {
     @Query("SELECT * FROM projects WHERE siteUrl=:url ORDER BY updatedAt DESC LIMIT 1") suspend fun projectBySiteUrl(url: String): ProjectEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveProject(value: ProjectEntity)
     @Query("DELETE FROM projects WHERE id IN (:ids)") suspend fun deleteProjects(ids: List<String>): Int
+
+    /** Room holds the database write transaction across comparison, exact deletion and readback.
+     * All writers (including REPLACE) serialize at SQLite, not a UI-only mutex.
+     * Any whole-library change rejects the entire operation; never retry with fresher IDs.
+     */
+    @Transaction
+    suspend fun deleteProjectsFromSnapshot(expected: List<ProjectEntity>, ids: List<String>): Int {
+        val expectedById = expected.associateBy { it.id }
+        require(expectedById.size == expected.size && ids.distinct().size == ids.size && ids.all { it in expectedById }) {
+            "删除范围不属于确认快照"
+        }
+        check(allProjects().associateBy { it.id } == expectedById) {
+            "书源库已变化，请重新分析；未删除任何书源"
+        }
+        // Stay below SQLite's bind limit even for large libraries, within ONE transaction.
+        val deleted = ids.chunked(900).sumOf { deleteProjects(it) }
+        check(deleted == ids.size) { "删除数量不一致，事务已回滚" }
+        val remaining = expectedById - ids.toSet()
+        check(allProjects().associateBy { it.id } == remaining) { "删除回读不一致，事务已回滚" }
+        return deleted
+    }
 
     @Query("SELECT * FROM source_revisions WHERE projectId=:projectId ORDER BY id DESC") fun observeRevisions(projectId: String): Flow<List<SourceRevisionEntity>>
     @Query("SELECT * FROM source_revisions WHERE id=:id") suspend fun revision(id: Long): SourceRevisionEntity?

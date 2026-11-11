@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import AppIcon from './Icon.vue'
 import { TOKEN_DISABLE_CONFIRM } from '../store.js'
 
@@ -15,6 +15,8 @@ const props = defineProps({
   themeIdx: { type: Number, default: 0 },
   mode: { type: String, default: 'auto' },
   saveSettings: { type: Function, default: null },
+  hostAction: { type: Function, default: null },
+  readerStatus: { type: Function, default: null },
   bridgeKind: { type: String, default: '' },
   settingsSaving: { type: Boolean, default: false },
   confirmDialog: { type: Function, default: null }
@@ -52,8 +54,13 @@ const tokenEditable = computed(() => props.bridgeKind === 'android' && props.run
   !authUnknown.value && props.bootstrap?.capabilities?.tokenRequiredEditable === true && props.bootstrap?.capabilities?.tokenRequiredLocked !== true)
 const tokenDraft = ref(boot.service?.tokenRequired !== false)
 const tokenBaseline = ref(tokenDraft.value)
+// Write-only secret: never include in the persisted/original form snapshot.
+const mcpToken = ref('')
+const mcpTokenEditable = computed(() => props.bridgeKind === 'android' && props.runtimeConnected &&
+  props.bootstrapOk && props.bootstrap?.capabilities?.mcpTokenEditable === true)
+onBeforeUnmount(() => { mcpToken.value = '' })
 const originalForm = ref(JSON.stringify(form))
-const dirty = computed(() => JSON.stringify(form) !== originalForm.value || tokenDraft.value !== tokenBaseline.value)
+const dirty = computed(() => Boolean(mcpToken.value) || JSON.stringify(form) !== originalForm.value || tokenDraft.value !== tokenBaseline.value)
 const error = ref('')
 const webEndpoint = ref('')
 const webToken = ref('')
@@ -74,6 +81,7 @@ function payload() {
   if (Number.isInteger(port) && port > 0) out.port = port
   out.compact = Boolean(form.compact)
   if (tokenEditable.value && tokenDraft.value !== tokenBaseline.value) out.tokenRequired = tokenDraft.value
+  if (mcpToken.value) out.mcpToken = mcpToken.value
   if (form.userAgent.trim()) out.userAgent = form.userAgent.trim()
   out.bookSourceType = Number(form.bookSourceType)
   out.readerBaseUrl = form.readerBaseUrl.trim()
@@ -95,12 +103,16 @@ function submit() {
 
 async function save(next) {
   if (busy.value) return
+  if (next.mcpToken && !mcpTokenEditable.value) { error.value = '当前状态未知或宿主不支持修改访问令牌，请重新读取状态'; return }
   if (typeof next.tokenRequired === 'boolean' && !tokenEditable.value) { error.value = '当前鉴权状态未知或不可更改，请重新读取状态'; return }
   error.value = ''
   saving.value = true
   try {
     if (!props.saveSettings) throw new Error('保存接口不可用')
     const snapshot = await props.saveSettings(next)
+    if (next.mcpToken && (snapshot?.partial || snapshot?.failed?.length || snapshot?.settingsResult?.mcpTokenApplied !== true)) {
+      throw new Error('访问令牌更新结果未知')
+    }
     if (typeof next.tokenRequired === 'boolean') {
       if (snapshot?.partial || snapshot?.failed?.length || snapshot?.service?.tokenRequired !== next.tokenRequired) {
         throw new Error('访问令牌校验保存回读不一致或缺失，未确认生效，请重新读取状态')
@@ -111,15 +123,79 @@ async function save(next) {
       tokenDraft.value = snapshot.service.tokenRequired
     }
     form.readerToken = ''
+    mcpToken.value = ''
     originalForm.value = JSON.stringify(form)
     emit('dirty', false)
   } catch (err) {
-    error.value = (err && err.message) || '保存失败'
+    error.value = next.mcpToken ? '访问令牌更新结果未知或设置未全部保存；请重新读取状态后重试，或复制当前配置核验' : (err && err.message) || '保存失败'
   } finally {
     saving.value = false
   }
 }
 
+const deviceReady = computed(() => props.bridgeKind === 'android' && props.runtimeConnected && props.bootstrapOk && props.bootstrap?.capabilities?.deviceSettings === true)
+const deviceState = computed(() => props.bootstrapOk ? (props.bootstrap?.capabilities || {}) : {})
+const statusLabel = value => value === true ? '已开启' : value === false ? '未开启' : '未知'
+const notice = ref('')
+async function deviceAction(method, params = {}) {
+  if (busy.value || !deviceReady.value) return
+  saving.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    if (!props.hostAction) throw new Error('宿主接口不可用')
+    const result = await props.hostAction(method, params)
+    if (result?.opened === false) throw new Error('无法打开系统设置，请从系统应用信息手动进入')
+    notice.value = '操作已返回；权限以重新读取的系统状态为准，打开设置不表示已授权。'
+  } catch (err) { error.value = err?.message || '操作失败' }
+  finally { saving.value = false }
+}
+const readerReady = computed(() => props.bridgeKind === 'android' && props.runtimeConnected && props.bootstrapOk && props.bootstrap?.capabilities?.readerConfigActions === true)
+const readerResult = ref('')
+function acceptReaderSnapshot(snapshot) {
+  if (snapshot?.partial || snapshot?.failed?.length || !snapshot?.reader || typeof snapshot.reader.baseUrl !== 'string' || typeof snapshot.reader.tokenSaved !== 'boolean') throw new Error('阅读配置回读无效')
+  form.readerBaseUrl = snapshot.reader.baseUrl
+  form.readerToken = ''
+  // Update only these baselines; unrelated edits remain dirty.
+  const original = JSON.parse(originalForm.value)
+  original.readerBaseUrl = form.readerBaseUrl
+  original.readerToken = ''
+  originalForm.value = JSON.stringify(original)
+}
+async function testReader() {
+  if (busy.value || !readerReady.value) return
+  saving.value = true
+  error.value = ''
+  readerResult.value = ''
+  try {
+    const address = form.readerBaseUrl.trim()
+    const url = new URL(address)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new Error('请输入有效的阅读 HTTP(S) origin 地址')
+    if (!props.saveSettings || !props.readerStatus) throw new Error('阅读测试接口不可用')
+    const next = { readerBaseUrl: address }
+    if (form.readerToken.trim()) next.readerToken = form.readerToken.trim()
+    acceptReaderSnapshot(await props.saveSettings(next))
+    const result = await props.readerStatus()
+    readerResult.value = JSON.stringify(result, null, 2)
+  } catch (_) { error.value = '阅读连接测试未完成：请检查地址、保存状态及阅读服务；不会使用旧地址代测。' }
+  finally { saving.value = false }
+}
+function requestClearReader() {
+  if (busy.value || !readerReady.value || !props.confirmDialog) return
+  props.confirmDialog({ title: '清除阅读配置？', message: '将解除阅读连接并清除已保存的地址与令牌，不删除阅读端书源。', confirmLabel: '清除配置', danger: true, onAccept: async () => {
+    if (busy.value) return
+    saving.value = true
+    error.value = ''
+    try {
+      const snapshot = await props.hostAction('reader.clear', {})
+      if (snapshot?.reader?.baseUrl !== '' || snapshot?.reader?.tokenSaved !== false) throw new Error('清除未确认')
+      acceptReaderSnapshot(snapshot)
+      readerResult.value = ''
+      notice.value = '阅读地址与令牌已清除并回读确认'
+    } catch (_) { error.value = '阅读配置清除未确认，请重新读取状态后重试' }
+    finally { saving.value = false }
+  } })
+}
 function handleBack() { return busy.value }
 defineExpose({ handleBack })
 
@@ -209,6 +285,15 @@ function connectWeb() {
     </div>
     <p v-if="authUnknown" class="hint">当前鉴权状态未知，请重新读取状态；上方仅保留未确认的设置草稿。</p>
     <p v-else-if="!tokenEditable" class="hint">当前宿主不支持更改访问令牌校验，请在支持此功能的 Android App 内操作。</p>
+    <label class="field" for="set-mcp-token">
+      <span class="flabel">新访问令牌</span>
+      <input id="set-mcp-token" v-model="mcpToken" class="input" type="password"
+        autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="留空保持当前令牌"
+        :disabled="busy || !mcpTokenEditable" aria-describedby="mcp-token-hint" />
+      <span id="mcp-token-hint" class="fhint">留空保持当前令牌；推荐随机高强度令牌，保存后需更新客户端配置。已存令牌不会回显。</span>
+    </label>
+    <p v-if="!tokenDraft" class="hint">当前不校验；修改令牌不会开启校验。</p>
+    <p v-if="!mcpTokenEditable" class="hint">当前状态未知或宿主不支持修改访问令牌，请重新读取状态或使用支持此功能的 Android App。</p>
     <div class="row">
       <div class="row-text">
         <span class="row-title">精简模式</span>
@@ -256,7 +341,7 @@ function connectWeb() {
   <div class="section">
     <div class="section-head">
       <h3 class="section-title">阅读同步</h3>
-      <span class="section-sub">{{ boot.reader && boot.reader.tokenSaved ? '已保存令牌' : '未保存令牌' }}</span>
+      <span class="section-sub">{{ bootstrap?.reader?.tokenSaved ? '已保存令牌' : '未保存令牌' }}</span>
     </div>
     <label class="field">
       <span class="flabel">阅读 Web 地址</span>
@@ -267,6 +352,12 @@ function connectWeb() {
       <input v-model="form.readerToken" class="input" type="password" placeholder="留空则保留同 origin 令牌" autocomplete="off" :disabled="busy" />
       <span class="fhint">令牌写入安全存储后不回显；改 origin 时旧令牌会被清除。</span>
     </label>
+    <p class="hint">先在阅读 App 开启 Web 服务并核对端口。同机可用 http://127.0.0.1:实际端口；其他设备使用同一局域网的实际地址。测试先保存本次阅读输入，不保存其他草稿。401 表示鉴权要求，不等于离线；能力 unknown 不等于不支持，连接可达不代表单源通过。</p>
+    <div class="actions">
+      <button class="btn btn-ghost" type="button" :disabled="busy || !readerReady" @click="testReader">保存并测试连接</button>
+      <button class="btn btn-ghost danger" type="button" :disabled="busy || !readerReady" @click="requestClearReader">清除阅读配置</button>
+    </div>
+    <pre v-if="readerResult" class="code-block">{{ readerResult }}</pre>
   </div>
 
   <div class="section">
@@ -277,6 +368,18 @@ function connectWeb() {
     <slot name="theme"></slot>
   </div>
 
+  <div v-if="bridgeKind === 'android'" class="section">
+    <h3 class="section-title">权限与后台运行</h3>
+    <p class="hint">通知权限：{{ statusLabel(deviceState.notificationPermission) }} · 应用通知：{{ statusLabel(deviceState.notificationsEnabled) }} · MCP 渠道：{{ deviceState.channelCreated === false ? '尚未创建' : statusLabel(deviceState.mcpChannelEnabled) }}</p>
+    <p class="hint">悬浮窗权限：{{ statusLabel(deviceState.overlayPermission) }} · 悬浮球偏好：{{ statusLabel(deviceState.overlayEnabled) }} · 电池不受限：{{ statusLabel(deviceState.batteryUnrestricted) }}</p>
+    <p class="hint">悬浮球需要系统权限、启用偏好及服务运行。自启动由厂商管理，无法自动确认；打开应用信息后请手动查找自启动／后台运行。</p>
+    <div class="actions">
+      <button v-for="[method, label] in [['notification.request','申请通知权限'], ['notification.openSettings','应用通知设置'], ['notification.openChannel','MCP 通知渠道'], ['overlay.openSettings','悬浮窗权限设置'], ['device.openBatterySettings','电池优化设置'], ['device.openAutoStartSettings','自启动设置说明']]"
+        :key="method" class="btn btn-ghost" type="button" :disabled="busy || !deviceReady" @click="deviceAction(method)">{{ label }}</button>
+      <button class="btn btn-ghost" type="button" :disabled="busy || !deviceReady || typeof deviceState.overlayEnabled !== 'boolean'" @click="deviceAction('overlay.setEnabled', { enabled: !deviceState.overlayEnabled })">{{ deviceState.overlayEnabled ? '停用悬浮球' : '启用悬浮球' }}</button>
+    </div>
+  </div>
+  <p v-if="notice" class="hint" role="status">{{ notice }}</p>
   <p v-if="error" class="code-block err">{{ error }}</p>
 
   <div class="section">

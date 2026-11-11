@@ -10,18 +10,18 @@ package com.mina.legadostudio.verification
  *   那是系统交互层，不是业务控件；
  * - 所有动态文本（域名、用途）经 [escapeHtml] 转义并先过 [sanitizeDomain]/[sanitizePurpose] 钳制，
  *   不允许任何未转义插值；
- * - 主题取 vault 默认 lime/charcoal（`web-ui/src/lib/palettes.js` 的 `lime` 预设：
- *   c1=#CCFF4D, c2=#222222），保证与 Web UI 同一套配色。
+ * - 恢复原版蓝底白 M，验证提醒为橙底；不跟随业务页主题改色。
  *
  * 纯 Kotlin、不依赖 android.webkit，JVM 单测可直接覆盖；WebView 的落地在 VerificationOverlayManager。
  */
 object VerificationOverlayPage {
 
-    /** 主题色：与 vault 默认 lime 预设一致。 */
-    const val COLOR_LIME = "#CCFF4D"
-    const val COLOR_CHARCOAL = "#222222"
-    /** lime 底上的深色前景（palettes.js onC1），保证对比度。 */
-    const val COLOR_ON_LIME = "#16210A"
+    /** 原版悬浮球固定颜色。 */
+    const val COLOR_LIME = "#007AFF"
+    const val COLOR_WHITE = "#FFFFFF"
+    const val COLOR_CHARCOAL = "#E65100"
+    /** 球字及气泡前景。 */
+    const val COLOR_ON_LIME = "#FFFFFF"
 
     /** 域名最长展示字符数（含省略号），防止超长 host 撑破气泡。 */
     const val MAX_DOMAIN_CHARS = 64
@@ -48,15 +48,15 @@ object VerificationOverlayPage {
      */
     const val BASE_URL = "about:blank"
 
-    /** 圆球常态页：lime 圆底 + 「M」。 */
-    fun normalPage(): String = document(
+    /** 圆球常态页：蓝色圆底 + 「M」。 */
+    fun normalPage(hiddenSide: Int = 0): String = document(
         body = """
-            <div class="ball normal"><span class="glyph">M</span></div>
+            <div class="ball normal" style="${if (hiddenSide < 0) "transform:translateX(-50%);align-self:flex-start" else if (hiddenSide > 0) "align-self:flex-start" else ""}"><span class="glyph">M</span></div>
         """.trimIndent(),
     )
 
     /**
-     * 验证提醒页：charcoal 圆底 + lime 描边 + 「M」，下方 lime 气泡显示
+     * 验证提醒页：橙色圆底 + 浅橙描边 + 白色「M」，下方蓝色气泡显示
      * 「点击验证 · 域名」与可选用途。域名/用途均转义 + 钳制。
      */
     fun alertPage(domain: String, purpose: String = ""): String {
@@ -137,13 +137,13 @@ object VerificationOverlayPage {
           -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
         body{display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
         .ball{box-sizing:border-box;width:${BALL_CSS_PX}px;height:${BALL_CSS_PX}px;border-radius:50%;
-          display:flex;align-items:center;justify-content:center;
+          flex-shrink:0;display:flex;align-items:center;justify-content:center;
           box-shadow:0 2px 8px rgba(0,0,0,.28)}
-        .ball.normal{background:$COLOR_LIME;border:0}
-        .ball.alert{background:$COLOR_CHARCOAL;border:2px solid $COLOR_LIME}
+        .ball.normal{background:$COLOR_LIME;border:1.5px solid #FFFFFF33}
+        .ball.alert{background:$COLOR_CHARCOAL;border:2px solid #FFCC8066}
         .glyph{font:700 20px/1 -apple-system,"Noto Sans SC",Roboto,sans-serif;letter-spacing:.5px}
         .ball.normal .glyph{color:$COLOR_ON_LIME}
-        .ball.alert .glyph{color:$COLOR_LIME}
+        .ball.alert .glyph{color:$COLOR_WHITE}
         .bubble{margin-top:6px;max-width:${ALERT_BUBBLE_MAX_WIDTH_CSS_PX}px;box-sizing:border-box;
           display:flex;flex-direction:column;align-items:flex-start;gap:2px;
           padding:4px 10px;border-radius:12px;background:$COLOR_LIME;

@@ -21,65 +21,113 @@ class SkillRepository(private val context: Context) {
 
     private val prefs = context.getSharedPreferences("studio_skills", Context.MODE_PRIVATE)
 
-    private val customDir = File(context.filesDir, "skills").apply { mkdirs() }
+    private val customDir = File(context.filesDir, "skills")
+    // Shared across MCP/UI repository instances, including aliases of the same filesDir.
+    private val stateLock = locks.computeIfAbsent(customDir.canonicalPath) { Any() }
 
-    fun isEnabled(id: String): Boolean = prefs.getBoolean("enabled_$id", true)
+    init { synchronized(stateLock) { customDir.mkdirs() } }
+
+    internal fun <T> withSnapshot(block: () -> T): T = synchronized(stateLock, block)
+
+    fun isEnabled(id: String): Boolean = synchronized(stateLock) { prefs.getBoolean("enabled_$id", true) }
 
     fun setEnabled(id: String, enabled: Boolean) {
-        require(validId(id)) { "非法 Skill ID" }
-        prefs.edit().putBoolean("enabled_$id", enabled).apply()
+        synchronized(stateLock) {
+            require(validId(id)) { "非法 Skill ID" }
+            check(prefs.edit().putBoolean("enabled_$id", enabled).commit()) { "技能启用状态保存失败" }
+        }
     }
 
     fun list(): List<SkillInfo> {
-        val builtInIds = builtInIds()
-        val builtIn = builtInIds.map { id ->
-            SkillInfo(id, readName(readAsset("skills/$id/SKILL.md")) ?: id, true, isEnabled(id))
+        synchronized(stateLock) {
+            val builtInIds = builtInIds()
+            val builtIn = builtInIds.map { id ->
+                SkillInfo(id, readName(readAsset("skills/$id/SKILL.md")) ?: id, true, isEnabled(id))
+            }
+            val custom = customDir.listFiles { file -> file.isDirectory }.orEmpty().mapNotNull { dir ->
+                if (dir.name in builtInIds) return@mapNotNull null
+                val file = File(dir, "SKILL.md").takeIf { it.isFile } ?: return@mapNotNull null
+                SkillInfo(dir.name, readName(file.readText()) ?: dir.name, false, isEnabled(dir.name))
+            }
+            return (builtIn + custom).sortedBy { it.name }
         }
-        val custom = customDir.listFiles { file -> file.isDirectory }.orEmpty().mapNotNull { dir ->
-            if (dir.name in builtInIds) return@mapNotNull null
-            val file = File(dir, "SKILL.md").takeIf { it.isFile } ?: return@mapNotNull null
-            SkillInfo(dir.name, readName(file.readText()) ?: dir.name, false, isEnabled(dir.name))
-        }
-        return (builtIn + custom).sortedBy { it.name }
     }
 
     fun isBuiltIn(id: String): Boolean = id in builtInIds()
 
     fun read(id: String): String {
-        require(validId(id)) { "非法 Skill ID" }
-        if (isBuiltIn(id)) return readAsset("skills/$id/SKILL.md")
-        val custom = File(customDir, "$id/SKILL.md")
-        require(custom.isFile) { "Skill 不存在" }
-        return custom.readText()
-    }
-
-    fun readReference(id: String, relative: String): String {
-        require(validId(id)) { "非法 Skill ID" }
-        require(relative.matches(Regex("[\\p{L}\\p{N}._/-]+")) && !relative.contains("..")) { "非法参考路径" }
-        if (isBuiltIn(id)) return readAsset("skills/$id/$relative")
-        val custom = File(customDir, "$id/$relative")
-        require(custom.isFile) { "参考文件不存在" }
-        return custom.readText()
-    }
-
-    fun save(id: String, markdown: String) {
-        requireMutable(id)
-        require(markdown.contains("name:")) { "SKILL.md 缺少 name" }
-        val dir = File(customDir, id).apply { mkdirs() }
-        File(dir, "SKILL.md").writeText(markdown)
-    }
-
-    fun importPackage(fileName: String, input: InputStream): SkillInfo {
-        return if (fileName.endsWith(".zip", true)) importZip(input) else {
-            val markdown = input.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val id = slug(fileName.substringBeforeLast('.').ifBlank { readName(markdown).orEmpty() })
-            save(id, markdown)
-            SkillInfo(id, readName(markdown) ?: id, false, true)
+        synchronized(stateLock) {
+            require(validId(id)) { "非法 Skill ID" }
+            if (isBuiltIn(id)) return readAsset("skills/$id/SKILL.md")
+            val custom = File(customDir, "$id/SKILL.md")
+            require(custom.isFile) { "Skill 不存在" }
+            return custom.readText()
         }
     }
 
+    fun readReference(id: String, relative: String): String {
+        synchronized(stateLock) {
+            require(validId(id)) { "非法 Skill ID" }
+            require(relative.matches(Regex("[\\p{L}\\p{N}._/-]+")) && !relative.contains("..")) { "非法参考路径" }
+            if (isBuiltIn(id)) return readAsset("skills/$id/$relative")
+            val custom = File(customDir, "$id/$relative")
+            require(custom.isFile) { "参考文件不存在" }
+            return custom.readText()
+        }
+    }
+
+    fun save(id: String, markdown: String) {
+        synchronized(stateLock) {
+            requireMutable(id)
+            require(markdown.contains("name:")) { "SKILL.md 缺少 name" }
+            val dir = File(customDir, id).apply { mkdirs() }
+            File(dir, "SKILL.md").writeText(markdown)
+        }
+    }
+
+    fun importPackage(fileName: String, input: InputStream): SkillInfo {
+        synchronized(stateLock) {
+            require(fileName.endsWith(".zip", true) || fileName.endsWith(".md", true)) { "请选择 .md 或 .zip 技能包" }
+            return if (fileName.endsWith(".zip", true)) importZip(fileName, input) else {
+                val buffer = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(8192)
+                while (true) {
+                    val count = input.read(chunk)
+                    if (count < 0) break
+                    require(buffer.size() + count <= 2 * 1024 * 1024) { "Markdown 超过 2 MiB" }
+                    buffer.write(chunk, 0, count)
+                }
+                val markdown = Charsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(buffer.toByteArray())).toString()
+                val id = slug(fileName.substringBeforeLast('.').ifBlank { readName(markdown).orEmpty() })
+                require(!File(customDir, id).exists()) { "同 ID 技能已存在，请更名后导入" }
+                save(id, markdown)
+                SkillInfo(id, readName(markdown) ?: id, false, isEnabled(id))
+            }
+        }
+    }
+
+    /** Owns private ZIP bytes; callers cannot mutate the captured package. */
+    class PackageSnapshot internal constructor(private val bytes: ByteArray) {
+        fun writeTo(output: OutputStream) { output.write(bytes.copyOf()) }
+    }
+
+    fun snapshotPackage(id: String): PackageSnapshot = synchronized(stateLock) {
+        val bytes = java.io.ByteArrayOutputStream()
+        writePackage(id, bytes)
+        PackageSnapshot(bytes.toByteArray())
+    }
+
     fun exportPackage(id: String, output: OutputStream) {
+        // Never hold the repository lock across a caller-controlled sink.
+        snapshotPackage(id).writeTo(output)
+    }
+
+    private fun writePackage(id: String, output: OutputStream) {
         require(validId(id)) { "非法 Skill ID" }
+        // A directory without a manifest is not a package (never emit an empty ZIP).
+        read(id)
         ZipOutputStream(output).use { zip ->
             if (isBuiltIn(id)) {
                 exportAssetTree(zip, "skills/$id", id)
@@ -97,21 +145,26 @@ class SkillRepository(private val context: Context) {
     }
 
     fun delete(id: String): Boolean {
-        requireMutable(id)
-        return File(customDir, id).takeIf(File::isDirectory)?.deleteRecursively() ?: false
+        synchronized(stateLock) {
+            requireMutable(id)
+            return File(customDir, id).takeIf(File::isDirectory)?.deleteRecursively() ?: false
+        }
     }
 
-    private fun importZip(input: InputStream): SkillInfo {
+    private fun importZip(fileName: String, input: InputStream): SkillInfo {
         val temp = File(context.cacheDir, "skill-import-${System.nanoTime()}").apply { mkdirs() }
         try {
             ZipInputStream(input).use { zip ->
                 var entries = 0
+                val paths = mutableSetOf<String>()
                 var totalBytes = 0L
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     require(++entries <= 500) { "Skill 压缩包文件过多" }
-                    val normalized = entry.name.replace('\\', '/').trimStart('/')
-                    if (normalized.isBlank() || normalized.split('/').any { it == ".." }) continue
+                    val normalized = entry.name
+                    require(!normalized.startsWith('/') && !normalized.contains('\\') && !normalized.contains(':') &&
+                        normalized.trimEnd('/').split('/').none { it.isBlank() || it == "." || it == ".." }) { "Skill 压缩包路径非法" }
+                    require(paths.add(normalized.trimEnd('/'))) { "Skill 压缩包存在重复路径" }
                     val target = File(temp, normalized).canonicalFile
                     require(target.path.startsWith(temp.canonicalPath + File.separator)) { "Skill 压缩包路径非法" }
                     if (entry.isDirectory) target.mkdirs() else {
@@ -130,18 +183,24 @@ class SkillRepository(private val context: Context) {
                     zip.closeEntry()
                 }
             }
-            val skillFile = temp.walkTopDown().firstOrNull { it.isFile && it.name == "SKILL.md" }
-                ?: error("压缩包中没有 SKILL.md")
+            val manifests = temp.walkTopDown().filter { it.isFile && it.name == "SKILL.md" }.toList()
+            require(manifests.size == 1) { "压缩包必须包含且仅包含一个 SKILL.md" }
+            val skillFile = manifests.single()
+            require(skillFile.length() <= 2 * 1024 * 1024) { "Markdown 超过 2 MiB" }
             val markdown = skillFile.readText()
-            val id = slug(skillFile.parentFile?.name.orEmpty().ifBlank { readName(markdown).orEmpty() })
-            requireMutable(id)
+            require(markdown.contains("name:")) { "SKILL.md 缺少 name" }
             val sourceRoot = requireNotNull(skillFile.parentFile)
+            val id = slug(if (sourceRoot == temp) fileName.substringBeforeLast('.') else sourceRoot.name)
+            requireMutable(id)
+            require(temp.walkTopDown().filter(File::isFile).all { it.canonicalPath.startsWith(sourceRoot.canonicalPath + File.separator) }) { "技能目录之外存在文件" }
             val destination = File(customDir, id)
-            destination.deleteRecursively(); destination.mkdirs()
-            sourceRoot.walkTopDown().filter(File::isFile).forEach { file ->
-                val target = File(destination, file.relativeTo(sourceRoot).path)
-                target.parentFile?.mkdirs(); file.copyTo(target, overwrite = true)
-            }
+            require(!destination.exists()) { "同 ID 技能已存在，请更名后导入" }
+            // Stage on the destination filesystem; rename publishes the complete package atomically.
+            val stage = File(customDir, ".import-${System.nanoTime()}")
+            try {
+                sourceRoot.copyRecursively(stage)
+                check(stage.renameTo(destination)) { "技能包写入失败" }
+            } finally { stage.deleteRecursively() }
             return SkillInfo(id, readName(markdown) ?: id, false, isEnabled(id))
         } finally { temp.deleteRecursively() }
     }
@@ -165,6 +224,7 @@ class SkillRepository(private val context: Context) {
     }
 
     companion object {
+        private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
         fun validId(id: String): Boolean =
             id.length in 1..80 && id !in setOf(".", "..") && id.matches(Regex("[\\p{L}\\p{N}._-]+"))
 

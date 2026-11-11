@@ -29,6 +29,8 @@ import java.util.regex.Pattern
  */
 object CaptureSessionExporter {
 
+    data class ResourceReport(var missingResources: Int = 0, var omittedResources: Int = 0)
+
     /** `[bodyFile=captures/…]` 标记（与 WebViewCapture.bodyFileMark 同约定）。 */
     private val BODY_FILE_PATTERN: Pattern = Pattern.compile("\\[bodyFile=([^\\]]+)\\]")
 
@@ -49,7 +51,11 @@ object CaptureSessionExporter {
         total: Int,
         page: suspend (offset: Int) -> List<HttpLogEntity>,
         fileReader: (String) -> ByteArray?,
+        omitResources: Boolean = false,
+        report: ResourceReport = ResourceReport(),
     ): Int {
+        val initialMissing = report.missingResources
+        val initialOmitted = report.omittedResources
         val anchors = linkedSetOf<String>()
         var written = 0
         val w = JsonWriterLite(out)
@@ -67,13 +73,16 @@ object CaptureSessionExporter {
                 if (!e.sourceAnchor.isNullOrBlank()) anchors += e.sourceAnchor
                 if (!first) w.raw(',')
                 first = false
-                writeLog(w, e, fileReader)
+                writeLog(w, e, fileReader, omitResources, report)
                 written++
             }
             if (rows.size < EXPORT_PAGE_SIZE) break
             offset += rows.size
         }
         w.raw(']'); w.raw(',')
+        w.field("partial", written != total || report.missingResources > initialMissing); w.raw(',')
+        w.field("missingResources", report.missingResources - initialMissing); w.raw(',')
+        w.field("omittedResources", report.omittedResources - initialOmitted); w.raw(',')
         w.field("count", written); w.raw(',')
         w.key("anchors"); w.raw('[')
         anchors.forEachIndexed { i, a -> if (i > 0) w.raw(','); w.string(a) }
@@ -84,7 +93,7 @@ object CaptureSessionExporter {
     }
 
     /** 单个实体 → 一个 JSON 对象（含嵌套 JSON 展开与 bodyFile 字节内嵌）。 */
-    private fun writeLog(w: JsonWriterLite, e: HttpLogEntity, fileReader: (String) -> ByteArray?) {
+    private fun writeLog(w: JsonWriterLite, e: HttpLogEntity, fileReader: (String) -> ByteArray?, omitResources: Boolean, report: ResourceReport) {
         w.raw('{')
         w.field("id", e.id); w.raw(',')
         w.field("method", e.method); w.raw(',')
@@ -116,7 +125,10 @@ object CaptureSessionExporter {
         if (ref != null) {
             w.raw(',')
             w.field("responseBodyFile", ref)
-            val bytes = runCatching { fileReader(ref) }.getOrNull()
+            val bytes = if (omitResources) null else try { fileReader(ref) } catch (_: java.io.IOException) { null }
+            val status = if (omitResources) { report.omittedResources++; "omitted" }
+                else if (bytes == null) { report.missingResources++; "missing" } else "included"
+            w.raw(','); w.field("responseBodyFileStatus", status)
             if (bytes != null) {
                 w.raw(',')
                 w.field("responseBodyFileBytes", bytes.size); w.raw(',')

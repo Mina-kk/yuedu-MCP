@@ -58,6 +58,85 @@ describe('SettingsPanel version identity', () => {
 })
 
 describe('SettingsPanel async save', () => {
+  it.each(['web', 'missing-capability', 'disconnected', 'unknown'])('新令牌编辑门禁 %s', mode => {
+    const wrapper = mount(SettingsPanel, { props: {
+      bridgeKind: mode === 'web' ? 'web' : 'android', runtimeConnected: mode !== 'disconnected', bootstrapOk: mode !== 'unknown',
+      bootstrap: { capabilities: { mcpTokenEditable: mode !== 'missing-capability' } }
+    } })
+    expect(wrapper.get('#set-mcp-token').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('#set-mcp-token').element.value).toBe('')
+    wrapper.unmount()
+  })
+
+  it('新令牌遵循IME composition，忙碌锁定输入和返回，卸载重开为空', async () => {
+    let resolveSave
+    const calls = []
+    const bootstrap = { service: { tokenRequired: false }, capabilities: { mcpTokenEditable: true } }
+    const props = { bootstrap, bootstrapOk: true, runtimeConnected: true, bridgeKind: 'android',
+      saveSettings: p => { calls.push(p); return new Promise(resolve => { resolveSave = resolve }) } }
+    const wrapper = mount(SettingsPanel, { props })
+    const input = wrapper.get('#set-mcp-token')
+    await input.trigger('compositionstart')
+    input.element.value = 'QA-composed'
+    await input.trigger('input')
+    expect(wrapper.emitted('dirty')).toBeUndefined()
+    await input.trigger('compositionend')
+    expect(wrapper.emitted('dirty').at(-1)).toEqual([true])
+    const save = wrapper.findAll('button').find(b => b.text() === '保存设置')
+    await save.trigger('click')
+    expect(input.attributes('disabled')).toBeDefined()
+    expect(wrapper.vm.handleBack()).toBe(true)
+    await save.trigger('click')
+    expect(calls).toHaveLength(1)
+    resolveSave({ ...bootstrap, settingsResult: { mcpTokenApplied: true } }); await flushPromises()
+    expect(input.element.value).toBe('')
+    wrapper.unmount()
+    const reopened = mount(SettingsPanel, { props })
+    expect(reopened.get('#set-mcp-token').element.value).toBe('')
+    reopened.unmount()
+  })
+  it.each(['missing', 'false', 'partial', 'failed', 'reject'])('新令牌%s回执保留草稿且错误不包含输入', async outcome => {
+    const bootstrap = { service: { tokenRequired: false }, capabilities: { mcpTokenEditable: true } }
+    const wrapper = mount(SettingsPanel, { props: {
+      bootstrap, bootstrapOk: true, runtimeConnected: true, bridgeKind: 'android',
+      saveSettings: async () => {
+        if (outcome === 'reject') throw new Error('QA-private')
+        return { ...bootstrap, settingsResult: { mcpTokenApplied: outcome !== 'false' && outcome !== 'missing' }, partial: outcome === 'partial', failed: outcome === 'failed' ? ['compact'] : [] }
+      }
+    } })
+    await wrapper.get('#set-mcp-token').setValue('QA-private')
+    await wrapper.findAll('button').find(b => b.text() === '保存设置').trigger('click'); await flushPromises()
+    expect(wrapper.get('#set-mcp-token').element.value).toBe('QA-private')
+    expect(wrapper.emitted('dirty').at(-1)).toEqual([true])
+    expect(wrapper.text()).toMatch(/令牌.*未知/)
+    expect(wrapper.text()).not.toContain('QA-private')
+    wrapper.unmount()
+  })
+  it.each([true, false])('新令牌在鉴权%s时独立保存，默认空白，成功清理并不重发', async tokenRequired => {
+    const calls = []
+    const bootstrap = { service: { port: 8787, tokenRequired }, capabilities: { mcpTokenEditable: true } }
+    const wrapper = mount(SettingsPanel, { props: {
+      bootstrap, bootstrapOk: true, runtimeConnected: true, bridgeKind: 'android',
+      saveSettings: async p => { calls.push({ ...p }); return { ...bootstrap, settingsResult: { mcpTokenApplied: true } } }
+    } })
+    const input = wrapper.find('#set-mcp-token')
+    expect(input.exists()).toBe(true)
+    expect(input.element.value).toBe('')
+    expect(input.attributes('type')).toBe('password')
+    expect(input.attributes('disabled')).toBeUndefined()
+    await input.setValue('QA-token_206+/==')
+    expect(wrapper.emitted('dirty').at(-1)).toEqual([true])
+    const save = wrapper.findAll('button').find(b => b.text() === '保存设置')
+    await save.trigger('click'); await flushPromises()
+    expect(calls[0].mcpToken).toBe('QA-token_206+/==')
+    expect(calls[0]).not.toHaveProperty('tokenRequired')
+    expect(input.element.value).toBe('')
+    expect(wrapper.emitted('dirty').at(-1)).toEqual([false])
+    await save.trigger('click'); await flushPromises()
+    expect(calls[1]).not.toHaveProperty('mcpToken')
+    wrapper.unmount()
+  })
+
   it('令牌开关是草稿，关闭保存需Vue确认，取消不写，回读成功清dirty', async () => {
     let dialog, resolveSave
     const calls = []

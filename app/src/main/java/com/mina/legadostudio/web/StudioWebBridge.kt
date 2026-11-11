@@ -84,6 +84,13 @@ internal class StudioWebBridge(
         explicitNulls = false
     }
 
+    private val sourceManagement = SourceManagementModule(activity, ::fileExport)
+    private val logManagement by lazy { LogManagementBridge(app) }
+    private val logShareLauncher by lazy { LogShareLauncher(activity, logManagement) }
+    private var skillManagement: SkillManagementModule? = null
+    fun attachSkillDocuments(documents: SkillManagementDocuments) {
+        skillManagement = SkillManagementModule(com.mina.legadostudio.skills.SkillRepository(activity.applicationContext), documents)
+    }
     @Volatile private var released = false
 
     /**
@@ -117,6 +124,7 @@ internal class StudioWebBridge(
     fun release() {
         if (released) return
         released = true
+        sourceManagement.close()
         val outstanding = pending.drain()
         val proxy = eventProxy
         eventProxy = null
@@ -188,6 +196,23 @@ internal class StudioWebBridge(
     }
 
     private suspend fun dispatch(method: String, params: JsonObject): JsonElement = when (method) {
+        "skills.read", "skills.setEnabled", "skills.import", "skills.export" ->
+            (skillManagement ?: throw BridgeFailure(WebBridgeProtocol.ERR_UNSUPPORTED, "技能文件宿主未就绪")).handle(method, params)
+        "sources.analyze", "sources.deliver", "sources.delete", "sources.checkStart", "sources.checkStatus", "sources.checkCancel" -> sourceManagement.dispatch(method, params)
+        "logs.list" -> withContext(Dispatchers.IO) { logManagement.list(params) }
+        "logs.dayCount" -> withContext(Dispatchers.IO) { logManagement.day(params, false) }
+        "logs.deleteDay" -> withContext(Dispatchers.IO) { logManagement.day(params, true) }
+        "logs.export" -> withContext(Dispatchers.IO) {
+            val host = safHost ?: throw BridgeFailure(WebBridgeProtocol.ERR_UNSUPPORTED, "当前系统不支持文件保存")
+            try {
+                logManagement.export(params) { file, name, mime -> host.exportFile(file, name, mime) }
+            } catch (_: SafLauncher.Cancelled) {
+                JsonObject().apply { addProperty("saved", false); addProperty("cancelled", true) }
+            }
+        }
+        "logs.share" -> logShareLauncher.share(params)
+        "verification.external", "verification.browser.refresh" -> (activity as com.mina.legadostudio.MainActivity).verificationManagement(method, params)
+        "capture.browser.open", "capture.browser.navigate", "capture.browser.back", "capture.browser.forward", "capture.browser.reload", "capture.browser.state", "capture.browser.transactions", "capture.browser.detail", "capture.browser.finish", "capture.browser.close", "capture.browser.export", "capture.browser.viewport" -> (activity as com.mina.legadostudio.MainActivity).captureCommand(method, params)
         WebBridgeProtocol.M_BOOTSTRAP -> bootstrap()
         WebBridgeProtocol.M_SERVICE_SET -> serviceSet(params)
         WebBridgeProtocol.M_SETTINGS_SAVE -> settingsSave(params)
@@ -202,17 +227,61 @@ internal class StudioWebBridge(
         WebBridgeProtocol.M_VERIFICATION_CLEAR -> verificationClear(params)
         WebBridgeProtocol.M_VERIFICATION_CLOSE -> verificationClose(params)
         WebBridgeProtocol.M_VERIFICATION_BROWSER_CLOSE -> {
-            main.post { onRequestCloseVerificationBrowser() }
+            withContext(Dispatchers.Main.immediate) { onRequestCloseVerificationBrowser() }
             JsonObject().apply { addProperty("closed", true) }
         }
         WebBridgeProtocol.M_FILE_EXPORT -> fileExport(params)
         WebBridgeProtocol.M_FILE_IMPORT -> fileImport()
         WebBridgeProtocol.M_THEME -> theme(params)
+        WebBridgeProtocol.M_NOTIFICATION_REQUEST, WebBridgeProtocol.M_NOTIFICATION_SETTINGS,
+        WebBridgeProtocol.M_NOTIFICATION_CHANNEL, WebBridgeProtocol.M_OVERLAY_SETTINGS,
+        WebBridgeProtocol.M_OVERLAY_SET, WebBridgeProtocol.M_BATTERY_SETTINGS,
+        WebBridgeProtocol.M_AUTOSTART_SETTINGS -> deviceAction(method, params)
+        WebBridgeProtocol.M_READER_CLEAR -> settingsLock.withLock {
+            val store = ReaderWebConfigStore(activity.applicationContext)
+            store.clear()
+            check(store.load() == null && !store.hasToken()) { "阅读配置清除未确认" }
+            bootstrap()
+        }
         WebBridgeProtocol.M_EXIT -> {
+            val stopService = strictBoolean(params, "stopService", false)
+            withContext(Dispatchers.Main) {
+                if (stopService) McpService.stop(activity.applicationContext)
+            }
             main.post { onExit() }
             JsonObject().apply { addProperty("closing", true) }
         }
         else -> throw BridgeFailure(WebBridgeProtocol.ERR_UNKNOWN_METHOD, "未登记的方法")
+    }
+
+    private fun strictBoolean(params: JsonObject, key: String, default: Boolean? = null): Boolean {
+        val value = params.get(key) ?: return default
+            ?: throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "$key 必须是布尔值")
+        if (!value.isJsonPrimitive || !value.asJsonPrimitive.isBoolean)
+            throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "$key 必须是布尔值")
+        return value.asBoolean
+    }
+
+    private suspend fun deviceAction(method: String, params: JsonObject): JsonObject = withContext(Dispatchers.Main) {
+        val host = activity as? com.mina.legadostudio.MainActivity
+            ?: throw BridgeFailure(WebBridgeProtocol.ERR_UNSUPPORTED, "宿主不支持权限操作")
+        JsonObject().apply {
+            when (method) {
+                WebBridgeProtocol.M_NOTIFICATION_REQUEST -> addProperty("granted", host.requestNotificationPermission())
+                WebBridgeProtocol.M_NOTIFICATION_SETTINGS -> addProperty("opened", host.openNotificationSettings())
+                WebBridgeProtocol.M_NOTIFICATION_CHANNEL -> addProperty("opened", host.openMcpNotificationChannel())
+                WebBridgeProtocol.M_OVERLAY_SETTINGS -> addProperty("opened", host.openOverlaySettings())
+                WebBridgeProtocol.M_OVERLAY_SET -> {
+                    val enabled = strictBoolean(params, "enabled")
+                    addProperty("enabled", host.setOverlayEnabled(enabled))
+                }
+                WebBridgeProtocol.M_BATTERY_SETTINGS -> addProperty("opened", host.openBatterySettings())
+                WebBridgeProtocol.M_AUTOSTART_SETTINGS -> {
+                    addProperty("opened", DeviceReadiness(activity).openAppDetails())
+                    addProperty("fallback", "appDetails")
+                }
+            }
+        }
     }
 
     // --- app.bootstrap ----------------------------------------------------
@@ -308,9 +377,22 @@ internal class StudioWebBridge(
         obj.addProperty("webMessageListener", true)
         obj.addProperty("saf", safHost != null)
         obj.addProperty("verificationBrowser", true)
+        obj.addProperty("interactiveCapture", activity is com.mina.legadostudio.MainActivity && safHost != null)
+        obj.addProperty("skillManagement", skillManagement != null)
+        obj.addProperty("sourceManagement", true)
+        obj.addProperty("logManagement", true)
+        obj.addProperty("logShare", true)
+        obj.addProperty("connectionHeaderCopy", true)
         obj.addProperty("toolCount", withContext(Dispatchers.IO) { localTools().size })
         obj.addProperty("tokenRequiredLocked", false)
         obj.addProperty("tokenRequiredEditable", true)
+        obj.addProperty("mcpTokenEditable", true)
+        obj.addProperty("deviceSettings", activity is com.mina.legadostudio.MainActivity)
+        obj.addProperty("readerConfigActions", true)
+        obj.addProperty("overlayEnabled", com.mina.legadostudio.verification.OverlayPrefs.isEnabled(activity))
+        val manager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        obj.addProperty("channelCreated", manager.getNotificationChannel("studio_mcp") != null)
+        obj.addProperty("mcpChannelEnabled", readiness?.mcpChannelEnabled ?: false)
         obj.addProperty("notificationPermission", readiness?.notificationPermission ?: false)
         obj.addProperty("notificationsEnabled", readiness?.notificationsEnabled ?: false)
         obj.addProperty("batteryUnrestricted", readiness?.batteryUnrestricted ?: false)
@@ -355,6 +437,7 @@ internal class StudioWebBridge(
         }
         val context = activity.applicationContext
         val failed = mutableListOf<String>()
+        var mcpTokenApplied = false
         return settingsLock.withLock {
             // 写前校验在共享锁内且早于任何写：令牌单独保存需要已有 origin。
             if (draft.readerBaseUrl == null && draft.readerToken != null) {
@@ -375,9 +458,12 @@ internal class StudioWebBridge(
                     }
                 }
 
-                // 原子增量合并，不携带过期快照，不生成/重置现有令牌。
-                if (draft.port != null || draft.tokenRequired != null) {
-                    runCatching { mcp.updateConnection(draft.port, draft.tokenRequired) }.onFailure {
+                // 共享锁内增量合并；跨偏好文件不承诺事务回滚。
+                if (draft.port != null || draft.tokenRequired != null || draft.mcpToken != null) {
+                    runCatching { mcp.updateConnection(draft.port, draft.tokenRequired, draft.mcpToken) }.onSuccess {
+                        mcpTokenApplied = draft.mcpToken != null
+                    }.onFailure {
+                        if (draft.mcpToken != null) failed += "mcpToken"
                         if (draft.port != null) failed += "port"
                         if (draft.tokenRequired != null) failed += "tokenRequired"
                         StudioLog.add("settings.save connection failed", "W", "web", it.javaClass.simpleName)
@@ -410,7 +496,14 @@ internal class StudioWebBridge(
             }
             // 主题立即生效（系统栏），再回读 bootstrap 让前端确认落盘值。
             withContext(Dispatchers.Main) { applyAppearanceToHost() }
-            val result = bootstrap()
+            val result = try { bootstrap() } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                throw BridgeFailure(WebBridgeProtocol.ERR_INTERNAL, "设置保存后回读失败，结果未知")
+            }
+            if (mcpTokenApplied) {
+                result.add("settingsResult", JsonObject().apply { addProperty("mcpTokenApplied", true) })
+            }
             if (failed.isNotEmpty()) {
                 result.addProperty("partial", true)
                 val array = JsonArray()
@@ -430,11 +523,17 @@ internal class StudioWebBridge(
 
     private suspend fun connectionCopy(params: JsonObject): JsonElement {
         val kind = WebBridgeProtocol.parseConnectionKind(stringParam(params, "kind"))
-            ?: throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "kind 必须是 url/token/json")
+            ?: throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "kind 必须是 url/token/json/header-name/header-value/header-line")
         val lan = params.get("lan")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }?.asBoolean ?: false
         val context = activity.applicationContext
         val store = McpConfigStore(context)
         val config = withContext(Dispatchers.IO) { store.load() }
+        if (kind in setOf(ConnectionKind.HEADER_NAME, ConnectionKind.HEADER_VALUE, ConnectionKind.HEADER_LINE)) {
+            if (!config.tokenRequired) throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "令牌校验已关闭，无需请求头")
+            return WebBridgeProtocol.copyConnectionHeader(kind, config.tokenRequired, config.token) {
+                writeClipboard("MCP 请求头", it)
+            }
+        }
         val compact = withContext(Dispatchers.IO) { store.loadCompactMode() }
         val endpoint = if (lan) {
             // 局域网地址取当前真实网卡地址，不用缓存的旧 IP。
@@ -449,25 +548,39 @@ internal class StudioWebBridge(
             // 「复制令牌」= 纯 token（Vue 文案如此），不是 Authorization 头。
             ConnectionKind.TOKEN -> config.token
             ConnectionKind.JSON -> McpAccess.clientConfigJson(url, config.token, tokenRequired = config.tokenRequired)
+            else -> error("请求头已单独处理")
         }
         val label = when (kind) {
             ConnectionKind.URL -> "MCP Endpoint"
             ConnectionKind.TOKEN -> "MCP 令牌"
             ConnectionKind.JSON -> "MCP 客户端配置"
+            else -> error("请求头已单独处理")
         }
-        withContext(Dispatchers.Main) {
-            val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = ClipData.newPlainText(label, text)
-            // API 33+：标记为敏感内容，系统剪贴板预览不显示令牌；不回传 JS。
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                clip.description.extras = android.os.PersistableBundle().apply {
-                    putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
-                }
-            }
-            clipboard.setPrimaryClip(clip)
-        }
-        // 只回 {copied:true}：被复制的令牌绝不回传前端。
+        writeClipboard(label, text)
+        // Legacy acknowledgement remains compatible; contents never go back to JS.
         return WebBridgePolicy.copiedAck()
+    }
+
+    private suspend fun writeClipboard(label: String, text: String) {
+        try {
+            withContext(Dispatchers.Main) {
+                check(!activity.isFinishing && !activity.isDestroyed) { "宿主已关闭" }
+                val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText(label, text)
+                // API 33+：敏感预览不显示令牌；不回传 JS。
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    clip.description.extras = android.os.PersistableBundle().apply {
+                        putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
+                    }
+                }
+                clipboard.setPrimaryClip(clip)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Clipboard/vendor exceptions may contain the supplied text. Never echo them.
+            throw BridgeFailure(WebBridgeProtocol.ERR_INTERNAL, "复制失败，请重试")
+        }
     }
 
     // --- tools.list / tools.call -------------------------------------------
@@ -656,13 +769,13 @@ internal class StudioWebBridge(
         if (!WebBridgePolicy.canCompleteVerification(session.kind, session.url)) {
             throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "该验证记录缺少有效地址，请先补全地址并重新验证")
         }
-        val live = observedUrlProvider?.invoke(session.id)
+        val live = withContext(Dispatchers.Main.immediate) { observedUrlProvider?.invoke(session.id) }
         val observed = pickFinalUrl(live, session.finalUrl, session.url)
         val completed = withContext(Dispatchers.IO) {
             app.verification.complete(session.id, observed, parsed.answer)
         }
-        main.post {
-            onRequestCloseVerificationBrowser()
+        withContext(Dispatchers.Main.immediate) {
+            (activity as com.mina.legadostudio.MainActivity).closeVerificationIfMatching(completed.id)
             emitVerificationBrowser("completed", completed.id)
         }
         return WebBridgePolicy.verificationSessionPayload(completed.toRow())
@@ -678,6 +791,7 @@ internal class StudioWebBridge(
     private suspend fun verificationClear(params: JsonObject): JsonElement {
         val id = WebBridgeProtocol.parseVerificationId(params)
             ?: throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "verification.clear 需要字符串 id")
+        withContext(Dispatchers.Main.immediate) { (activity as com.mina.legadostudio.MainActivity).closeVerificationIfMatching(id) }
         withContext(Dispatchers.IO) { app.verification.clear(id) }
         return JsonObject().apply { addProperty("cleared", true) }
     }
@@ -685,6 +799,7 @@ internal class StudioWebBridge(
     private suspend fun verificationClose(params: JsonObject): JsonElement {
         val id = WebBridgeProtocol.parseVerificationId(params)
             ?: throw BridgeFailure(WebBridgeProtocol.ERR_BAD_PARAMS, "verification.close 需要字符串 id")
+        withContext(Dispatchers.Main.immediate) { (activity as com.mina.legadostudio.MainActivity).closeVerificationIfMatching(id) }
         withContext(Dispatchers.IO) { app.verification.close(id) }
         return JsonObject().apply { addProperty("closed", true) }
     }
@@ -848,6 +963,7 @@ internal data class SafImportResult(val name: String, val text: String)
 
 /** SAF 宿主抽象：Activity 用 ActivityResultContracts 实现；bridge 不直接持有 launcher。 */
 internal interface SafHost {
+    suspend fun exportFile(file: java.io.File, name: String, mime: String)
     suspend fun export(request: SafRequest.Export)
     suspend fun import(): SafImportResult
 }

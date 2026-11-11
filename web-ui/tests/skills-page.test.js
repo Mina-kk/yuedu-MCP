@@ -16,6 +16,11 @@ function fakeBridge(handlers = {}) {
       const name = method === 'tools.call' ? params.name : method
       const args = method === 'tools.call' ? params.arguments : params
       calls.push([name, args])
+      if (name === 'skills.read' && !handlers[name]) {
+        const result = await handlers.get_skill(args)
+        if (result.isError) throw new Error(result.content[0].text)
+        return { ...SKILLS.find(s => s.id === args.id), markdown: result.content[0].text }
+      }
       const fn = handlers[name]
       if (!fn) throw Object.assign(new Error(`unsupported ${name}`), { code: 'unsupported' })
       return fn(args)
@@ -45,6 +50,45 @@ async function mountPage(handlers) {
 }
 
 describe('SkillsPage', () => {
+  it.each([true, false])('导入选择取消=%s；仅实际导入才刷新列表', async (cancelled) => {
+    const { wrapper, bridge } = await mountPage({ 'skills.import': async () => cancelled ? { cancelled: true } : { imported: true, skill: SKILLS[1] } })
+    const before = bridge.calls.filter(([m]) => m === 'list_skills').length
+    await wrapper.find('[data-skill-import]').trigger('click'); await flushPromises()
+    expect(bridge.calls).toContainEqual(['skills.import', {}])
+    expect(bridge.calls.filter(([m]) => m === 'list_skills').length).toBe(before + (cancelled ? 0 : 1))
+  })
+
+  it('禁用技能用管理桥读取，启用回执必须匹配，内置只读仍可导出', async () => {
+    const { wrapper, bridge } = await mountPage({
+      'skills.read': async () => ({ ...SKILLS[0], enabled: false, markdown: '# disabled' }),
+      'skills.setEnabled': async () => ({ ...SKILLS[0], enabled: true }),
+      'skills.export': async () => ({ saved: true })
+    })
+    await wrapper.find('.skill-row').trigger('click'); await flushPromises()
+    expect(wrapper.find('textarea').element.value).toBe('# disabled')
+    await wrapper.find('[data-skill-toggle]').trigger('click'); await flushPromises()
+    expect(bridge.calls).toContainEqual(['skills.setEnabled', { id: 'builtin-one', enabled: true }])
+    expect(wrapper.find('[data-skill-toggle]').text()).toBe('禁用技能')
+    await wrapper.find('[data-skill-export]').trigger('click'); await flushPromises()
+    expect(bridge.calls).toContainEqual(['skills.export', { id: 'builtin-one' }])
+    expect(wrapper.find('textarea').attributes('readonly')).toBeDefined()
+  })
+
+  it('状态回执不匹配不假成功；导出失败保留详情', async () => {
+    const { wrapper } = await mountPage({
+      'skills.read': async () => ({ ...SKILLS[0], markdown: '# read only' }),
+      'skills.setEnabled': async () => ({ ...SKILLS[0], enabled: true }),
+      'skills.export': async () => ({ saved: false })
+    })
+    await wrapper.find('.skill-row').trigger('click'); await flushPromises()
+    await wrapper.find('[data-skill-toggle]').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('启用状态回执无效')
+    expect(wrapper.find('[data-skill-toggle]').text()).toBe('禁用技能')
+    await wrapper.find('[data-skill-export]').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('技能包未保存')
+    expect(wrapper.find('textarea').element.value).toBe('# read only')
+  })
+
   it('独立详情仍提供可见的单条删除入口', async () => {
     const { wrapper, store } = await mountPage({ get_skill: async () => ({ content: [{ type: 'text', text: '# 内容' }] }) })
     await wrapper.findAll('button').find(b => b.text() === '自定义').trigger('click')
@@ -144,7 +188,7 @@ describe('SkillsPage', () => {
     await flushPromises()
     const save = bridge.calls.find(([m]) => m === 'save_skill')
     expect(save[1]).toEqual({ id: 'custom-one', markdown: '# 自定义 v2' })
-    expect(bridge.calls.filter(([m]) => m === 'get_skill').length).toBeGreaterThanOrEqual(2)
+    expect(bridge.calls.filter(([m]) => m === 'skills.read').length).toBeGreaterThanOrEqual(2)
   })
 
   it('确认放弃后可切换技能，不再次弹窗', async () => {

@@ -1,0 +1,121 @@
+import { describe, it, expect, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+import SourcesPage from '../src/pages/SourcesPage.vue'
+const snapshot = { token: 's1', total: 2, keptCount: 2, excludedCount: 0, groups: [{ domain: 'a.example', ids: ['p1','p2'] }], kept: [], excluded: [], conflicts: [], clusters: [] }
+function setup() {
+ const store = { state: {}, markPageDirty: vi.fn(), toast: vi.fn(), confirmDialog: vi.fn(), callTool: vi.fn(async () => ({content:[{type:'text',text:'{"items":[],"total":0,"hasMore":false}'}]})), bridge: { call: vi.fn(async (method) => method === 'sources.analyze' ? snapshot : { copied: true }) } }
+ return { store, wrapper: mount(SourcesPage,{ props:{store} }) }
+}
+const button = (w,t) => w.findAll('button').find(b=>b.text()===t)
+describe('source management',()=>{
+ it('批量删除可用但快照冲突拒绝不显示成功',async()=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  expect(wrapper.text()).not.toContain('批量删除暂不可用')
+  await button(wrapper,'清空本地全库').trigger('click')
+  await wrapper.find('[aria-label="删除确认文字"]').setValue('清空全库')
+  store.bridge.call.mockRejectedValueOnce(new Error('缺少共享事务，未删除任何书源'))
+  await button(wrapper,'确认永久删除').trigger('click'); await flushPromises()
+  expect(wrapper.text()).toContain('未删除任何书源')
+  expect(store.toast).not.toHaveBeenCalled()
+  wrapper.unmount()
+ })
+ it.each(['all','domain'])('真实确认范围删除成功：%s',async(scope)=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  await button(wrapper,scope==='all'?'清空本地全库':'删除该域名整组').trigger('click')
+  await wrapper.find('[aria-label="删除确认文字"]').setValue(scope==='all'?'清空全库':'a.example')
+  store.bridge.call.mockResolvedValueOnce({verified:true,scope,deletedCount:2,deletedIds:['p1','p2'],remainingCount:0,allCleared:scope==='all'})
+  await button(wrapper,'确认永久删除').trigger('click'); await flushPromises()
+  expect(store.bridge.call).toHaveBeenCalledWith('sources.delete',expect.objectContaining({token:'s1',scope,confirmation:scope==='all'?'清空全库':'a.example'}))
+  expect(store.toast).toHaveBeenCalledWith(expect.stringContaining('已删除 2 条'))
+  expect(button(wrapper,'确认永久删除')).toBeUndefined()
+  wrapper.unmount()
+ })
+ it('全库删除后新增不得宣称清空，必须提示重新分析',async()=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  await button(wrapper,'清空本地全库').trigger('click')
+  await wrapper.find('[aria-label="删除确认文字"]').setValue('清空全库')
+  store.bridge.call.mockResolvedValueOnce({verified:true,scope:'all',deletedCount:2,deletedIds:['p1','p2'],remainingCount:1,allCleared:false})
+  await button(wrapper,'确认永久删除').trigger('click'); await flushPromises()
+  expect(store.toast).not.toHaveBeenCalled()
+  expect(wrapper.text()).toContain('未清空')
+  expect(wrapper.text()).toContain('重新分析')
+  expect(button(wrapper,'确认永久删除')).toBeUndefined()
+  wrapper.unmount()
+ })
+ it.each([
+  {verified:false,scope:'all',deletedCount:2,deletedIds:['p1','p2'],remainingCount:1,allCleared:false},
+  {verified:true,scope:'all',deletedCount:2,deletedIds:['p1','outside'],remainingCount:0,allCleared:true},
+  {verified:true,scope:'all',deletedCount:2,deletedIds:['p1','p1'],remainingCount:0,allCleared:true},
+  {verified:true,deletedCount:2}
+ ])('同ID重建或不完整/越界回执不报成功 %#',async receipt=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  await button(wrapper,'清空本地全库').trigger('click')
+  await wrapper.find('[aria-label="删除确认文字"]').setValue('清空全库')
+  store.bridge.call.mockResolvedValueOnce(receipt)
+  await button(wrapper,'确认永久删除').trigger('click'); await flushPromises()
+  expect(store.toast).not.toHaveBeenCalled()
+  expect(wrapper.text()).toContain('重新分析')
+  expect(store.bridge.call.mock.calls.filter(([m])=>m==='sources.delete')).toHaveLength(1)
+  wrapper.unmount()
+ })
+ it('过滤变化立即废弃旧快照',async()=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  await wrapper.find('.options input').setValue(true)
+  expect(button(wrapper,'复制完整数组')).toBeUndefined()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  expect(store.bridge.call.mock.calls.at(-1)[1].exclude.excludeLogin).toBe(true)
+  wrapper.unmount()
+ })
+ it('清库必须输入精确文字，取消不删除，错误不报成功',async()=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  await button(wrapper,'清空本地全库').trigger('click')
+  expect(button(wrapper,'确认永久删除').attributes('disabled')).toBeDefined()
+  await wrapper.find('[aria-label="删除确认文字"]').setValue('清空全库')
+  await button(wrapper,'取消删除').trigger('click')
+  expect(store.bridge.call.mock.calls.some(([m])=>m==='sources.delete')).toBe(false)
+  await button(wrapper,'复制完整数组').trigger('click'); await flushPromises()
+  store.bridge.call.mockResolvedValueOnce({copied:false})
+  store.toast.mockClear()
+  await button(wrapper,'复制完整数组').trigger('click'); await flushPromises()
+  expect(wrapper.text()).toContain('复制未确认');expect(store.toast).not.toHaveBeenCalled()
+  wrapper.unmount()
+ })
+ it('指定阅读包名后只报告待确认',async()=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  store.bridge.call.mockResolvedValueOnce({targets:[{packageName:'reader.test',label:'阅读测试'}]})
+  await button(wrapper,'导入指定阅读客户端').trigger('click'); await flushPromises()
+  store.bridge.call.mockResolvedValueOnce({launched:true,confirmed:false,confirmation:'pending_user'})
+  await button(wrapper,'阅读测试 · reader.test').trigger('click'); await flushPromises()
+  expect(store.bridge.call).toHaveBeenLastCalledWith('sources.deliver',{token:'s1',action:'reader',packageName:'reader.test'})
+  expect(store.toast.mock.calls.at(-1)[0]).toContain('待用户确认')
+  wrapper.unmount()
+ })
+ it('实时检测先确认，取消请求交给宿主而非只停止轮询',async()=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  await button(wrapper,'实时检测此源').trigger('click')
+  expect(store.bridge.call.mock.calls.some(([m])=>m==='sources.checkStart')).toBe(false)
+  store.bridge.call.mockImplementation(async method => ({id:'job1',state:method==='sources.checkCancel'?'cancelled':'running'}))
+  await store.confirmDialog.mock.calls.at(-1)[0].onAccept(); await flushPromises()
+  expect(store.bridge.call).toHaveBeenCalledWith('sources.checkStart',{projectId:'p1'})
+  await button(wrapper,'取消检测').trigger('click'); await flushPromises()
+  expect(store.bridge.call).toHaveBeenCalledWith('sources.checkCancel',{id:'job1'})
+  wrapper.unmount()
+ })
+ it('分析全库默认无排除无折叠，复制只使用完整宿主快照',async()=>{
+  const {store,wrapper}=setup(); await flushPromises()
+  expect(button(wrapper,'全库分析与分组')).toBeTruthy()
+  await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
+  expect(store.bridge.call).toHaveBeenCalledWith('sources.analyze',{exclude:{excludeLogin:false,excludeCaptcha:false,excludeFailed:false,excludeUnverified:false},collapseIdentical:false})
+  await button(wrapper,'复制完整数组').trigger('click'); await flushPromises()
+  expect(store.bridge.call).toHaveBeenLastCalledWith('sources.deliver',{token:'s1',action:'copy'})
+  wrapper.unmount()
+ })
+})

@@ -86,13 +86,12 @@ async function open(skill) {
   loadingSkill.value = true
   skillError.value = ''
   try {
-    const parsed = await callToolParsed(props.store, 'get_skill', { id: skill.id })
+    const result = await props.store.bridge.call('skills.read', { id: skill.id })
     if (revision !== openRevision) return
-    if (parsed.threw) throw new Error(parsed.threw)
-    if (parsed.isError) throw new Error(parsed.text || 'get_skill 返回错误')
-    current.value = { id: skill.id, name: skill.name, builtIn: Boolean(skill.builtIn) }
-    markdown.value = parsed.raw
-    original.value = parsed.raw
+    if (result?.id !== skill.id || typeof result.markdown !== 'string' || typeof result.enabled !== 'boolean') throw new Error('技能管理回执无效')
+    current.value = { ...result, builtIn: Boolean(result.builtIn) }
+    markdown.value = result.markdown
+    original.value = result.markdown
     props.store.markPageDirty(false)
   } catch (error) {
     if (revision !== openRevision) return
@@ -100,6 +99,48 @@ async function open(skill) {
   } finally {
     if (revision === openRevision) loadingSkill.value = false
   }
+}
+
+async function importSkill() {
+  if (saveBusy.value) return
+  saveBusy.value = true
+  listError.value = ''
+  try {
+    const result = await props.store.bridge.call('skills.import', {})
+    if (result?.cancelled === true) return
+    if (result?.imported !== true || !result.skill?.id) throw new Error('技能导入回执无效')
+    tab.value = 'custom'
+    await load()
+    props.store.toast('技能包已导入')
+  } catch (error) { listError.value = error.message || '导入失败' }
+  finally { saveBusy.value = false }
+}
+
+async function toggleEnabled() {
+  if (saveBusy.value || !current.value) return
+  saveBusy.value = true
+  skillError.value = ''
+  const { id, enabled } = current.value
+  try {
+    const result = await props.store.bridge.call('skills.setEnabled', { id, enabled: !enabled })
+    if (result?.id !== id || result.enabled !== !enabled) throw new Error('启用状态回执无效，请刷新详情')
+    current.value.enabled = result.enabled
+    await load()
+  } catch (error) { skillError.value = error.message || '状态更新失败' }
+  finally { saveBusy.value = false }
+}
+
+async function exportSkill() {
+  if (saveBusy.value || !current.value || dirty.value) return
+  saveBusy.value = true
+  skillError.value = ''
+  try {
+    const result = await props.store.bridge.call('skills.export', { id: current.value.id })
+    if (result?.cancelled === true) return
+    if (result?.saved !== true) throw new Error('技能包未保存')
+    props.store.toast('技能包已导出')
+  } catch (error) { skillError.value = error.message || '导出失败' }
+  finally { saveBusy.value = false }
 }
 
 function handleBack() {
@@ -178,14 +219,10 @@ async function save() {
     })
     if (parsed.threw) throw new Error(parsed.threw)
     if (parsed.isError) throw new Error(parsed.text || 'save_skill 返回错误')
-    original.value = markdown.value
+    const back = await props.store.bridge.call('skills.read', { id: current.value.id })
+    if (back?.id !== current.value.id || back.markdown !== markdown.value) throw new Error('保存后回读不一致')
+    original.value = back.markdown
     props.store.markPageDirty(false)
-    // 保存后回读，确认宿主真的写入。
-    const back = await callToolParsed(props.store, 'get_skill', { id: current.value.id })
-    if (back.ok && !back.isError) {
-      markdown.value = back.raw
-      original.value = back.raw
-    }
     props.store.toast('技能已保存')
     load()
   } catch (error) {
@@ -284,7 +321,8 @@ async function readKnowledge() {
         <button class="btn btn-ghost btn-sm" type="button" :disabled="loading" @click="load">
           <AppIcon name="refresh" :size="15" /><span>刷新</span>
         </button>
-        <button class="btn btn-primary btn-sm" type="button" @click="startCreate">
+        <button data-skill-import class="btn btn-ghost btn-sm" type="button" :disabled="saveBusy" @click="importSkill">导入 MD / ZIP</button>
+        <button class="btn btn-primary btn-sm" type="button" :disabled="saveBusy" @click="startCreate">
           <AppIcon name="plus" :size="15" /><span>新建技能</span>
         </button>
       </div>
@@ -371,6 +409,8 @@ async function readKnowledge() {
       </label>
       <p v-if="skillError" class="code-block err">{{ skillError }}</p>
       <div class="actions">
+        <button data-skill-toggle class="btn btn-ghost" type="button" :disabled="saveBusy" @click="toggleEnabled">{{ current.enabled ? '禁用技能' : '启用技能' }}</button>
+        <button data-skill-export class="btn btn-ghost" type="button" :disabled="saveBusy || dirty" @click="exportSkill">导出 ZIP</button>
         <button
           v-if="!current.builtIn"
           class="btn btn-primary"

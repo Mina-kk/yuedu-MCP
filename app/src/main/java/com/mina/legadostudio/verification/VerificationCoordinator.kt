@@ -42,6 +42,14 @@ class VerificationCoordinator internal constructor(
     // Pollers take snapshots under the lock but never hold it across their delay/await loops.
     private val stateLock = Mutex()
 
+    private val browserGenerations = mutableMapOf<String, Any>()
+
+    suspend fun beginBrowserGeneration(id: String, expectedUrl: String): Any? = stateLock.withLock {
+        val row = dao.verificationSession(id) ?: return@withLock null
+        if (row.status != "WAITING" || row.kind != "webview" || row.jobId == "manual" || row.url != expectedUrl) return@withLock null
+        Any().also { browserGenerations[id] = it }
+    }
+
     fun observe() = dao.observeVerificationSessions()
 
     suspend fun create(
@@ -60,7 +68,7 @@ class VerificationCoordinator internal constructor(
         dao.waitingVerification(jobId, domain)?.let { old ->
             val refreshed = if (old.url == url && old.purpose == purpose && old.kind == kind) old
                 else old.copy(url = url, purpose = purpose, kind = kind, imageData = imageData, updatedAt = now)
-            if (refreshed != old) dao.saveVerificationSession(refreshed)
+            if (refreshed != old) { browserGenerations.remove(old.id); dao.saveVerificationSession(refreshed) }
             return@withLock refreshed
         }
         val value = VerificationSessionEntity(java.util.UUID.randomUUID().toString(), jobId, domain, url, purpose, "WAITING", "", now, now, kind, "", imageData)
@@ -128,6 +136,27 @@ class VerificationCoordinator internal constructor(
         completed
     }
 
+    /** Candidate only: persistence and generation are checked within the same mutation mutex. */
+    suspend fun completeAutomatically(
+        id: String, expectedUrl: String, generation: Any, finalUrl: String,
+        stillCurrent: suspend () -> Boolean,
+    ): VerificationSessionEntity? = stateLock.withLock {
+        val old = dao.verificationSession(id) ?: return@withLock null
+        if (old.status != "WAITING" || old.jobId == "manual" || old.kind != "webview" ||
+            old.url != expectedUrl || browserGenerations[id] !== generation || !stillCurrent()) return@withLock null
+        VerificationRequestPolicy.requireUrl(old.url)
+        VerificationRequestPolicy.requireUrl(finalUrl)
+        cookies.captureFromWebView(finalUrl)
+        // Cookie capture may suspend. A host close/navigation must still invalidate this candidate.
+        if (!stillCurrent()) return@withLock null
+        val completed = old.copy(status = "COMPLETED", finalUrl = finalUrl, updatedAt = System.currentTimeMillis())
+        dao.saveVerificationSession(completed)
+        browserGenerations.remove(id)
+        webState.clear(id)
+        dismissNotification(id)
+        completed
+    }
+
     /** Explicit user repair only; never infer a missing site or reuse an old completion. */
     suspend fun repairAddress(id: String, url: String): VerificationSessionEntity = stateLock.withLock {
         VerificationRequestPolicy.requireUrl(url)
@@ -159,7 +188,8 @@ class VerificationCoordinator internal constructor(
         manager.notify(notificationId(session.id), notification)
     }
 
-    suspend fun updateCurrentUrl(id: String, url: String): Unit = stateLock.withLock {
+    suspend fun updateCurrentUrl(id: String, url: String, stillCurrent: () -> Boolean = { true }): Unit = stateLock.withLock {
+        if (!stillCurrent()) return@withLock
         val old = dao.verificationSession(id) ?: return@withLock
         if (old.status != "WAITING") return@withLock
         dao.saveVerificationSession(old.copy(finalUrl = url, updatedAt = System.currentTimeMillis()))
@@ -168,12 +198,14 @@ class VerificationCoordinator internal constructor(
     private fun notificationId(id: String) = verificationNotificationId(id)
 
     suspend fun close(id: String): Unit = stateLock.withLock {
+        browserGenerations.remove(id)
         webState.clear(id)
         dismissNotification(id)
         dao.deleteVerificationSession(id)
     }
 
     suspend fun clear(id: String): Unit = stateLock.withLock {
+        browserGenerations.remove(id)
         val old = dao.verificationSession(id) ?: return@withLock
         cookies.clear(old.url)
         webState.clear(id)

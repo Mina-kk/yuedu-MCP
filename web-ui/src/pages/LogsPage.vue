@@ -2,8 +2,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
+import LogExportPanel from '../components/LogExportPanel.vue'
+import LogActions from '../components/LogActions.vue'
 import { callToolParsed, formatTime, itemsOf, prettyJson, redactForDisplay } from '../lib/tools.js'
-import { exportText } from '../lib/files.js'
+
 import { localDateKey, shiftLocalDate } from '../lib/log-dates.js'
 
 // 日志页：真实工具分页读取 + 详情 + 导出。
@@ -14,6 +16,7 @@ import { localDateKey, shiftLocalDate } from '../lib/log-dates.js'
 //  diagnostic→ get_diagnostic_snapshots() → get_diagnostic_snapshot(id)
 // 空结果如实显示空状态，绝不填假日志。
 const props = defineProps({ store: { type: Object, required: true } })
+const emit = defineEmits(['open-capture-browser'])
 const s = props.store.state
 
 const TABS = [
@@ -36,6 +39,7 @@ const query = ref('')
 const level = ref('')
 const category = ref('')
 const date = ref(localDateKey())
+const operationDateEnabled = ref(false)
 const includeCapture = ref(false)
 const selected = ref([])
 const pendingDelete = ref(null)
@@ -45,7 +49,7 @@ let deleteOpener = null
 let restoreDeleteBackground = null
 const deleteMessage = ref('')
 const localDelete = computed(() => s.bridgeKind === 'android')
-const locked = computed(() => loading.value || deleting.value || !!pendingDelete.value)
+const locked = computed(() => loading.value || deleting.value || !!pendingDelete.value || exportOpen.value)
 const deleteKind = computed(() => tab.value === 'diagnostic' ? 'snapshot' : tab.value)
 
 function isCaptureHttp(item) {
@@ -123,6 +127,14 @@ async function confirmDelete() {
   selected.value = [...request.ids]
   deleteMessage.value = ''
   try {
+    if (request.day) {
+      const result = await props.store.bridge.call('logs.deleteDay', { kind: request.kind, date: request.date, confirmed: true })
+      if (result?.kind !== request.kind || result?.date !== request.date || !Number.isInteger(result.deleted) || !Number.isInteger(result.remaining)) throw new Error('整日删除未确认')
+      deleteMessage.value = `已删除 ${result.deleted} 条；该日剩余 ${result.remaining} 条（不含抓包）`
+      selected.value = []
+      await load(true, true)
+      return
+    }
     const result = await props.store.bridge.call('logs.delete', request)
     if (result?.kind !== request.kind || !Array.isArray(result.deletedIds) || !Array.isArray(result.missingIds) || !Array.isArray(result.failed)) throw new Error('删除结果无效，未确认删除')
     const failed = new Set(result.failed.map(entry => entry.id))
@@ -146,11 +158,30 @@ async function confirmDelete() {
 
 function changeDate(action) {
   if (locked.value) return
+  if (tab.value === 'operation') operationDateEnabled.value = true
   date.value = action === 'all' ? '' : action === 'today' ? localDateKey()
     : shiftLocalDate(date.value || localDateKey(), action)
   load(true)
 }
 
+const captureRows = ref([])
+async function askDeleteDay() {
+  if (locked.value || !date.value || !localDelete.value) return
+  loading.value = true
+  deleteMessage.value = ''
+  try {
+    const result = await props.store.bridge.call('logs.dayCount', { kind: tab.value, date: date.value })
+    if (result?.kind !== tab.value || result?.date !== date.value || !Number.isInteger(result.count)) throw new Error('整日计数无效')
+    deleteOpener = document.activeElement
+    pendingDelete.value = { kind: tab.value, date: date.value, day: true, count: result.count, ids: [] }
+  } catch (e) { deleteMessage.value = e.message }
+  finally { loading.value = false }
+}
+const captureTotal = ref(0)
+const detailItem = ref(null)
+const transaction = ref(null)
+const captureLookup = ref('')
+const exportOpen = ref(false)
 const detail = ref(null)
 const detailTitle = ref('')
 const detailBusy = ref(false)
@@ -165,10 +196,14 @@ function scrollHost() {
 }
 
 function handleBack() {
+  if (exportOpen.value) { exportOpen.value = false; return true }
+  if (transaction.value) { transaction.value = null; detailRequest++; detailBusy.value = false; return true }
   if (deleting.value) return true
   if (pendingDelete.value) { pendingDelete.value = null; return true }
   if (!detailOpen.value) return false
   detailOpen.value = false
+  detail.value = null
+  detailItem.value = null
   detailRequest++
   detailBusy.value = false
   nextTick(() => { const host = scrollHost(); if (host) host.scrollTop = listScroll })
@@ -177,7 +212,7 @@ function handleBack() {
 defineExpose({ handleBack })
 
 const currentTab = computed(() => TABS.find((t) => t.key === tab.value) || TABS[0])
-const supportsPaging = computed(() => ['http', 'capture'].includes(tab.value))
+const supportsPaging = computed(() => ['http', 'capture'].includes(tab.value) || (tab.value === 'operation' && operationDateEnabled.value))
 
 onMounted(() => load())
 
@@ -186,6 +221,7 @@ function params() {
   if (supportsPaging.value) base.offset = offset.value
   if (tab.value === 'operation') {
     if (query.value.trim()) base.query = query.value.trim()
+    if (operationDateEnabled.value && date.value) base.date = date.value
     if (level.value) base.level = level.value
     if (category.value.trim()) base.category = category.value.trim()
   }
@@ -209,7 +245,9 @@ async function load(reset = true, afterDelete = false) {
   loading.value = true
   listError.value = ''
   try {
-    const parsed = await callToolParsed(props.store, currentTab.value.tool, params())
+    const parsed = tab.value === 'operation' && operationDateEnabled.value
+      ? { data: await props.store.bridge.call('logs.list', { kind: 'operation', ...params() }) }
+      : await callToolParsed(props.store, currentTab.value.tool, params())
     if (parsed.threw) throw new Error(parsed.threw)
     if (parsed.isError) throw new Error(parsed.text || `${currentTab.value.tool} 返回错误`)
     const fresh = itemsOf(parsed)
@@ -242,6 +280,7 @@ function switchTab(key) {
 }
 
 function nextPage() {
+  // List pagination is independent from capture detail pagination.
   if (locked.value) return
   offset.value += PAGE
   load(false)
@@ -255,6 +294,10 @@ function prevPage() {
 
 async function openDetail(item) {
   if (locked.value) return
+  detailItem.value = item
+  captureRows.value = []
+  captureTotal.value = 0
+  transaction.value = null
   const request = ++detailRequest
   listScroll = scrollHost()?.scrollTop || 0
   detailOpen.value = true
@@ -291,6 +334,10 @@ async function openDetail(item) {
     if (request !== detailRequest) return
     if (parsed.threw) throw new Error(parsed.threw)
     if (parsed.isError) throw new Error(parsed.text || `${tool} 返回错误`)
+    if (tab.value === 'capture') {
+      captureRows.value = parsed.data?.items || []
+      captureTotal.value = parsed.data?.total || 0
+    }
     detail.value = parsed.data ? prettyJson(redactForDisplay(parsed.data)) : parsed.text
   } catch (error) {
     if (request !== detailRequest) return
@@ -301,16 +348,38 @@ async function openDetail(item) {
 }
 
 async function exportCurrent() {
-  const text = detail.value || prettyJson(items.value)
+  exportOpen.value = true
+  nextTick(() => { const host = scrollHost(); if (host) host.scrollTop = 0 })
+}
+
+async function moreCapture() {
+  if (detailBusy.value) return
+  const request = ++detailRequest
+  detailBusy.value = true
+  detailError.value = ''
   try {
-    const res = await exportText(props.store, {
-      name: `logs-${tab.value}-${Date.now()}.json`,
-      text
-    })
-    if (res && res.saved) props.store.toast('已导出')
-  } catch (error) {
-    props.store.toast((error && error.message) || '导出失败', 'err')
-  }
+    const parsed = await callToolParsed(props.store, 'get_capture', { contextId: detailItem.value.contextId, limit: 50, offset: captureRows.value.length })
+    if (request !== detailRequest) return
+    if (parsed.threw || parsed.isError) throw new Error(parsed.threw || parsed.text)
+    const rows = parsed.data?.items
+    if (!Array.isArray(rows) || (!rows.length && captureRows.value.length < parsed.data.total)) throw new Error('分页返回不完整，请刷新会话')
+    captureRows.value.push(...rows)
+    captureTotal.value = parsed.data.total
+  } catch (e) { if (request === detailRequest) detailError.value = e.message }
+  finally { if (request === detailRequest) detailBusy.value = false }
+}
+async function openTransaction(row) {
+  const request = ++detailRequest
+  transaction.value = { id: row.id, text: '' }
+  detailBusy.value = true
+  detailError.value = ''
+  try {
+    const parsed = await callToolParsed(props.store, 'get_http_log', { id: row.id })
+    if (request !== detailRequest) return
+    if (parsed.threw || parsed.isError) throw new Error(parsed.threw || parsed.text)
+    transaction.value.text = parsed.data ? prettyJson(redactForDisplay(parsed.data)) : parsed.text
+  } catch (e) { if (request === detailRequest) detailError.value = e.message }
+  finally { if (request === detailRequest) detailBusy.value = false }
 }
 
 function itemTitle(item) {
@@ -332,7 +401,14 @@ function itemSub(item) {
 
 <template>
   <section ref="pageRoot" class="page">
+    <LogExportPanel v-if="exportOpen" :store="store" :kind="transaction ? 'http' : tab" :ids="selected" :detail-id="detailOpen ? String(transaction?.id || detailItem?.contextId || detailItem?.id || detailItem?.name || '') : ''" :date="date" @close="exportOpen = false" />
     <div v-show="!detailOpen" class="section">
+      <LogActions :store="store" :disabled="locked" @open="(kind, item) => { tab = kind; selected = []; items = []; total = null; offset = 0; hasMore = false; openDetail(item) }" />
+      <form v-if="tab === 'capture'" class="actions" @submit.prevent="openDetail({ contextId: captureLookup })">
+        <button type="button" :disabled="locked || s.bridgeKind !== 'android' || s.bootstrap?.capabilities?.interactiveCapture !== true" @click="emit('open-capture-browser')">浏览器抓包</button>
+        <input v-model="captureLookup" class="input" aria-label="抓包会话 ID" placeholder="cap:完整会话 ID" :disabled="locked" pattern="cap:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" required />
+        <button :disabled="locked">按 ID 查找</button>
+      </form>
       <div class="section-head">
         <h3 class="section-title">日志</h3>
         <span class="section-sub">{{ total === null ? items.length : `${items.length} / ${total}` }}</span>
@@ -364,6 +440,7 @@ function itemSub(item) {
         />
       </div>
       <div v-if="tab === 'operation'" class="filter-row">
+        <!-- Operation filters -->
         <div class="segmented wrap" role="group" aria-label="级别">
           <button v-for="option in [{ value: '', label: '全部级别' }, { value: 'I', label: '信息' }, { value: 'W', label: '警告' }, { value: 'E', label: '错误' }]"
             :key="option.value" :disabled="locked" type="button" class="seg" :class="{ on: level === option.value }" :aria-pressed="level === option.value"
@@ -371,7 +448,8 @@ function itemSub(item) {
         </div>
         <input v-model="category" :disabled="locked" class="input" placeholder="category（如 tool/mcp）" aria-label="分类" @keyup.enter="load(true)" />
       </div>
-      <div v-if="tab === 'http'" class="filter-row">
+      <div v-if="tab === 'http' || tab === 'operation'" class="filter-row">
+        <button v-if="localDelete" :disabled="locked || !date" @click="askDeleteDay">删除该日全部</button>
         <div class="log-date-filter" role="group" aria-label="日志日期">
           <div class="log-date-actions">
             <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="changeDate(-1)">上一天</button>
@@ -379,12 +457,13 @@ function itemSub(item) {
             <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="changeDate(1)">下一天</button>
           </div>
           <div class="log-date-value" aria-live="polite">
-            <time v-if="date" :datetime="date">{{ date }}</time>
+            <span v-if="tab === 'operation' && !operationDateEnabled">最近记录（未按日期筛选）；日期操作目标：{{ date }}</span>
+            <time v-else-if="date" :datetime="date">{{ date }}</time>
             <span v-else>全部日期</span>
             <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" :aria-pressed="!date" @click="changeDate('all')">全部日期</button>
           </div>
         </div>
-        <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" :class="{ on: includeCapture }" @click="includeCapture = !includeCapture; load(true)">
+        <button v-if="tab === 'http'" class="btn btn-ghost btn-sm" type="button" :disabled="locked" :class="{ on: includeCapture }" @click="includeCapture = !includeCapture; load(true)">
           {{ includeCapture ? '含抓包事务' : '排除抓包事务' }}
         </button>
       </div>
@@ -445,8 +524,8 @@ function itemSub(item) {
         <div class="dialog-wrap">
           <div ref="deletePanel" role="dialog" aria-modal="true" aria-label="确认删除日志" :aria-busy="deleting" tabindex="-1" class="dialog delete-dialog">
             <div class="dialog-ico"><AppIcon name="trash" :size="22" /></div>
-            <h3 class="dialog-title">删除 {{ pendingDelete.ids.length }} 条日志？</h3>
-            <p class="dialog-text">仅删除确认的已加载记录，此操作不可撤销。</p>
+            <h3 class="dialog-title">删除 {{ pendingDelete.day ? pendingDelete.count : pendingDelete.ids.length }} 条日志？</h3>
+            <p class="dialog-text">{{ pendingDelete.day ? `${pendingDelete.date} 整日全部日志，不受分页、查询和选择限制，排除抓包事务；确认时新增的该日记录也会删除。` : '仅删除确认的已加载记录，' }}此操作不可撤销。</p>
             <div class="dialog-actions">
               <button class="btn btn-ghost" type="button" :disabled="deleting" @click="handleBack">取消</button>
               <button class="btn btn-danger" type="button" :disabled="deleting" @click="confirmDelete">{{ deleting ? '正在删除' : '确认删除' }}</button>
@@ -456,18 +535,24 @@ function itemSub(item) {
       </div>
     </Teleport>
     <div v-if="detailOpen" class="section log-detail" data-testid="log-detail">
-      <button class="btn btn-ghost btn-sm" type="button" @click="handleBack">返回日志列表</button>
+      <button class="btn btn-ghost btn-sm" type="button" @click="handleBack">{{ transaction ? '返回会话事务' : '返回日志列表' }}</button>
       <div class="section-head">
         <h3 class="section-title">详情</h3>
         <span class="section-sub">{{ detailTitle }}</span>
       </div>
       <EmptyState v-if="detailBusy" title="正在读取详情" text="真实工具" :busy="true" />
       <p v-if="detailError" class="code-block err">{{ detailError }}</p>
-      <pre v-if="detail" class="code-block tall">{{ detail }}</pre>
+      <template v-if="tab === 'capture' && !transaction">
+        <p>已加载 {{ captureRows.length }} / {{ captureTotal }} 条事务</p>
+        <button v-for="row in captureRows" :key="row.id" class="log-row" :data-transaction-id="row.id" :disabled="detailBusy" @click="openTransaction(row)">#{{ row.id }} {{ row.method }} {{ row.statusCode }} {{ row.url }}</button>
+        <button v-if="captureRows.length < captureTotal" :disabled="detailBusy" @click="moreCapture">加载更多事务</button>
+      </template>
+      <pre v-if="transaction?.text" class="code-block tall">{{ transaction.text }}</pre>
+      <pre v-else-if="detail && (tab !== 'capture' || !captureRows.length)" class="code-block tall">{{ detail }}</pre>
       <EmptyState v-if="!detailBusy && !detailError && !detail" title="详情为空" text="工具未返回正文" />
       <div class="actions log-detail-actions">
         <button class="btn btn-ghost btn-sm" type="button" :disabled="detailBusy || !detail" @click="exportCurrent">导出详情</button>
-        <button class="btn btn-ghost btn-sm" type="button" @click="handleBack">返回日志列表</button>
+        <button class="btn btn-ghost btn-sm" type="button" @click="handleBack">{{ transaction ? '返回会话事务' : '返回日志列表' }}</button>
       </div>
     </div>
   </section>

@@ -146,6 +146,68 @@ async function repairAddress(id, url) {
   }
 }
 
+function askClear(session) {
+  if (locked.value) return
+  let accepted = false
+  props.store.confirmDialog({
+    kind: 'clear', title: '清除该站点 Cookie？', name: session.domain || session.id,
+    message: '会清除该站点登录状态，保留验证记录并重置为待验证，不会删除记录。',
+    confirmLabel: '清 Cookie', danger: true,
+    onAccept: () => {
+      if (accepted || locked.value) return
+      accepted = true
+      return clearCookies(session)
+    }
+  })
+}
+
+async function clearCookies(session) {
+  busyId.value = session.id
+  actionError.value = ''
+  ++loadSequence // Invalidate snapshots started before this mutation.
+  try {
+    if (browserOpen.value && s.verificationBrowser.sessionId === session.id) {
+      const close = await props.store.bridge.call('verification.browser.close', {})
+      if (close?.closed !== true) throw new Error('关闭验证页未获确认')
+    }
+    const receipt = await props.store.bridge.call('verification.clear', { id: session.id })
+    const result = await props.store.bridge.call('verification.list', {})
+    const matches = result?.sessions?.filter(x => x.id === session.id) || []
+    if (receipt?.cleared !== true || matches.length !== 1 || matches[0].status !== 'WAITING' ||
+        matches[0].url !== session.url || matches[0].finalUrl !== '') throw new Error('回读未确认同一记录已重置')
+    ++loadSequence
+    loading.value = false
+    sessions.value = result.sessions
+    delete answers.value[session.id]
+    props.store.toast('Cookie 已清除，记录已保留并重置为待验证')
+  } catch (error) {
+    actionError.value = `无法确认清 Cookie 结果：${error?.message || '操作失败'}`
+  } finally { busyId.value = '' }
+}
+
+function askExternal(session) {
+  if (locked.value || !canOpen(session)) return
+  let accepted = false
+  props.store.confirmDialog({
+    kind: 'external', title: '使用外部浏览器备用？', name: session.domain || session.id,
+    message: '外部浏览器与应用内验证不共享 Cookie，外部完成不会自动完成本会话。建议返回应用内继续验证。',
+    confirmLabel: '打开外部浏览器', danger: false,
+    onAccept: async () => {
+      if (accepted || locked.value) return
+      accepted = true
+      const result = await act('verification.external', { id: session.id }, '外部浏览器')
+      if (result?.launched === true && result.cookiesShared === false) props.store.toast('已请求外部浏览器打开；本会话未标记完成')
+      else if (result) actionError.value = '外部浏览器打开回执无效'
+    }
+  })
+}
+
+async function refreshBrowser(session) {
+  const result = await act('verification.browser.refresh', { id: session.id }, '刷新验证页')
+  if (result?.refreshed === true && result.sessionId === session.id) props.store.toast('已刷新当前验证页')
+  else if (result) actionError.value = '刷新验证页回执无效'
+}
+
 async function open(session) {
   if (!canOpen(session)) return
   const result = await act('verification.open', { id: session.id }, '打开验证页')
@@ -352,6 +414,9 @@ const statusChip = (status) => {
             <button v-if="String(session.status).toUpperCase() !== 'COMPLETED'" class="btn btn-primary btn-sm" type="button" :disabled="locked || !canComplete(session)" @click="complete(session)">
               <AppIcon name="check" :size="15" /><span>标记完成</span>
             </button>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="askClear(session)">清 Cookie</button>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked || !canOpen(session)" @click="askExternal(session)">外部浏览器（备用）</button>
+            <button v-if="browserOpen && activeSession?.id === session.id" class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="refreshBrowser(session)">刷新验证页</button>
             <button class="btn btn-ghost btn-sm danger" type="button" :disabled="locked" @click="askDelete(session)">
               <AppIcon name="trash" :size="15" /><span>删除记录</span>
             </button>

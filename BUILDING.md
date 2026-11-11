@@ -1,5 +1,24 @@
 # 构建与开发
 
+## 2.0.6 / versionCode 207 交付契约
+
+Android `app/build.gradle.kts`、`web-ui/package.json`、lock 根版本及 `tests/test_web_build_contract.py` 同步为应用版本 2.0.6；Rust 核心有独立版本，不作为 APK 版本依据。恢复范围见 README；本版接受**验证由用户手动完成、不提供自动完成**的例外，不把安全降级写成自动功能恢复。
+
+轻量准备检查（不运行 Gradle、不启动模拟器、不生成 APK）：
+
+```bash
+(cd web-ui && npm test -- --maxWorkers=1 --minWorkers=1 && npm run build)
+python -m unittest discover -s tests -p 'test_*.py'
+python -m unittest discover -s scripts -p 'test_*.py'
+python legacy-ui/check_isolation.py
+```
+
+这些命令使用已准备的依赖和 WASM；全新环境仍须执行下文 `scripts/build-web.sh`。Vue 生产构建不等于 Rust/WASM 重建或 Android 打包。服务器执行时对整个进程树设置 CPU/内存硬限额，检查退出状态和本轮完整日志。
+
+正式构建前须审查并冻结源码：工作区无未提交的交付源码，记录完整 40 位 HEAD，并显式传入 `-PbuildRevision`（systemd 隔离环境不得依赖父 shell 自动继承）。只用既有官方签名身份，不生成替代密钥；通过私有凭据加载器注入签名变量，禁止 shell trace、打印密码或提交凭据。私有报告、抓包、设备日志和 QA 产物不加入源码提交，尤其不要对含未审查 `reports/` 的工作区执行 `git add -A`。
+
+本轮准备检查不证明设备通过。正式构建后仍须运行 Release mapping 契约、校验 APK 版本/完整 buildRevision/签名/资源指纹，并在最终 APK 上完成混淆桥回执、旧官方包覆盖升级数据保留、手动验证、剪贴板、SAF、权限、抓包和悬浮行为验收。没有这组证据不得标注正式设备验收通过或发布。
+
 ## 环境要求
 
 - JDK 17 或兼容版本

@@ -1,6 +1,5 @@
 package com.mina.legadostudio.verification
 
-import android.animation.ValueAnimator
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -24,10 +23,10 @@ import com.mina.legadostudio.MainActivity
  * - 页面是 [VerificationOverlayPage] 生成的纯 HTML/CSS 字符串（无 JS、无外链、无 JS interface），
  *   经 `loadDataWithBaseURL(about:blank, …)` 离线加载，WebView 关闭 JS/文件/content/网络访问，
  *   并拦截一切非文档自身导航与子资源请求；
- * - 常态：lime 圆底 + 「M」；验证时：charcoal 圆底 + lime 描边 + 「点击验证 · 域名」气泡；
- * - 可自由拖拽；松手时若靠近屏幕左右边缘则吸附并半隐（一半伸出屏外），
+ * - 常态蓝底白 M；验证时橙底白 M 与域名提示；
+ * - 可自由拖拽；近边停靠后延时裁切半球（窗口始终留在屏内），
  *   验证气泡可见时吸附保持全显；
- * - 点击跳转 MCP 主页（有验证时直达验证中心）。
+ * - 半隐首次点击仅展开，再次点击进入 MCP/验证中心。
  *
  * 拖动/点击由宿主 `setOnTouchListener` 处理——这是系统窗口交互，不是业务控件；
  * 页面里没有任何 `<button>/<form>/<input>`。
@@ -52,7 +51,9 @@ object VerificationOverlayManager {
             hideAll()
             return
         }
+        val generation = lifecycleGeneration
         main.post {
+            if (generation != lifecycleGeneration || !serviceActive || !OverlayPrefs.isEnabled(appContext) || !Settings.canDrawOverlays(appContext)) return@post
             if (ballView == null) createBall(appContext)
             val sid = currentSessionId
             val dom = pendingDomain
@@ -66,9 +67,11 @@ object VerificationOverlayManager {
         currentSessionId = sessionId
         pendingDomain = domain
         pendingPurpose = purpose
+        val generation = lifecycleGeneration
         main.post {
+            if (generation != lifecycleGeneration || currentSessionId != sessionId) return@post
             val appContext = context.applicationContext
-            if (!OverlayPrefs.isEnabled(appContext) || !Settings.canDrawOverlays(appContext)) return@post
+            if (!serviceActive || !OverlayPrefs.isEnabled(appContext) || !Settings.canDrawOverlays(appContext)) return@post
             if (ballView == null) createBall(appContext)
             applyAlertStyle(domain, purpose)
         }
@@ -81,12 +84,13 @@ object VerificationOverlayManager {
         currentSessionId = null
         pendingDomain = null
         pendingPurpose = null
-        main.post { applyNormalStyle() }
+        main.post { if (currentSessionId == null) applyNormalStyle() }
     }
 
     /** 彻底移除悬浮球（用户关开关 / 服务销毁时调用）。 */
     @Synchronized
     fun hideAll() {
+        lifecycleGeneration++
         main.post {
             currentSessionId = null
             pendingDomain = null
@@ -98,8 +102,14 @@ object VerificationOverlayManager {
 
     /** 主线程回收：先解绑 client/listener 再 destroy，避免回调打回已销毁的 WebView。 */
     private fun teardownView() {
+        cancelMotion()
+        touching = false
+        normalAnchor = null
+        displayManager?.unregisterDisplayListener(displayListener)
+        displayManager = null
         val view = ballView ?: return
         ballView = null
+        lastPage = null
         view.setOnTouchListener(null)
         view.webViewClient = WebViewClient()
         runCatching { windowManager?.removeView(view) }
@@ -128,16 +138,23 @@ object VerificationOverlayManager {
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
+            gravity = Gravity.TOP or Gravity.LEFT
             x = (d.widthPixels - ballPx).coerceAtLeast(0)
             y = d.heightPixels / 3
         }
 
         val view = runCatching { buildBallView(context, params) }.getOrNull() ?: return
         ballView = view
-        runCatching { wm.addView(view, params) }.onFailure {
-            ballView = null
-            runCatching { view.destroy() }
+        runCatching {
+            wm.addView(view, params)
+            geometry.y = d.heightPixels / 3
+            displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as? android.hardware.display.DisplayManager
+            displayManager?.registerDisplayListener(displayListener, main)
+            applyWindowSize(view, false)
+            scheduleCollapse()
+        }.onFailure {
+            com.mina.legadostudio.mcp.StudioLog.add("overlay attach failed", "W", "overlay", it.javaClass.simpleName)
+            teardownView()
         }
     }
 
@@ -179,8 +196,7 @@ object VerificationOverlayManager {
         }
         loadPage(view, VerificationOverlayPage.normalPage())
         alertVisible = false
-        applyWindowSize(view, alert = false)
-        attachDragAndClick(context, view, params)
+        attachDragAndClick(context, view)
         return view
     }
 
@@ -209,7 +225,10 @@ object VerificationOverlayManager {
         s.userAgentString = OVERLAY_USER_AGENT
     }
 
+    private var lastPage: String? = null
     private fun loadPage(view: WebView, html: String) {
+        if (lastPage == html) return
+        lastPage = html
         runCatching {
             view.loadDataWithBaseURL(
                 VerificationOverlayPage.baseUrl(),
@@ -221,70 +240,80 @@ object VerificationOverlayManager {
         }
     }
 
-    private fun attachDragAndClick(context: Context, container: WebView, params: WindowManager.LayoutParams) {
-        var startX = 0
-        var startY = 0
-        var startTouchX = 0f
-        var startTouchY = 0f
-        var dragging = false
-
-        container.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    startX = params.x
-                    startY = params.y
-                    startTouchX = event.rawX
-                    startTouchY = event.rawY
-                    dragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - startTouchX).toInt()
-                    val dy = (event.rawY - startTouchY).toInt()
-                    if (!dragging && (Math.abs(dx) > 12 || Math.abs(dy) > 12)) dragging = true
-                    params.x = startX + dx
-                    params.y = startY + dy
-                    runCatching { windowManager?.updateViewLayout(container, params) }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!dragging) onBallClick(context) else snapToEdge(container, params)
-                    true
-                }
-                else -> false
-            }
+    private val geometry = OverlayGeometry()
+    private var touching = false
+    @Volatile private var lifecycleGeneration = 0L
+    @Volatile private var serviceActive = false
+    private var displayManager: android.hardware.display.DisplayManager? = null
+    private val displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+        override fun onDisplayAdded(id: Int) = Unit
+        override fun onDisplayRemoved(id: Int) = Unit
+        override fun onDisplayChanged(id: Int) {
+            touching = false
+            cancelMotion()
+            ballView?.let { applyWindowSize(it, alertVisible) }
+            scheduleCollapse()
         }
     }
-
-    /** 松手归位：靠近左右边缘才吸附；吸附后球半隐（验证气泡可见时保持全显贴边），否则停在原地，y 始终钳制在屏内。 */
-    private fun snapToEdge(view: WebView, params: WindowManager.LayoutParams) {
-        val wm = windowManager ?: return
-        val d = view.resources.displayMetrics
-        val screenW = d.widthPixels
-        val screenH = d.heightPixels
-        val ballWidth = (BALL_SIZE_DP * d.density + 0.5f).toInt()
-        val centerX = params.x + view.width / 2
-        val clampedY = params.y.coerceIn(0, (screenH - view.height).coerceAtLeast(0))
-        // 提醒态窗口比球宽（气泡），吸附时按窗口实际宽度贴边，且 x 不为负（否则气泡被裁）。
-        val targetX = when {
-            alertVisible ->
-                if (centerX < screenW / 2) 0 else (screenW - view.width).coerceAtLeast(0)
-            centerX < ballWidth -> -view.width / 2
-            screenW - centerX < ballWidth -> screenW - view.width / 2
-            else -> params.x
+    private val collapse = Runnable {
+        if (!touching && !alertVisible) {
+            geometry.collapse()
+            ballView?.let { applyWindowSize(it, false) }
         }
-        if (targetX == params.x && clampedY == params.y) return
-        val startX = params.x
-        val startY = params.y
-        ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 200L
-            addUpdateListener { animator ->
-                val f = animator.animatedValue as Float
-                params.x = (startX + (targetX - startX) * f).toInt()
-                params.y = (startY + (clampedY - startY) * f).toInt()
-                runCatching { wm.updateViewLayout(view, params) }
+    }
+    private fun cancelMotion() { main.removeCallbacks(collapse) }
+    private fun scheduleCollapse() {
+        cancelMotion()
+        if (!touching && !alertVisible) main.postDelayed(collapse, 3000L)
+    }
+    fun setServiceActive(context: Context, active: Boolean) {
+        serviceActive = active
+        if (active) refresh(context) else hideAll()
+    }
+    private fun attachDragAndClick(context: Context, container: WebView) {
+        var startX = 0
+        var startY = 0
+        var downX = 0f
+        var downY = 0f
+        var dragging = false
+        var revealed = false
+        var pointer = -1
+        val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+        container.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    cancelMotion(); touching = true
+                    pointer = event.getPointerId(0)
+                    revealed = geometry.hidden
+                    geometry.expand()
+                    applyWindowSize(container, alertVisible)
+                    startX = geometry.x; startY = geometry.y
+                    downX = event.rawX; downY = event.rawY; dragging = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!touching || pointer < 0 || event.getPointerId(0) != pointer) return@setOnTouchListener true
+                    val dx = (event.rawX - downX).toInt()
+                    val dy = (event.rawY - downY).toInt()
+                    if (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop) dragging = true
+                    if (dragging) {
+                        geometry.move(startX + dx, startY + dy)
+                        applyWindowSize(container, alertVisible)
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!touching || pointer < 0) return@setOnTouchListener true
+                    touching = false; pointer = -1
+                    if (dragging) geometry.release() else if (!revealed) onBallClick(context)
+                    applyWindowSize(container, alertVisible)
+                    scheduleCollapse()
+                }
+                MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_POINTER_UP -> {
+                    touching = false; pointer = -1; dragging = false
+                    cancelMotion(); geometry.release()
+                    applyWindowSize(container, alertVisible); scheduleCollapse()
+                }
             }
-            start()
+            true
         }
     }
 
@@ -297,8 +326,13 @@ object VerificationOverlayManager {
         runCatching { context.startActivity(intent) }
     }
 
+    private var normalAnchor: Pair<Int, Int>? = null
     private fun applyAlertStyle(domain: String, purpose: String) {
         val view = ballView ?: return
+        if (!alertVisible) normalAnchor = geometry.x to geometry.y
+        cancelMotion()
+        touching = false
+        geometry.expand()
         alertVisible = true
         // 先改窗口尺寸再换页：页面按新视口排版，气泡不会被 52dp 方形裁掉。
         applyWindowSize(view, alert = true)
@@ -308,8 +342,10 @@ object VerificationOverlayManager {
     private fun applyNormalStyle() {
         val view = ballView ?: return
         alertVisible = false
+        normalAnchor?.let { (x, y) -> geometry.x = x; geometry.y = y }
+        normalAnchor = null
         applyWindowSize(view, alert = false)
-        loadPage(view, VerificationOverlayPage.normalPage())
+        scheduleCollapse()
     }
 
     /**
@@ -323,28 +359,28 @@ object VerificationOverlayManager {
         val wm = windowManager ?: return
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
         val d = view.resources.displayMetrics
-        val ballPx = (BALL_SIZE_DP * d.density + 0.5f).toInt()
-        val width: Int
-        val height: Int
-        if (alert) {
-            width = minOf((ALERT_MAX_WIDTH_DP * d.density + 0.5f).toInt(), d.widthPixels).coerceAtLeast(ballPx)
-            height = minOf((ALERT_MAX_HEIGHT_DP * d.density + 0.5f).toInt(), d.heightPixels).coerceAtLeast(ballPx)
-        } else {
-            width = ballPx
-            height = ballPx
+        val bounds = if (Build.VERSION.SDK_INT >= 30) wm.maximumWindowMetrics.bounds
+            else android.graphics.Rect(0, 0, d.widthPixels, d.heightPixels)
+        val insets = if (Build.VERSION.SDK_INT >= 30) {
+            val i = wm.maximumWindowMetrics.windowInsets.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+            android.graphics.Rect(i.left, i.top, i.right, i.bottom)
+        } else android.graphics.Rect(0, (24 * d.density).toInt(), 0, (48 * d.density).toInt())
+        val w = (bounds.width() - insets.left - insets.right).coerceAtLeast(1)
+        val h = (bounds.height() - insets.top - insets.bottom).coerceAtLeast(1)
+        val width = ((if (alert) ALERT_MAX_WIDTH_DP else BALL_SIZE_DP) * d.density + .5f).toInt().coerceAtMost(w)
+        val height = ((if (alert) ALERT_MAX_HEIGHT_DP else BALL_SIZE_DP) * d.density + .5f).toInt().coerceAtMost(h)
+        geometry.resize(w, h, width, height)
+        params.width = geometry.width; params.height = height
+        params.x = insets.left + geometry.x; params.y = insets.top + geometry.y
+        runCatching { wm.updateViewLayout(view, params) }.onFailure {
+            com.mina.legadostudio.mcp.StudioLog.add("overlay layout failed", "W", "overlay", it.javaClass.simpleName)
+            teardownView()
         }
-        val changed = params.width != width || params.height != height
-        params.width = width
-        params.height = height
-        val maxX = (d.widthPixels - width).coerceAtLeast(0)
-        val maxY = (d.heightPixels - height).coerceAtLeast(0)
-        params.x = params.x.coerceIn(0, maxX)
-        params.y = params.y.coerceIn(0, maxY)
-        if (changed) runCatching { wm.updateViewLayout(view, params) }
+        if (!alert) loadPage(view, VerificationOverlayPage.normalPage(if (geometry.hidden) geometry.side else 0))
     }
 
     /** 圆球直径（dp）：48dp 球体 + 2dp 描边余量，页面按 48px 绘制。 */
-    private const val BALL_SIZE_DP = 52f
+    private const val BALL_SIZE_DP = 48f
 
     /** 提醒态窗口上限：气泡宽 240dp、高 110dp（球 52dp + 气泡两行）。 */
     private const val ALERT_MAX_WIDTH_DP = 240f

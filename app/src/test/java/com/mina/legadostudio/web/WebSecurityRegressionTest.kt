@@ -9,6 +9,20 @@ class WebSecurityRegressionTest {
     private fun source(relative: String): String = listOf(File("src/main/java/$relative"), File("app/src/main/java/$relative"))
         .first { it.isFile }.readText()
 
+    /** Balanced scope check: ordering alone let missing markers (-1) pass. */
+    private fun blockAfter(text: String, marker: String): String {
+        val markerAt = text.indexOf(marker)
+        require(markerAt >= 0) { "Missing scope: $marker" }
+        val start = text.indexOf('{', markerAt)
+        require(start >= 0)
+        var depth = 0
+        for (index in start until text.length) {
+            if (text[index] == '{') depth++
+            if (text[index] == '}' && --depth == 0) return text.substring(start + 1, index)
+        }
+        error("Unclosed scope: $marker")
+    }
+
     @Test fun verificationResourcesRejectPrivateTargetsAndCredentials() {
         for (url in listOf("http://127.0.0.1:58823/mcp", "http://10.0.0.1/", "http://192.168.1.5/", "http://localhost/", "http://[::1]/", "http://[::ffff:192.168.1.5]/", "http://user:pw@example.com/")) {
             assertEquals(url, WebBridgePolicy.LocalResource.Deny, WebBridgePolicy.verificationResourceDecision(url))
@@ -49,17 +63,35 @@ class WebSecurityRegressionTest {
     @Test fun bridgeUsesAtomicPatchAndReadbackInsideSharedSaveLock() {
         val text = source("com/mina/legadostudio/web/StudioWebBridge.kt")
         val save = text.substringAfter("private suspend fun settingsSave").substringBefore("private fun applyAppearanceToHost")
-        assertTrue(save.contains("mcp.updateConnection(draft.port, draft.tokenRequired)"))
+        assertTrue(save.contains("mcp.updateConnection(draft.port, draft.tokenRequired, draft.mcpToken)"))
+        assertTrue(save.contains("if (draft.mcpToken != null) failed += \"mcpToken\""))
+        assertTrue(save.contains("addProperty(\"mcpTokenApplied\", true)"))
+        val transaction = blockAfter(save, "return settingsLock.withLock")
+        assertTrue(transaction.contains("mcp.updateConnection(draft.port, draft.tokenRequired, draft.mcpToken)"))
+        assertTrue(transaction.contains("bootstrap()"))
+        assertTrue(transaction.contains("return@withLock result"))
+        assertTrue(blockAfter(text, "companion object").contains("private val settingsLock = Mutex()"))
         assertFalse(save.contains("tokenRequired = true"))
         assertTrue(save.contains("if (draft.tokenRequired != null) failed += \"tokenRequired\""))
-        assertTrue("readback belongs to save transaction", save.indexOf("val result = bootstrap()") < save.lastIndexOf("return@withLock result"))
+        val readback = transaction.indexOf("bootstrap()")
+        assertTrue("readback belongs to save transaction", readback >= 0 && readback < transaction.lastIndexOf("return@withLock result"))
         assertFalse("save lock must cover all bridge instances", text.contains("private val settingsLock = Mutex()\n\n    /** 本地工具"))
     }
 
     @Test fun safReservesOneOperationAcrossBothPickers() {
         val text = source("com/mina/legadostudio/web/SafLauncher.kt")
         assertTrue("export and import must share atomic gate", text.contains("private val operations = SingleOperationGate()"))
-        assertEquals(2, Regex("operations\\.reserve\\(").findAll(text).count())
+        for (entry in listOf("export(", "exportFile(", "import(")) {
+            val body = blockAfter(text, "suspend fun $entry")
+            val reservation = body.indexOf("if (!operations.reserve(pending)) throw Busy()")
+            assertTrue("$entry reserves before launching", reservation >= 0 && reservation < body.indexOf("launcher.launch("))
+            assertTrue("$entry keeps ownership until picker return and IO completion",
+                blockAfter(body, "finally").contains("if (pending.pickerReturned) operations.finish(pending)"))
+            assertTrue("$entry cancels its deferred on exit", blockAfter(body, "finally").contains("pending.deferred.cancel()"))
+        }
+        val file = blockAfter(text, "suspend fun exportFile(")
+        assertTrue(file.indexOf("actual.digest()") < file.indexOf("finally"))
+        assertTrue(blockAfter(text, "fun release()").contains("operations.close()"))
     }
 
     @Test fun cookieToolOutputUsesWebOnlySecretBoundary() {

@@ -230,6 +230,7 @@ internal fun StudioMcpServer.registerLogTools(server: Server) {
                 "error" to summarizeHttpError(s.error),
                 "failurePhase" to failurePhaseOf(s.error, s.statusCode),
                 "suspectedRateLimit" to (if (isResetError(s.error) && hostOf(s.finalUrl.ifBlank { s.url }) in resetHosts) true else null),
+                "createdAt" to s.createdAt,
                 "anchor" to (d.anchor ?: com.mina.legadostudio.domain.HttpLogAttributor.UNATTRIBUTED_KEY),
                 "attribution" to d.kind.name, "confidence" to d.confidence, "evidence" to d.evidence,
                 "sourceAnchor" to s.sourceAnchor, "contextId" to s.contextId, "originKind" to s.originKind,

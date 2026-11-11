@@ -13,6 +13,10 @@ class McpConfigDiskFixture(private val root: File) {
     var failCommit = false
     var beforeCommit: (() -> Unit)? = null
     var afterRead: ((String) -> Unit)? = null
+    var tokenReadOverride: (() -> String?)? = null
+    var beforeTokenWrite: (() -> Unit)? = null
+    var afterTokenWrite: (() -> Unit)? = null
+    var beforeEpoch: (() -> Unit)? = null
     var tokenWrites = 0
     var tokenChanges = 0
     var applyCalls = 0
@@ -45,9 +49,9 @@ class McpConfigDiskFixture(private val root: File) {
             }
         } as SharedPreferences
         return McpConfigStore(prefs,
-            { tokenFile.takeIf { it.exists() }?.readText() },
-            { token: String -> tokenWrites++; tokenFile.writeText(token) },
-            { tokenChanges++ })
+            { tokenReadOverride?.invoke() ?: tokenFile.takeIf { it.exists() }?.readText() },
+            { token: String -> beforeTokenWrite?.invoke(); tokenWrites++; tokenFile.writeText(token); afterTokenWrite?.invoke() },
+            { beforeEpoch?.invoke(); tokenChanges++ })
     }
 
     private fun editor(): SharedPreferences.Editor {

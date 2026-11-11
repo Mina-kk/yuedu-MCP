@@ -63,13 +63,54 @@ internal object WebBridgeProtocol {
     const val M_FILE_IMPORT = "file.import"
     const val M_THEME = "app.theme"
     const val M_EXIT = "app.exit"
+    const val M_NOTIFICATION_REQUEST = "notification.request"
+    const val M_NOTIFICATION_SETTINGS = "notification.openSettings"
+    const val M_NOTIFICATION_CHANNEL = "notification.openChannel"
+    const val M_OVERLAY_SETTINGS = "overlay.openSettings"
+    const val M_OVERLAY_SET = "overlay.setEnabled"
+    const val M_BATTERY_SETTINGS = "device.openBatterySettings"
+    const val M_AUTOSTART_SETTINGS = "device.openAutoStartSettings"
+    const val M_READER_CLEAR = "reader.clear"
+
 
     val METHODS: Set<String> = linkedSetOf(
+        "skills.read",
+        "skills.setEnabled",
+        "skills.import",
+        "skills.export",
+        "sources.analyze",
+        "sources.deliver",
+        "sources.delete",
+        "sources.checkStart",
+        "sources.checkStatus",
+        "sources.checkCancel",
+        "logs.list",
+        "logs.dayCount",
+        "logs.deleteDay",
+        "logs.export",
+        "logs.share",
+
+        "verification.external",
+        "verification.browser.refresh",
+        "capture.browser.open",
+        "capture.browser.navigate",
+        "capture.browser.back",
+        "capture.browser.forward",
+        "capture.browser.reload",
+        "capture.browser.state",
+        "capture.browser.transactions",
+        "capture.browser.detail",
+        "capture.browser.finish",
+        "capture.browser.close",
+        "capture.browser.export",
+        "capture.browser.viewport",
+
         M_BOOTSTRAP, M_SERVICE_SET, M_SETTINGS_SAVE, M_CONNECTION_COPY,
         M_TOOLS_LIST, M_TOOLS_CALL, M_LOGS_DELETE,
         M_VERIFICATION_LIST, M_VERIFICATION_OPEN, M_VERIFICATION_REPAIR, M_VERIFICATION_COMPLETE,
         M_VERIFICATION_CLEAR, M_VERIFICATION_CLOSE, M_VERIFICATION_BROWSER_CLOSE,
         M_FILE_EXPORT, M_FILE_IMPORT, M_THEME, M_EXIT,
+        M_NOTIFICATION_REQUEST, M_NOTIFICATION_SETTINGS, M_NOTIFICATION_CHANNEL, M_OVERLAY_SETTINGS, M_OVERLAY_SET, M_BATTERY_SETTINGS, M_AUTOSTART_SETTINGS, M_READER_CLEAR,
     )
 
     /** 宿主 → 前端事件名（同样显式枚举，避免宿主自己造出未约定事件）。 */
@@ -345,7 +386,26 @@ internal object WebBridgeProtocol {
         "url" -> ConnectionKind.URL
         "token" -> ConnectionKind.TOKEN
         "json" -> ConnectionKind.JSON
+        "header-name" -> ConnectionKind.HEADER_NAME
+        "header-value" -> ConnectionKind.HEADER_VALUE
+        "header-line" -> ConnectionKind.HEADER_LINE
         else -> null
+    }
+
+    /** Native sink only; acknowledge after the clipboard write, never serialize its contents. */
+    suspend fun copyConnectionHeader(kind: ConnectionKind, tokenRequired: Boolean, token: String, write: suspend (String) -> Unit): JsonObject {
+        require(tokenRequired) { "令牌校验已关闭，无需请求头" }
+        val (wire, text) = when (kind) {
+            ConnectionKind.HEADER_NAME -> "header-name" to "Authorization"
+            ConnectionKind.HEADER_VALUE -> "header-value" to "Bearer $token"
+            ConnectionKind.HEADER_LINE -> "header-line" to "Authorization: Bearer $token"
+            else -> throw IllegalArgumentException("不是请求头复制类型")
+        }
+        write(text)
+        return JsonObject().apply {
+            addProperty("copied", true)
+            addProperty("kind", wire)
+        }
     }
 
     // --- 参数校验：文件 ---------------------------------------------------
@@ -493,6 +553,7 @@ internal object WebBridgeProtocol {
         val appearanceTheme: String? = null,
         val appearancePalette: String? = null,
         val tokenRequired: Boolean? = null,
+        val mcpToken: String? = null,
     )
 
     sealed interface SettingsParse {
@@ -549,6 +610,11 @@ internal object WebBridgeProtocol {
 
         val port = int("port", MIN_PORT..MAX_PORT)
         val tokenRequired = bool("tokenRequired")
+        val mcpToken = str("mcpToken")?.takeIf { it.isNotEmpty() }?.also {
+            if (!com.mina.legadostudio.mcp.McpConfigStore.isValidReplacementToken(it)) {
+                errors += "mcpToken 必须是 1..4096 字符的有效 Bearer 令牌（不含空白）"
+            }
+        }
         val compact = bool("compact")
         val userAgent = str("userAgent")?.also { ua ->
             if (ua.trim().length !in MIN_UA..MAX_UA) errors += "userAgent 长度必须在 $MIN_UA..$MAX_UA"
@@ -607,6 +673,7 @@ internal object WebBridgeProtocol {
             SettingsDraft(
                 port = port,
                 tokenRequired = tokenRequired,
+                mcpToken = mcpToken,
                 compact = compact,
                 userAgent = userAgent,
                 bookSourceType = bookSourceType,
@@ -646,4 +713,4 @@ internal object WebBridgeProtocol {
 
 internal enum class ServiceAction { START, STOP, RESTART }
 
-internal enum class ConnectionKind { URL, TOKEN, JSON }
+internal enum class ConnectionKind { URL, TOKEN, JSON, HEADER_NAME, HEADER_VALUE, HEADER_LINE }

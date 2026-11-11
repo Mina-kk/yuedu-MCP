@@ -35,6 +35,61 @@ const BOOTSTRAP = {
 }
 
 describe('store', () => {
+  it.each([{ partial: true }, { failed: ['compact'] }])('新令牌已应用但其他字段失败%j仍未知，bootstrap不能确认上次更新', async failure => {
+    const initial = { ...BOOTSTRAP, capabilities: { mcpTokenEditable: true } }
+    const store = createStore({ bridge: fakeBridge({ 'app.bootstrap': () => initial,
+      'settings.save': () => ({ ...initial, ...failure, settingsResult: { mcpTokenApplied: true } }) }) })
+    await store.bootstrap()
+    await expect(store.saveSettings({ mcpToken: 'QA-token' })).rejects.toThrow(/未知/)
+    expect(store.state.bootstrapOk).toBe(false)
+    await store.bootstrap()
+    expect(store.state.bootstrapOk).toBe(true)
+    expect(store.state.toast).toBeNull()
+    expect(store.state.bootstrap.settingsResult).toBeUndefined()
+  })
+  it.each([undefined, false, 'true', true])('新令牌要求专用严格回执 %s', async applied => {
+    const initial = { ...BOOTSTRAP, service: { ...BOOTSTRAP.service, tokenRequired: false }, capabilities: { mcpTokenEditable: true } }
+    const bridge = fakeBridge({ 'app.bootstrap': () => initial, 'settings.save': () => ({ ...initial, settingsResult: { mcpTokenApplied: applied } }) })
+    const store = createStore({ bridge }); await store.bootstrap()
+    const saving = store.saveSettings({ mcpToken: 'QA-new-token' })
+    if (applied === true) {
+      await saving
+      expect(store.state.service.tokenRequired).toBe(false)
+    } else {
+      await expect(saving).rejects.toThrow(/令牌.*未知/)
+      expect(store.state.bootstrapOk).toBe(false)
+    }
+    expect(JSON.stringify(store.state)).not.toContain('QA-new-token')
+  })
+
+  it.each([['web', true, true], ['android', false, true], ['android', true, false]])('新令牌拒绝不支持的宿主%s/%s/%s', async (kind, connected, capability) => {
+    const bridge = fakeBridge({ 'app.bootstrap': () => ({ ...BOOTSTRAP, capabilities: { mcpTokenEditable: capability } }), 'settings.save': () => BOOTSTRAP })
+    bridge.kind = kind; bridge.connected = connected
+    const store = createStore({ bridge }); await store.bootstrap()
+    await expect(store.saveSettings({ mcpToken: 'QA-token' })).rejects.toThrow()
+    expect(bridge.calls.some(([m]) => m === 'settings.save')).toBe(false)
+  })
+
+  it.each([123, false, [], {}, ' ', ' token', 'token ', 'a\nb', '中文', 'a'.repeat(4097)])('新令牌拒绝非法值 %# 且不回显', async value => {
+    const bridge = fakeBridge({ 'app.bootstrap': () => ({ ...BOOTSTRAP, capabilities: { mcpTokenEditable: true } }), 'settings.save': () => BOOTSTRAP })
+    const store = createStore({ bridge }); await store.bootstrap()
+    await expect(store.saveSettings({ mcpToken: value })).rejects.toThrow(/格式/)
+    expect(bridge.calls.some(([m]) => m === 'settings.save')).toBe(false)
+  })
+
+  it('令牌保存进行中禁止复制和重复写入，partial与异常不泄漏输入', async () => {
+    let rejectSave
+    const bridge = fakeBridge({ 'app.bootstrap': () => ({ ...BOOTSTRAP, capabilities: { mcpTokenEditable: true } }), 'settings.save': () => new Promise((_, reject) => { rejectSave = reject }) })
+    const store = createStore({ bridge }); await store.bootstrap()
+    const saving = store.saveSettings({ mcpToken: 'QA-sensitive' })
+    await expect(store.copyConnection('token')).rejects.toThrow(/保存中/)
+    await expect(store.saveSettings({ mcpToken: 'other' })).rejects.toThrow(/保存中/)
+    rejectSave(new Error('QA-sensitive'))
+    await expect(saving).rejects.toThrow(/令牌.*未知/)
+    expect(JSON.stringify(store.state)).not.toContain('QA-sensitive')
+    expect(bridge.calls.some(([m]) => m === 'connection.copy')).toBe(false)
+  })
+
   it.each([true, false])('鉴权从%s部分保存后标未知，重读失败不解锁，完整重读后才能反向切换', async initialRequired => {
     let hostRequired = initialRequired
     let readFails = false

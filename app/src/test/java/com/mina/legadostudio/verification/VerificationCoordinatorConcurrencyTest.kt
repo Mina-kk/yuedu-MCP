@@ -112,6 +112,41 @@ class VerificationCoordinatorConcurrencyTest {
         }
     }
 
+    @Test fun automaticRejectsDeletedReopenedManualAndChangedUrl() = runBlocking {
+        Fixture(row(kind = "webview")).use { f ->
+            val original = f.row!!
+            val generation = f.coordinator.beginBrowserGeneration(ID, original.url)!!
+            assertNull(f.coordinator.completeAutomatically(ID, original.url, generation, FINAL_URL) { false })
+            val next = f.coordinator.beginBrowserGeneration(ID, original.url)!!
+            assertNull(f.coordinator.completeAutomatically(ID, original.url, generation, FINAL_URL) { true })
+            f.row = original.copy(jobId = "manual")
+            assertNull(f.coordinator.completeAutomatically(ID, original.url, next, FINAL_URL) { true })
+            f.row = original.copy(url = NEW_URL)
+            assertNull(f.coordinator.completeAutomatically(ID, original.url, next, FINAL_URL) { true })
+            f.row = original.copy(status = "COMPLETED")
+            assertNull(f.coordinator.completeAutomatically(ID, original.url, next, FINAL_URL) { true })
+            f.row = original
+            f.coordinator.close(ID)
+            assertNull(f.coordinator.completeAutomatically(ID, original.url, next, FINAL_URL) { true })
+            assertNull(f.row)
+        }
+    }
+
+    @Test fun automaticRechecksLiveGenerationAfterBlockedDaoRead() = runBlocking {
+        Fixture(row(kind = "webview")).use { f ->
+            val original = f.row!!
+            val generation = f.coordinator.beginBrowserGeneration(ID, original.url)!!
+            val live = AtomicBoolean(true)
+            val gate = f.pauseNextRead("verificationSession")
+            val completion = async(Dispatchers.IO) {
+                f.coordinator.completeAutomatically(ID, original.url, generation, FINAL_URL) { live.get() }
+            }
+            gate.awaitEntered(); live.set(false); gate.release.countDown()
+            assertNull(completion.await())
+            assertEquals(original, f.row)
+        }
+    }
+
     private class Gate(val method: String) {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)

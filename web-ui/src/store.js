@@ -54,6 +54,7 @@ export function createStore({ bridge: injected, storage } = {}) {
     // 输入法/安全区（宿主 studio:insets 一次性下发）
     insets: { top: 0, bottom: 0, ime: 0 },
     // 验证隔离页（宿主 studio:verification-browser 事件）
+    captureWorkbenchOpen: false,
     verificationBrowser: { open: false, sessionId: '', action: '' }
   })
 
@@ -201,6 +202,7 @@ export function createStore({ bridge: injected, storage } = {}) {
   }
 
   async function copyConnection(kind, lan = false) {
+    if (state.settingsSaving) throw new Error('设置保存中，请稍候再复制')
     const result = await bridgeRef.call('connection.copy', { kind, lan })
     if (result?.copied !== true) throw new Error('复制失败：宿主未确认写入剪贴板')
     toast('已复制到剪贴板')
@@ -227,6 +229,13 @@ export function createStore({ bridge: injected, storage } = {}) {
    */
   async function saveSettings(payload = {}) {
     if (state.settingsSaving) throw new Error('设置保存中，请稍候')
+    const changesSecret = payload.mcpToken != null && payload.mcpToken !== ''
+    if (changesSecret && (typeof payload.mcpToken !== 'string' || payload.mcpToken.length > 4096 ||
+      !/^[A-Za-z0-9._~+/-]+=*$/.test(payload.mcpToken) || /\s/.test(payload.mcpToken))) {
+      throw new Error('新访问令牌格式无效：限 1–4096 位 token68 字符，不允许空白')
+    }
+    if (changesSecret && (bridgeRef.kind !== 'android' || !bridgeRef.connected || !state.bootstrapOk ||
+      state.capabilities.mcpTokenEditable !== true)) throw new Error('当前宿主或状态不支持修改访问令牌')
     const changesToken = payload.tokenRequired != null
     if (changesToken && (bridgeRef.kind !== 'android' || !bridgeRef.connected || !state.bootstrapOk ||
       state.capabilities.tokenRequiredEditable !== true || state.capabilities.tokenRequiredLocked === true)) {
@@ -248,7 +257,10 @@ export function createStore({ bridge: injected, storage } = {}) {
       if (snapshot.partial || (Array.isArray(snapshot.failed) && snapshot.failed.length)) {
         throw new Error(`部分设置未保存：${Array.isArray(snapshot.failed) ? snapshot.failed.join('、') || '未知字段' : '未知字段'}；请重新读取状态`)
       }
-      if (((changesToken || settingsReadbackRequired) && !hasAuthSnapshot(snapshot)) ||
+      if (changesSecret && snapshot.settingsResult?.mcpTokenApplied !== true) {
+        throw new Error('访问令牌更新结果未知')
+      }
+      if (((changesToken || changesSecret || settingsReadbackRequired) && !hasAuthSnapshot(snapshot)) ||
         (changesToken && snapshot.service.tokenRequired !== payload.tokenRequired)) {
         throw new Error('访问令牌校验保存回读不一致或缺失，未确认生效，请重新读取状态')
       }
@@ -261,6 +273,8 @@ export function createStore({ bridge: injected, storage } = {}) {
     } catch (error) {
       // A failed/partial write can still have changed auth on the host. Keep
       // drafts and the last snapshot, but never treat it as current until reread.
+      // Never forward arbitrary host error text from a write-only secret path.
+      if (changesSecret) error = new Error('访问令牌更新结果未知或设置未全部保存；请重新读取状态后重试，或复制当前配置核验')
       bootstrapSeq += 1
       settingsReadbackRequired = true
       state.bootstrapping = false
@@ -308,11 +322,25 @@ export function createStore({ bridge: injected, storage } = {}) {
     state.dialog = null
   }
 
+  async function hostAction(method, params = {}) {
+    if (state.settingsSaving) throw new Error('设置保存中，请稍候')
+    if (bridgeRef.kind !== 'android' || !bridgeRef.connected) throw new Error('需要 Android 宿主')
+    const result = await bridgeRef.call(method, params)
+    if (!await bootstrap()) throw new Error('操作后状态回读失败，请重新读取状态')
+    return result
+  }
+
+  async function exitApp(stopService = false) {
+    if (typeof stopService !== 'boolean') throw new Error('停止服务选项无效')
+    return bridgeRef.call('app.exit', { stopService })
+  }
+
   function requestExit() {
     state.dialog = {
       kind: 'exit',
       title: '退出阅读书源 MCP？',
-      message: '退出后 MCP 服务会随应用停止，已保存的书源和技能不受影响。',
+      message: '默认仅关闭界面，保持 MCP 服务当前状态。系统仍可能限制后台运行；可选择同时停止服务。',
+      stopService: false,
       confirmLabel: '退出',
       danger: true,
       action: 'app.exit'
@@ -374,7 +402,16 @@ export function createStore({ bridge: injected, storage } = {}) {
     return bootstrap()
   }
 
+  function openCaptureWorkbench() {
+    if (state.verificationBrowser.open || state.sheet || state.dialog) return false
+    state.captureWorkbenchOpen = true
+    return true
+  }
+  function closeCaptureWorkbench() { state.captureWorkbenchOpen = false }
+
   const api = {
+    openCaptureWorkbench,
+    closeCaptureWorkbench,
     state,
     get bridge() {
       return bridgeRef
@@ -388,6 +425,7 @@ export function createStore({ bridge: injected, storage } = {}) {
     setTheme,
     setMode,
     saveSettings,
+    hostAction,
     connectWebRuntime,
     openSheet,
     closeSheet,
@@ -397,6 +435,7 @@ export function createStore({ bridge: injected, storage } = {}) {
     confirmDialog,
     closeDialog,
     requestExit,
+    exitApp,
     setPage,
     goRoot,
     applyInsets,

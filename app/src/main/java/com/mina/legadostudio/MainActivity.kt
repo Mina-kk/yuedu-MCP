@@ -55,6 +55,65 @@ import kotlinx.coroutines.launch
  */
 class MainActivity : ComponentActivity() {
 
+    private var notificationRequest: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+    private val notificationLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) {
+        val granted = notificationPermissionGranted()
+        notificationRequest?.complete(granted)
+        notificationRequest = null
+        McpService.refreshNotificationIfActive()
+        bridge?.emit(WebBridgeProtocol.EVENT_SERVICE, null)
+    }
+
+    private fun notificationPermissionGranted(): Boolean = Build.VERSION.SDK_INT < 33 ||
+        androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    /** Trusted bridge only; returns real permission, never starts the service implicitly. */
+    suspend fun requestNotificationPermission(): Boolean = kotlinx.coroutines.withContext(Dispatchers.Main.immediate) {
+        check(!isFinishing && !isDestroyed) { "宿主已关闭" }
+        check(lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) { "请回到应用后申请通知权限" }
+        if (notificationPermissionGranted()) return@withContext true
+        notificationRequest?.let { return@withContext it.await() }
+        val prefs = getSharedPreferences("studio_notification_permission", MODE_PRIVATE)
+        if (prefs.getBoolean("requested", false) &&
+            !shouldShowRequestPermissionRationale(android.Manifest.permission.POST_NOTIFICATIONS)) {
+            openNotificationSettings()
+            return@withContext false
+        }
+        val request = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        notificationRequest = request
+        try {
+            prefs.edit().putBoolean("requested", true).apply()
+            notificationLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        } catch (error: Exception) {
+            notificationRequest = null
+            request.completeExceptionally(error)
+        }
+        request.await()
+    }
+
+    fun openNotificationSettings(): Boolean = com.mina.legadostudio.device.DeviceReadiness(this).openNotificationSettings()
+    fun openMcpNotificationChannel(): Boolean {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        manager.createNotificationChannel(android.app.NotificationChannel("studio_mcp", "阅读书源MCP", android.app.NotificationManager.IMPORTANCE_LOW))
+        return com.mina.legadostudio.device.DeviceReadiness(this).openNotificationChannel("studio_mcp")
+    }
+    fun openOverlaySettings(): Boolean = com.mina.legadostudio.device.DeviceReadiness(this).openOverlaySettings()
+    fun openBatterySettings(): Boolean {
+        // A settings launch is not a grant; bootstrap reads PowerManager again.
+        return runCatching {
+            startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            true
+        }.getOrElse { com.mina.legadostudio.device.DeviceReadiness(this).openAppDetails() }
+    }
+    fun setOverlayEnabled(enabled: Boolean): Boolean {
+        com.mina.legadostudio.verification.OverlayPrefs.setEnabled(this, enabled)
+        com.mina.legadostudio.verification.VerificationOverlayManager.refresh(this)
+        return com.mina.legadostudio.verification.OverlayPrefs.isEnabled(this)
+    }
+
     private lateinit var root: FrameLayout
     private lateinit var webView: WebView
     private var bridge: StudioWebBridge? = null
@@ -62,7 +121,80 @@ class MainActivity : ComponentActivity() {
     private val verificationView: VerificationBrowserView? get() = verificationLifecycle.resource
     private var verificationSessionId: String? = null
     private lateinit var saf: SafLauncher
+    private lateinit var skillSaf: com.mina.legadostudio.web.SkillManagementSaf
     private var unsupportedShown = false
+    private var captureHost: com.mina.legadostudio.web.InteractiveCaptureHost? = null
+    private var captureView: WebView? = null
+    private var captureBounds: com.google.gson.JsonObject? = null
+    @Volatile private var verificationOpenToken: Any? = null
+
+    internal fun closeVerificationIfMatching(id: String) {
+        if (verificationSessionId == id) closeVerificationBrowser("host")
+    }
+
+    internal suspend fun verificationManagement(method: String, params: com.google.gson.JsonObject): com.google.gson.JsonObject {
+        val app = application as StudioApplication
+        return com.mina.legadostudio.web.VerificationManagementActions(this,
+            { id -> kotlinx.coroutines.withContext(Dispatchers.IO) { app.database.dao().verificationSession(id) } },
+            { id -> verificationView?.takeIf { verificationSessionId == id } },
+        ).handle(method, params)
+    }
+
+    internal suspend fun captureCommand(method: String, params: com.google.gson.JsonObject): com.google.gson.JsonObject =
+        kotlinx.coroutines.withContext(Dispatchers.Main.immediate) {
+            check(!isFinishing && !isDestroyed) { "宿主已关闭" }
+            if (method == "capture.browser.viewport") {
+                setCaptureViewport(params)
+                return@withContext com.google.gson.JsonObject().apply { addProperty("applied", true) }
+            }
+            check(!verificationLifecycle.busy) { "请先关闭验证页" }
+            val host = captureHost ?: run {
+                val app = application as StudioApplication
+                com.mina.legadostudio.web.InteractiveCaptureHost(this@MainActivity, app.webViewCapture, app.database.dao(),
+                    beforeEnable = { app.readerWebUiSession.close() },
+                    attach = { view ->
+                        captureView?.let { (it.parent as? ViewGroup)?.removeView(it) }
+                        captureView = view
+                        view?.let { it.visibility = android.view.View.GONE; root.addView(it) }
+                        applyCaptureLayout()
+                    },
+                    captureCookies = { url -> app.cookieStore.captureFromWebView(url) },
+                    exportFile = { file ->
+                        try {
+                            saf.exportFile(file, "capture.json", "application/json")
+                            com.google.gson.JsonObject().apply { addProperty("saved", true); addProperty("cancelled", false) }
+                        } catch (_: SafLauncher.Cancelled) {
+                            com.google.gson.JsonObject().apply { addProperty("saved", false); addProperty("cancelled", true) }
+                        }
+                    },
+                ).also { captureHost = it }
+            }
+            host.command(method, params)
+        }
+
+    private fun setCaptureViewport(params: com.google.gson.JsonObject) {
+        captureBounds = params.get("rect")?.takeIf { it.isJsonObject }?.asJsonObject
+        applyCaptureLayout()
+    }
+
+    private fun applyCaptureLayout() {
+        val view = captureView ?: return
+        view.visibility = android.view.View.GONE
+        val r = captureBounds ?: return
+        fun number(key: String) = r.get(key)?.asDouble?.takeIf { it.isFinite() } ?: error("无效网页区域")
+        val cssWidth = number("viewportWidth")
+        if (cssWidth <= 0 || webView.width <= 0) return
+        val scale = webView.width / cssWidth
+        val left = (number("x") * scale).toInt().coerceIn(0, webView.width)
+        val top = (number("y") * scale).toInt().coerceIn(0, webView.height)
+        val right = ((number("x") + number("width")) * scale).toInt().coerceIn(left, webView.width)
+        val bottom = ((number("y") + number("height")) * scale).toInt().coerceIn(top, webView.height)
+        if (right <= left || bottom <= top) return
+        view.layoutParams = FrameLayout.LayoutParams(right - left, bottom - top).apply {
+            leftMargin = left; topMargin = top
+        }
+        view.visibility = android.view.View.VISIBLE
+    }
 
     /** 主页面是否已 load 完成；未完成时路由先排队（事件不能打空）。 */
     private var webReady = false
@@ -102,6 +234,7 @@ class MainActivity : ComponentActivity() {
 
         // SAF 必须在 onCreate 内注册（registerForActivityResult 生命周期约束）。
         saf = SafLauncher(this).also { it.register() }
+        skillSaf = com.mina.legadostudio.web.SkillManagementSaf(this).also { it.register() }
 
         bridge = StudioWebBridge(
             activity = this,
@@ -109,7 +242,12 @@ class MainActivity : ComponentActivity() {
             onRequestCloseVerificationBrowser = { closeVerificationBrowser(reason = "host") },
             onThemeApplied = { dark, _ -> applySystemBars(dark) },
         ).also { created ->
+            created.attachSkillDocuments(skillSaf)
             created.attachSaf(object : SafHost {
+                override suspend fun exportFile(file: java.io.File, name: String, mime: String) {
+                    saf.exportFile(file, name, mime)
+                }
+
                 override suspend fun export(request: SafRequest.Export) {
                     saf.export(request.name, request.text, request.mime)
                 }
@@ -205,6 +343,10 @@ class MainActivity : ComponentActivity() {
             override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean = false
         }
         root.addView(webView)
+        webView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            captureBounds = null
+            captureView?.visibility = android.view.View.GONE
+        }
         val installed = bridge?.install(webView) ?: false
         if (!installed) {
             // 契约：不支持 WebMessageListener 时必须明确提示升级，绝不退回全域桥接。
@@ -275,8 +417,14 @@ class MainActivity : ComponentActivity() {
     private suspend fun showVerificationBrowser(sessionId: String, url: String) {
         if (verificationView != null && verificationSessionId == sessionId) return
         check(!isFinishing && !isDestroyed) { "宿主已关闭" }
+        check(captureView == null) { "请先结束浏览器抓包" }
+        val openToken = Any()
+        verificationOpenToken = openToken
+        val app = application as StudioApplication
         val networkOwner = verificationLifecycle.begin()
         try {
+        val generation = app.verification.beginBrowserGeneration(sessionId, url)
+        check(verificationOpenToken === openToken && verificationLifecycle.canAttach(networkOwner)) { "验证页打开已取消" }
         WebProxyBoundary.acquire(networkOwner) { (application as StudioApplication).readerWebUiSession.close() }
         check(!isFinishing && !isDestroyed) { "宿主已关闭" }
         check(verificationLifecycle.canAttach(networkOwner)) { "验证页打开已取消" }
@@ -292,7 +440,7 @@ class MainActivity : ComponentActivity() {
                     runCatching {
                         val session = app.database.dao().verificationSession(sessionId)
                         if (session != null && session.status == "WAITING" && observed != session.finalUrl) {
-                            app.verification.updateCurrentUrl(sessionId, observed)
+                            app.verification.updateCurrentUrl(sessionId, observed) { verificationOpenToken === openToken }
                         }
                     }.onFailure {
                         com.mina.legadostudio.mcp.StudioLog.add(
@@ -302,6 +450,24 @@ class MainActivity : ComponentActivity() {
                 }
             },
             onTitleObserved = { bridge?.emitVerificationBrowser("title", sessionId) },
+            autoCompleteEligible = { generation != null && verificationOpenToken === openToken && verificationSessionId == sessionId },
+            onAutoComplete = { observed, stillCurrent ->
+                if (generation != null) ioScope.launch {
+                    runCatching {
+                        val completed = app.verification.completeAutomatically(sessionId, url, generation, observed) {
+                            kotlinx.coroutines.withContext(Dispatchers.Main.immediate) {
+                                verificationOpenToken === openToken && verificationSessionId == sessionId && stillCurrent()
+                            }
+                        }
+                        if (completed != null) kotlinx.coroutines.withContext(Dispatchers.Main.immediate) {
+                            if (verificationOpenToken === openToken) {
+                                closeVerificationBrowser("automatic")
+                                bridge?.emitVerificationBrowser("completed", sessionId)
+                            }
+                        }
+                    }
+                }
+            },
         )
         // Track the unconfigured, blank view before any operation that can throw.
         verificationLifecycle.attach(networkOwner, view)
@@ -338,6 +504,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun closeVerificationBrowser(reason: String) {
+        verificationOpenToken = null
         val view = verificationView
         val sessionId = verificationSessionId
         val closed = verificationLifecycle.cancel({ it.destroy() }, WebProxyBoundary::release)
@@ -387,9 +554,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         webView.onResume()
+        com.mina.legadostudio.verification.VerificationOverlayManager.refresh(this)
+        McpService.refreshNotificationIfActive()
         applyThemeFromStore()
         // 服务状态变化（前台服务启停/网络切换）由前端轮询 bootstrap，这里不重复推送。
-        if (McpService.running) bridge?.emit(WebBridgeProtocol.EVENT_SERVICE, null)
+        bridge?.emit(WebBridgeProtocol.EVENT_SERVICE, null)
     }
 
     override fun onPause() {
@@ -405,6 +574,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        notificationRequest?.cancel()
+        notificationRequest = null
+        captureHost?.dispose()
         ioScope.cancel()
         runCatching { webView.stopLoading() }
         runCatching { (webView.parent as? ViewGroup)?.removeView(webView) }
@@ -412,6 +584,7 @@ class MainActivity : ComponentActivity() {
         closeVerificationBrowser(reason = "destroy")
         // 先释放 SAF（结算在途文件操作），再释放桥（结算在途 RPC）。
         runCatching { saf.release() }
+        runCatching { skillSaf.release() }
         bridge?.release()
         bridge = null
         super.onDestroy()

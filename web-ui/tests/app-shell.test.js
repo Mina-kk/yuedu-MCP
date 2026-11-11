@@ -64,6 +64,52 @@ afterEach(() => {
 })
 
 describe('App shell', () => {
+  it('Logs entry mounts shared capture workbench and Back waits for close', async () => {
+    const bridge = installStudioBridge(handlers({
+      'capture.browser.state': async () => ({ phase: 'idle', contextId: '' }),
+      'capture.browser.viewport': async () => ({ applied: true }),
+      'capture.browser.close': async () => ({ closed: true })
+    }))
+    const wrapper = mount(App); await flushPromises()
+    await wrapper.findAll('.tab').find(b => b.text().includes('日志')).trigger('click'); await flushPromises()
+    wrapper.findComponent({ name: 'LogsPage' }).vm.$emit('open-capture-browser'); await flushPromises()
+    expect(wrapper.find('.capture-workbench').exists()).toBe(true)
+    expect(wrapper.get('.tabbar').isVisible()).toBe(false)
+    dispatchHostEvent('studio:back', null); await flushPromises()
+    expect(bridge.calls).toContainEqual(['capture.browser.close', {}])
+    expect(wrapper.find('.capture-workbench').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('verification toolbar refresh uses matching session', async () => {
+    const bridge = installStudioBridge(handlers({ 'verification.browser.refresh': async p => ({ refreshed: true, sessionId: p.id }) }))
+    const wrapper = mount(App); await flushPromises()
+    dispatchHostEvent('studio:verification-browser', { action: 'open', id: 'v1' }); await flushPromises()
+    await wrapper.findAll('button').find(b => b.text() === '刷新').trigger('click'); await flushPromises()
+    expect(bridge.calls).toContainEqual(['verification.browser.refresh', { id: 'v1' }])
+    wrapper.unmount()
+  })
+
+  it('permission resume event reads bootstrap even when service is stopped', async () => {
+    const bridge = installStudioBridge(handlers())
+    const wrapper = mount(App); await flushPromises()
+    const before = bridge.calls.filter(([m]) => m === 'app.bootstrap').length
+    dispatchHostEvent('studio:service', null); await flushPromises()
+    expect(bridge.calls.filter(([m]) => m === 'app.bootstrap').length).toBeGreaterThan(before)
+    wrapper.unmount()
+  })
+  it.each([false, true])('exit checkbox sends explicit stopService=%s; cancellation sends nothing', async stop => {
+    const bridge = installStudioBridge(handlers({ 'app.exit': async () => ({ closing: true }) }))
+    const wrapper = mount(App); await flushPromises()
+    dispatchHostEvent('studio:back', null); await flushPromises()
+    expect(wrapper.get('[role="alertdialog"] input[type="checkbox"]').element.checked).toBe(false)
+    await wrapper.findAll('[role="alertdialog"] button').find(b => b.text() === '取消').trigger('click')
+    expect(bridge.calls.filter(([m]) => m === 'app.exit')).toHaveLength(0)
+    dispatchHostEvent('studio:back', null); await flushPromises()
+    await wrapper.get('[role="alertdialog"] input[type="checkbox"]').setValue(stop)
+    await wrapper.findAll('[role="alertdialog"] button').find(b => b.text() === '退出').trigger('click'); await flushPromises()
+    expect(bridge.calls.filter(([m]) => m === 'app.exit')).toEqual([['app.exit', { stopService: stop }]])
+    wrapper.unmount()
+  })
   it.each([true, false])('设置从%s部分保存保留草稿和错误，首页及面板禁用直到可信重读', async initialRequired => {
     let hostRequired = initialRequired
     let readFails = false

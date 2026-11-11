@@ -56,6 +56,107 @@ async function mountPage(handlers) {
 }
 
 describe('McpPage', () => {
+  it('应用内指南使用bootstrap版本，独立展示并返回入口焦点', async () => {
+    const { wrapper } = await mountPage({ 'app.bootstrap': () => ({ ...BOOTSTRAP, versionName: 'fixture-build', versionCode: 987 }), 'tools.list': () => TOOLS })
+    const entry = wrapper.findAll('button').find(b => b.text() === '功能指南')
+    expect(entry).toBeTruthy()
+    entry.element.focus()
+    await entry.trigger('click'); await flushPromises()
+    const guide = wrapper.get('[aria-label="功能指南"]')
+    expect(guide.text()).toContain('fixture-build')
+    expect(guide.text()).toContain('987')
+    for (const text of ['人工工作流', 'AI 工作流', 'OkHttp', '无头', '可交互', '沙箱', '阅读端', '敏感 URL']) expect(guide.text()).toContain(text)
+    expect(wrapper.find('.tool-row').isVisible()).toBe(false)
+    expect(wrapper.vm.handleBack()).toBe(true)
+    await flushPromises()
+    expect(wrapper.find('[aria-label="功能指南"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(entry.element)
+  })
+
+  it('选择局域网配置只传lan标记，复制中禁用并不重复请求', async () => {
+    let finish
+    const { wrapper, bridge } = await mountPage({ 'app.bootstrap': () => BOOTSTRAP, 'tools.list': () => TOOLS,
+      'connection.copy': () => new Promise(resolve => { finish = resolve }) })
+    await wrapper.get('[data-connection-lan]').trigger('click')
+    const copy = wrapper.findAll('button').find(b => b.text() === '复制客户端配置')
+    await copy.trigger('click'); await flushPromises()
+    expect(copy.attributes('disabled')).toBeDefined()
+    await copy.trigger('click')
+    expect(bridge.calls.filter(([m]) => m === 'connection.copy')).toEqual([['connection.copy', { kind: 'json', lan: true }]])
+    finish({ copied: true }); await flushPromises()
+    expect(copy.attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-connection-local]').trigger('click')
+    await copy.trigger('click')
+    expect(bridge.calls.at(-1)).toEqual(['connection.copy', { kind: 'json', lan: false }])
+    finish({ copied: true }); await flushPromises()
+  })
+
+  it.each(['header-name', 'header-value', 'header-line'])('请求头%s仅通过已声明能力的宿主复制并检查精确kind回执', async kind => {
+    let receipt = { copied: true, kind: 'token' }
+    const { wrapper, store, bridge } = await mountPage({
+      'app.bootstrap': () => ({ ...BOOTSTRAP, capabilities: { connectionHeaderCopy: true } }), 'tools.list': () => TOOLS,
+      'connection.copy': () => receipt
+    })
+    const button = wrapper.get(`[data-copy-kind="${kind}"]`)
+    const before = wrapper.html()
+    await button.trigger('click'); await flushPromises()
+    expect(bridge.calls.at(-1)).toEqual(['connection.copy', { kind, lan: false }])
+    expect(store.state.toast.kind).toBe('err')
+    receipt = { copied: true, kind }
+    await button.trigger('click'); await flushPromises()
+    expect(store.state.toast.kind).toBe('ok')
+    expect(wrapper.html()).toBe(before)
+    expect(wrapper.text()).toContain('不支持 OAuth')
+    expect(wrapper.text()).toContain('不要再加 Bearer 前缀')
+  })
+
+  it('旧宿主不可复制敏感请求头；鉴权关闭时不建议使用请求头', async () => {
+    const { wrapper, bridge } = await mountPage({ 'app.bootstrap': () => BOOTSTRAP, 'tools.list': () => TOOLS })
+    for (const kind of ['header-value', 'header-line']) {
+      const button = wrapper.get(`[data-copy-kind="${kind}"]`)
+      expect(button.attributes('disabled')).toBeDefined()
+      await button.trigger('click')
+    }
+    expect(bridge.calls.some(([m]) => m === 'connection.copy')).toBe(false)
+    expect(wrapper.text()).toContain('宿主尚未支持请求头复制')
+  })
+
+  it('端点列表仅展示实际端点，复制入口按连接位置而非猜IP选择', async () => {
+    const { wrapper } = await mountPage({ 'app.bootstrap': () => BOOTSTRAP, 'tools.list': () => TOOLS })
+    expect(wrapper.findAll('.endpoint-row button')).toHaveLength(0)
+    expect(wrapper.findAll('button').some(b => b.text() === '复制所选连接地址')).toBe(true)
+  })
+
+  it.each([{}, { copied: false, kind: 'header-value' }, { copied: 'true', kind: 'header-value' }])('请求头拒绝不完整回执%j且busy保护所有复制', async receipt => {
+    let finish
+    const { wrapper, store, bridge } = await mountPage({
+      'app.bootstrap': () => ({ ...BOOTSTRAP, capabilities: { connectionHeaderCopy: true } }), 'tools.list': () => TOOLS,
+      'connection.copy': () => new Promise(resolve => { finish = resolve })
+    })
+    await wrapper.get('[data-copy-kind="header-value"]').trigger('click')
+    for (const button of wrapper.findAll('[data-copy-kind]')) expect(button.attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-copy-kind="header-line"]').trigger('click')
+    expect(bridge.calls.filter(([m]) => m === 'connection.copy')).toHaveLength(1)
+    finish(receipt); await flushPromises()
+    expect(store.state.toast.kind).toBe('err')
+    store.state.service.tokenRequired = false
+    await flushPromises()
+    expect(wrapper.get('[data-copy-kind="header-value"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('Token 和 Authorization 请求头留空')
+  })
+
+  it('修改访问令牌入口打开真实设置，保存中复制不可用', async () => {
+    const { wrapper, store } = await mountPage({ 'app.bootstrap': () => BOOTSTRAP, 'tools.list': () => TOOLS })
+    const edit = wrapper.findAll('button').find(b => b.text() === '修改访问令牌')
+    expect(edit).toBeTruthy()
+    await edit.trigger('click')
+    expect(store.state.sheet).toBe('settings')
+    store.state.settingsSaving = true
+    await flushPromises()
+    for (const label of ['复制令牌', '复制客户端配置']) {
+      expect(wrapper.findAll('button').find(b => b.text() === label).attributes('disabled')).toBeDefined()
+    }
+  })
   it('首页关闭访问令牌校验先Vue确认，取消不写，确认后仅保存鉴权字段并等真实回读', async () => {
     let resolveSave
     const initial = { ...BOOTSTRAP, capabilities: { tokenRequiredEditable: true, tokenRequiredLocked: false } }
@@ -255,7 +356,7 @@ describe('McpPage', () => {
     expect(wrapper.text()).toContain('运行中')
     expect(wrapper.text()).toContain('8787')
     expect(wrapper.text()).toContain('http://127.0.0.1:8787/mcp')
-    expect(wrapper.text()).toContain('Authorization: Bearer <令牌>')
+    expect(wrapper.findAll('code').some(code => code.text() === ['Authorization:', 'Bearer', '<令牌>'].join(' '))).toBe(true)
     expect(wrapper.text()).toContain('纯令牌')
     expect(wrapper.text()).toContain('无需 OAuth')
     expect(wrapper.html()).not.toMatch(/token=|type="password"/i)

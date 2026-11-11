@@ -65,7 +65,8 @@ class McpService : Service() {
         }.onFailure { StudioLog.add("wifilock acquire err", "W", "mcp", it.localizedMessage.orEmpty()) }
         
         McpStats.setListener(::scheduleNotificationUpdate)
-        VerificationOverlayManager.refresh(this)
+        activeInstance = this
+        VerificationOverlayManager.setServiceActive(this, true)
         registerNetworkCallback()
     }
 
@@ -129,7 +130,8 @@ class McpService : Service() {
         wifiLock = null
         
         McpStats.setListener(null)
-        VerificationOverlayManager.hideAll()
+        activeInstance = null
+        VerificationOverlayManager.setServiceActive(this, false)
         // 关停引擎丢到后台线程，避免主线程被阻塞
         val old = engine
         engine = null
@@ -285,6 +287,13 @@ class McpService : Service() {
     }
 
     companion object {
+        private var activeInstance: McpService? = null
+        fun refreshNotificationIfActive() {
+            val service = activeInstance ?: return
+            service.networkHandler.post {
+                if (activeInstance === service && running) service.updateNotification()
+            }
+        }
         private const val CHANNEL_ID = "studio_mcp"
         private const val NOTIFICATION_ID = 1237
         private const val ACTION_STOP = "com.mina.legadostudio.STOP_MCP"
