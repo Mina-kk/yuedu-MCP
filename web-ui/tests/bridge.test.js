@@ -68,6 +68,104 @@ describe('bridge: Android StudioBridge', () => {
     vi.useRealTimers()
   })
 
+  describe('系统交互超时', () => {
+    const interactiveCalls = [
+      ['skills.import', {}], ['skills.export', {}],
+      ['file.import', {}], ['file.export', {}],
+      ['logs.export', {}], ['capture.browser.export', {}],
+      ['sources.deliver', { action: 'save' }], ['notification.request', {}]
+    ]
+
+    it.each(interactiveCalls)('%s 等待超过30秒仍能结算真实回包', async (method, params) => {
+      vi.useFakeTimers()
+      window.StudioBridge = makeFakeBridge()
+      const { createBridge } = await loadBridge()
+      const b = createBridge()
+      try {
+        const settled = vi.fn()
+        const p = b.call(method, params)
+        p.then(settled, settled)
+        await vi.advanceTimersByTimeAsync(30_001)
+        expect(settled).not.toHaveBeenCalled()
+        const { id } = window.StudioBridge.sent[0]
+        window.StudioBridge.onmessage({ data: { id, ok: true, result: { saved: true } } })
+        await expect(p).resolves.toEqual({ saved: true })
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        b.dispose()
+        vi.useRealTimers()
+      }
+    })
+
+    it.each([
+      ...interactiveCalls.map(([method, params]) => [method, params, 600_000]),
+      ['tools.list', {}, 30_000], ['tools.call', {}, 180_000],
+      ['sources.deliver', { action: 'copy' }, 30_000],
+      ['sources.deliver', { action: 'share' }, 30_000],
+      ['sources.deliver', { action: 'export' }, 30_000],
+      ['sources.deliver', {}, 30_000]
+    ])('%s %j 有明确时限 %i 且忽略迟到回包', async (method, params, limit) => {
+      vi.useFakeTimers()
+      window.StudioBridge = makeFakeBridge()
+      const { createBridge } = await loadBridge()
+      const b = createBridge()
+      try {
+        const settled = vi.fn()
+        const p = b.call(method, params)
+        p.then(settled, settled)
+        const assertion = expect(p).rejects.toMatchObject({ code: 'timeout' })
+        await vi.advanceTimersByTimeAsync(limit - 1)
+        expect(settled).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1)
+        await assertion
+        const { id } = window.StudioBridge.sent[0]
+        expect(() => window.StudioBridge.onmessage({ data: { id, ok: true, result: {} } })).not.toThrow()
+        await Promise.resolve()
+        expect(settled).toHaveBeenCalledTimes(1)
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        b.dispose()
+        vi.useRealTimers()
+      }
+    })
+
+    it('交互请求遵守显式 timeoutMs 覆盖', async () => {
+      vi.useFakeTimers()
+      window.StudioBridge = makeFakeBridge()
+      const { createBridge } = await loadBridge()
+      const b = createBridge({ timeoutMs: 1000 })
+      try {
+        const assertion = expect(b.call('skills.import')).rejects.toMatchObject({ code: 'timeout' })
+        await vi.advanceTimersByTimeAsync(1000)
+        await assertion
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        b.dispose()
+        vi.useRealTimers()
+      }
+    })
+
+    it('dispose 即刻取消交互等待，迟到回包不能复活请求', async () => {
+      vi.useFakeTimers()
+      window.StudioBridge = makeFakeBridge()
+      const { createBridge } = await loadBridge()
+      const b = createBridge()
+      try {
+        const p = b.call('skills.import')
+        const assertion = expect(p).rejects.toMatchObject({ code: 'host_gone' })
+        b.dispose()
+        await assertion
+        const { id } = window.StudioBridge.sent[0]
+        expect(() => window.StudioBridge.onmessage({ data: { id, ok: true, result: {} } })).not.toThrow()
+        expect(vi.getTimerCount()).toBe(0)
+        await expect(b.call('skills.import')).rejects.toMatchObject({ code: 'host_gone' })
+      } finally {
+        b.dispose()
+        vi.useRealTimers()
+      }
+    })
+  })
+
   it('无关 id / 非 JSON / 事件消息不会破坏其它 pending', async () => {
     window.StudioBridge = makeFakeBridge()
     const { createBridge } = await loadBridge()

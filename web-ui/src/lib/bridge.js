@@ -7,9 +7,16 @@
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const LONG_TIMEOUT_MS = 180_000
+const INTERACTIVE_TIMEOUT_MS = 600_000
 
 /** 需要更长等待的宿主方法（联网检查、调试、验证等待）。 */
 const SLOW_METHODS = new Set(['tools.call'])
+
+// SAF 文件选择器/权限确认需等待用户操作，但仍保留有界超时。
+const INTERACTIVE_METHODS = new Set([
+  'skills.import', 'skills.export', 'file.import', 'file.export',
+  'logs.export', 'capture.browser.export', 'notification.request'
+])
 
 export class BridgeError extends Error {
   constructor(code, message, extra) {
@@ -108,7 +115,9 @@ export function createAndroidBridge({ win, timeoutMs } = {}) {
       return Promise.reject(new BridgeError('host_gone', '宿主已关闭'))
     }
     const id = nextId()
-    const limit = timeoutMs || (SLOW_METHODS.has(method) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
+    // sources.deliver 的文件导出动作在宿主契约中名为 save。
+    const interactive = INTERACTIVE_METHODS.has(method) || (method === 'sources.deliver' && params?.action === 'save')
+    const limit = timeoutMs || (interactive ? INTERACTIVE_TIMEOUT_MS : SLOW_METHODS.has(method) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         settle(id, (entry) => entry.reject(new BridgeError('timeout', `请求超时：${method}`)))
