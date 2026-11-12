@@ -5,14 +5,14 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`2.0.6`（versionCode 207，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.7`（versionCode 208，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
 - 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
 
-## 2.0.6 功能恢复与验收边界
+## 2.0.7 书源解析修复与验收边界
 
-本节描述当前源码（versionCode 207），不表示正式 APK 已发布或设备验收已完成。Vue 界面补回以下操作链路：
+本节描述当前源码（versionCode 208），不表示正式 APK 已发布或设备验收已完成。针对普通 JSON 条目后续 JS 被跳过、书籍与章节地址错误的问题修复运行时，不修改已经在阅读端可用的书源。最终验收必须仅从搜索关键词自动衔接详情、目录、正文，不能用分别提供的正确地址掩盖断链。以下已恢复的 Vue 操作链路保持：
 
 - MCP 接入：自定义令牌、请求头名称/值/整行复制，以及权限与后台运行设置入口。
 - 书源：原文导出、导入阅读入口、版本管理与经确认的批量删除；并发新增不纳入旧快照删除。
@@ -295,7 +295,7 @@ CSS/XPath 子规则在列表元素自身上求值，裸 `@attr`（如 `chapterUr
 
 ### 校验闭环
 
-`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`、`exploreUrl` 必须配 `ruleExplore.bookList`。`check_source(auto=true, refresh=true, searchKey="…")` 使用搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时优先用 `ruleSearch.checkKeyWord`（去空白后 ≥2 字），否则用「我的」探测并在 `warnings` 标注。实际验证应选择站内真实书名。静态关键词提示不阻止动态规则保存；沙箱分析不是阅读调试的前置条件。
+`validate_source` 只检查静态结构：`searchUrl` 必须配 `ruleSearch.bookList`；发现的 `ruleExplore.bookList` 缺失或空白时，按阅读语义沿用整个 `ruleSearch`，不是逐字段合并。搜索与发现都没有列表规则仍会报错。`check_source(auto=true, refresh=true, searchKey="…")` 使用搜索结果继续检测目录与正文，返回逐阶段 `evidence` / `verdict`；`auto` 默认关闭，`refresh=false` 可能复用快照；未传 `searchKey` 而源有 `searchUrl` 时优先用 `ruleSearch.checkKeyWord`（去空白后 ≥2 字），否则用「我的」探测并在 `warnings` 标注。实际验证应选择站内真实书名。静态关键词提示不阻止动态规则保存；沙箱分析不是阅读调试的前置条件。
 
 正文报告的 `data.contentDiagnostics` 记录逐页可观测状态、执行路径及分页停止原因，不含 URL、请求头或正文。`httpStatus` 只记录可确认的原始 HTTP 状态；WebView 或缓存回调路径无法确认时保持未知。缓存回调的 `reportedStatus` 只表示其返回状态，不能等同于实时 HTTP 观测；是否真正命中快照应查看 MCP 顶层 `cache` 统计。已知非成功状态、分页循环以及明确的加载／失败占位输出不能仅因非空而判为正文通过；兜底、整页 HTML 和分页不完整等有限模式标记为 `content_unverified`。仅达到沙箱翻页上限标记 `page_limit` 差异，不据此否定有效样本，也不证明全文完整。整段转码/解码失败提示或纯问号、替代字符占位标为 `content_unavailable`、`failureKind=content`，需核对原页和阅读端，不直接判定规则错误。正常短正文不受最小字数门槛限制。`full` 只表示本次静态校验及四阶段样本检查通过，不证明章节全文完整、解密语义正确、目标阅读版本兼容或站点长期可用。诊断细节见内置 Skill 的 `troubleshoot.md`。
 

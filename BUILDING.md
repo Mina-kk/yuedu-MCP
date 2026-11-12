@@ -1,8 +1,10 @@
 # 构建与开发
 
-## 2.0.6 / versionCode 207 交付契约
+## 2.0.7 / versionCode 208 交付契约
 
-Android `app/build.gradle.kts`、`web-ui/package.json`、lock 根版本及 `tests/test_web_build_contract.py` 同步为应用版本 2.0.6；Rust 核心有独立版本，不作为 APK 版本依据。恢复范围见 README；本版接受**验证由用户手动完成、不提供自动完成**的例外，不把安全降级写成自动功能恢复。
+Android `app/build.gradle.kts`、`web-ui/package.json`、lock 根版本及 `tests/test_web_build_contract.py` 同步为应用版本 2.0.7；Rust 核心有独立版本，不作为 APK 版本依据。恢复范围见 README；本版接受**验证由用户手动完成、不提供自动完成**的例外，不把安全降级写成自动功能恢复。
+
+本次增量以解析器针对性回归、正式签名身份、2.0.6 覆盖升级与原规则实际链路为门禁。九霄原 JSON 不变，仅传搜索词、`auto=true`、`refresh=true`，核对实际返回的书籍/章节 URL 及正文；此前分别传入正确阶段 URL 的 `full` 不能作为断链修复证据。不重复运行与增量无关的设备矩阵，保留此前版本的证据归属和未覆盖范围。
 
 轻量准备检查（不运行 Gradle、不启动模拟器、不生成 APK）：
 

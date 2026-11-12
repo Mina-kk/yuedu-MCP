@@ -18,11 +18,13 @@
  */
 package com.mina.legadostudio.runtime
 
+import com.google.gson.internal.LinkedTreeMap
 import io.legado.app.model.analyzeRule.AnalyzeByJSoup
 import io.legado.app.model.analyzeRule.AnalyzeByJSonPath
 import io.legado.app.model.analyzeRule.AnalyzeByRegex
 import io.legado.app.model.analyzeRule.AnalyzeByXPath
 import io.legado.app.model.analyzeRule.LegadoRuleEngine
+import org.htmlunit.corejs.javascript.NativeObject
 import org.jsoup.nodes.Element
 import java.net.URL
 
@@ -145,8 +147,8 @@ class ReaderRuleSession(
         if (source != null && ruleList.isNotEmpty()) {
             result = source
             if (isJsObject(result)) {
-                // ADAPT: 上游对 NativeObject（JS 对象）走键值/JS 分派；这里用同一套"首段规则"语义，
-                // 但对象本身由调用方保证是 Map（JS 对象不预先 stringify）。
+                // Preserve the upstream NativeObject first-rule semantics, including put/replacement.
+                // RhinoScriptEngine already preserves NativeObject; no Map/string conversion is needed.
                 val part = ruleList.first()
                 putRule(part.putMap)
                 part.makeUpRule(result, ::evalJsInternal, ::getString, ::get)
@@ -157,6 +159,9 @@ class ReaderRuleSession(
                     part.paramSize > 1 -> part.rule
                     else -> (result as Map<*, *>)[part.rule]
                 }?.let { replaceRegex(it.toString(), part) }
+            } else if (result is LinkedTreeMap<*, *>) {
+                // Upstream AnalyzeRule.kt:337-339: Gson objects use a direct first-key lookup.
+                result = result[ruleList.first().rule]?.toString()
             } else {
                 for (part in ruleList) {
                     putRule(part.putMap)
@@ -170,7 +175,10 @@ class ReaderRuleSession(
                             ReaderRulePart.Mode.Json -> jsonAnalyzer(result).getString(current)
                             ReaderRulePart.Mode.XPath -> xpathAnalyzer(result).getString(current)
                             ReaderRulePart.Mode.Regex -> current
-                            ReaderRulePart.Mode.Default -> if (isUrl) {
+                            ReaderRulePart.Mode.Default -> if (result is Map<*, *>) {
+                                // A typed JSON item may override an HTML session's original content.
+                                jsonAnalyzer(result).getString(current)
+                            } else if (isUrl) {
                                 jsoupAnalyzer(result).getString0(current)
                             } else {
                                 jsoupAnalyzer(result).getString(current)
@@ -244,6 +252,9 @@ class ReaderRuleSession(
                         result = replaceRegex(result.toString(), part)
                     }
                 }
+            } else if (result is LinkedTreeMap<*, *>) {
+                // Upstream AnalyzeRule.kt:245-247; distinct from ordinary JSONPath Maps.
+                result = result[ruleList.first().rule]
             } else {
                 for (part in ruleList) {
                     putRule(part.putMap)
@@ -257,7 +268,11 @@ class ReaderRuleSession(
                             ReaderRulePart.Mode.Json -> jsonAnalyzer(result).getStringList(current)
                             ReaderRulePart.Mode.XPath -> xpathAnalyzer(result).getStringList(current)
                             ReaderRulePart.Mode.Regex -> current
-                            ReaderRulePart.Mode.Default -> jsoupAnalyzer(result).getStringList(current)
+                            ReaderRulePart.Mode.Default -> if (result is Map<*, *>) {
+                                jsonAnalyzer(result).getStringList(current)
+                            } else {
+                                jsoupAnalyzer(result).getStringList(current)
+                            }
                         }
                     }
                     if (part.replaceRegex.isNotEmpty() && result is List<*>) {
@@ -491,7 +506,9 @@ class ReaderRuleSession(
 
     // ------------------------------------------------------------- helpers
 
-    private fun isJsObject(value: Any?): Boolean = value is Map<*, *>
+    // Upstream AnalyzeRule.kt:221/325: only real Rhino objects use the first-rule branch.
+    // JSONPath returns ordinary Maps; these must retain their type and run the whole chain.
+    private fun isJsObject(value: Any?): Boolean = value is NativeObject
 
     private fun stringify(value: Any): String = when (value) {
         is String -> value

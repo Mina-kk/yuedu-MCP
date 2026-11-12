@@ -137,7 +137,16 @@ class EmbeddedLegadoRuntime(
             entry.startsWith("++") -> debugToc(root, entry.removePrefix("++"), state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
             entry.contains("::") -> {
                 val parts = entry.split("::", limit = 2)
-                debugList(root, root.getAsJsonObject("ruleExplore"), requestValue(parts[1], root, mapOf("page" to 1, "source" to state, "book" to book) + bindings, origin, runtimeState), "发现", parts[1], state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
+                val explore = root.get("ruleExplore")?.takeUnless { it.isJsonNull }?.asJsonObject
+                val bookList = explore?.get("bookList")
+                require(bookList == null || bookList.isJsonNull || bookList.isJsonPrimitive) {
+                    "ruleExplore.bookList 必须是基本类型或 null"
+                }
+                // LegadoTeam BookList.kt:84-88: choose a whole block, never merge fields.
+                val rules = if (explore?.text("bookList").isNullOrBlank()) {
+                    root.get("ruleSearch")?.takeUnless { it.isJsonNull }?.asJsonObject
+                } else explore
+                debugList(root, rules, requestValue(parts[1], root, mapOf("page" to 1, "source" to state, "book" to book) + bindings, origin, runtimeState), "发现", parts[1], state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
             }
             entry.startsWith("http://") || entry.startsWith("https://") -> debugInfo(root, entry, state, cacheFetch, origin, bindings, book, jsLibNote, runtimeState)
             else -> {
@@ -451,7 +460,7 @@ class EmbeddedLegadoRuntime(
 
     private suspend fun debugList(root: JsonObject, rules: JsonObject?, requestValue: String, type: String, entry: String, state: MutableMap<String, String>, cacheFetch: (suspend (HttpFetcher.FetchRequest) -> HttpFetcher.FetchResult)?, origin: HttpOrigin?, jsLibBindings: Map<String, Any?> = emptyMap(), book: BookJsApi = BookJsApi(), jsLibNote: String? = null, runtimeState: ReaderRuntimeState? = null): LegadoRuntime.DebugReport {
         requireNotNull(rules) { "缺少 ${if (type == "搜索") "ruleSearch" else "ruleExplore"}" }
-        val ruleKey = if (type == "搜索") "ruleSearch" else "ruleExplore"
+        val ruleKey = if (type == "搜索" || rules === root.get("ruleSearch")) "ruleSearch" else "ruleExplore"
         val fieldErrors = mutableListOf<String>()
         val jsNotes = mutableListOf<String>()
         val response = fetchValue(requestValue, root.text("bookSourceUrl").orEmpty(), sourceHeaders(root, runtimeState), cacheFetch, origin, jsLibBindings, cookieJar(jsLibBindings), root.text("loginCheckJs"), jsNotes::add)

@@ -120,7 +120,15 @@ class BookSourceValidator {
         }
         if (!exploreUrl.isNullOrBlank()) {
             val ruleExplore = objectOrNull(obj, "ruleExplore")
-            if (ruleExplore == null || text(ruleExplore, "bookList").isNullOrBlank()) {
+            // LegadoTeam BookList: blank explore.bookList selects the whole search block.
+            // Malformed objects/fields are not an absent rule and must still fail validation.
+            val exploreValue = obj.get("ruleExplore")
+            val listValue = ruleExplore?.get("bookList")
+            val malformedExplore = exploreValue != null && !exploreValue.isJsonNull && !exploreValue.isJsonObject
+            val malformedList = listValue != null && !listValue.isJsonNull && !listValue.isJsonPrimitive
+            if (malformedExplore || malformedList ||
+                (ruleExplore?.let { text(it, "bookList") }.isNullOrBlank() &&
+                    ruleSearch?.let { text(it, "bookList") }.isNullOrBlank())) {
                 issues += Issue("ruleExplore.bookList", "启用发现时必须配置书籍列表规则")
             }
         }
