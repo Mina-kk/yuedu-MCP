@@ -1,51 +1,88 @@
-/* Theme-tinted bubbles: paint only; existing layout and 44px targets stay owned
-   by the components. Alpha belongs to the fill, never the label. */
+/* UI210: sources follow the existing MCP btn-ghost / btn-sm paint.
+   Keep 44px hit boxes, but paint only the inner 32px at normal text size.
+   These tokens intentionally mirror v8.css; the real-App test compares computed
+   styles with an actual MCP button, never a second synthetic reference. */
+:is(.sources-page, .source-management, .reader-import-dialog) {
+  --source-control-fill: linear-gradient(135deg,
+    color-mix(in srgb, var(--c1) 6%, rgba(255, 255, 255, 0.7)),
+    rgba(255, 255, 255, 0.42));
+  --source-control-edge: color-mix(in srgb, var(--c1) 16%, var(--line-strong));
+}
+[data-mode="dark"] :is(.sources-page, .source-management, .reader-import-dialog) {
+  --source-control-fill: linear-gradient(135deg,
+    color-mix(in srgb, var(--c1) 10%, rgba(30, 30, 36, 0.62)),
+    rgba(24, 24, 29, 0.5));
+}
+:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:not(.btn-primary):not(.btn-danger) {
+  position: relative;
+  isolation: isolate;
+  min-height: 44px;
+  height: auto;
+  min-width: 44px;
+  padding: 12px 11px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.6;
+  gap: 5px;
+  white-space: normal;
+}
+:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:not(.btn-primary):not(.btn-danger)::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 6px 0;
+  box-sizing: border-box;
+  border: 1px solid var(--source-control-edge);
+  border-radius: 9px;
+  background-color: transparent;
+  background-image: var(--source-control-fill);
+  pointer-events: none;
+  transition: background 0.18s, border-color 0.18s;
+}
+:is(.sources-page, .source-management, .reader-import-dialog) .btn.danger:not(.btn-primary):not(.btn-danger) {
+  --source-control-edge: color-mix(in srgb, var(--bad) 26%, var(--line-strong));
+  color: var(--bad);
+}
+:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:not(.btn-primary):not(.btn-danger):hover:not(:disabled)::before {
+  background: var(--chip);
+  border-color: color-mix(in srgb, var(--text) 26%, transparent);
+}
+:is(.sources-page, .source-management, .reader-import-dialog) .btn.danger:not(.btn-primary):not(.btn-danger):hover:not(:disabled)::before {
+  background: color-mix(in srgb, var(--bad) 9%, transparent);
+  border-color: color-mix(in srgb, var(--bad) 32%, transparent);
+}
+:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+/* Client labels and package IDs grow naturally; never force them to 32px. */
+.reader-import-dialog .btn.btn.reader-target {
+  padding: 14px 12px;
+}
+.reader-import-layer .reader-import-dialog {
+  background: var(--surface-solid);
+}
+
+/* Existing neutral badges are unchanged; semantic badges remain excluded. */
 :root {
   --bubble-start: color-mix(in srgb, var(--c1) 22%, transparent);
   --bubble-end: color-mix(in srgb, var(--c2) 8%, transparent);
   --bubble-edge: color-mix(in srgb, var(--c1) 18%, var(--line));
   --bubble-ink: var(--text);
-  --bubble-danger-start: color-mix(in srgb, var(--bad) 12%, transparent);
-  --bubble-danger-end: color-mix(in srgb, var(--bad) 3%, transparent);
-  --bubble-danger-ink: color-mix(in srgb, var(--bad) 76%, var(--text));
 }
 [data-mode="dark"] {
   --bubble-start: color-mix(in srgb, var(--c1) 19%, transparent);
   --bubble-end: color-mix(in srgb, var(--c2) 6%, transparent);
   --bubble-edge: color-mix(in srgb, var(--c1) 24%, var(--line));
-  --bubble-danger-start: color-mix(in srgb, var(--bad) 15%, transparent);
-  --bubble-danger-end: color-mix(in srgb, var(--bad) 4%, transparent);
-  --bubble-danger-ink: var(--bad);
 }
-
-/* The extra .btn specificity beats scoped .source-row-actions .btn and its
-   hover background shorthand. Primary/solid danger actions keep their theme. */
-:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:not(.btn-primary):not(.btn-danger),
 .chip.chip.chip:not(.bad):not(.ok):not(.warn) {
   background-color: transparent;
   background-image: linear-gradient(135deg, var(--bubble-start), var(--bubble-end));
   border-color: var(--bubble-edge);
   color: var(--bubble-ink);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--surface-solid) 30%, transparent);
-}
-:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:not(.btn-primary):not(.btn-danger) {
-  border-radius: 14px;
-}
-:is(.sources-page, .source-management, .reader-import-dialog) .btn.danger:not(.btn-primary):not(.btn-danger) {
-  --bubble-start: var(--bubble-danger-start);
-  --bubble-end: var(--bubble-danger-end);
-  --bubble-ink: var(--bubble-danger-ink);
-  --bubble-edge: color-mix(in srgb, var(--bad) 20%, var(--line));
-}
-:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:not(.btn-primary):not(.btn-danger):hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--c1) 5%, transparent);
-}
-:is(.sources-page, .source-management, .reader-import-dialog) .btn.btn:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-/* A modal must not let underlying page text show through its client choices.
-   Only its controls are translucent; the dialog retains a theme surface. */
-.reader-import-layer .reader-import-dialog {
-  background: var(--surface-solid);
 }

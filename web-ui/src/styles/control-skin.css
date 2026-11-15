@@ -1,0 +1,87 @@
+/* Business controls retain native HTML keyboard/form semantics, but never
+   inherit platform widget paint. Android permission/SAF UI is host-owned. */
+button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Keep textareas scrollable; a desktop resize grip is not a mobile control. */
+textarea.input.input,
+textarea.textarea.textarea {
+  resize: none;
+}
+input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0 6px 0 0;
+  padding: 0;
+  vertical-align: middle;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-solid);
+  color: var(--on-c1);
+  cursor: pointer;
+}
+input[type="checkbox"]::after {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg) scale(0);
+}
+input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate {
+  background: var(--action-bg, var(--c1));
+  border-color: var(--action-bg, var(--c1));
+}
+input[type="checkbox"]:checked::after {
+  transform: translateY(-1px) rotate(-45deg);
+}
+input[type="checkbox"]:indeterminate::after {
+  height: 0;
+  border-left: 0;
+  transform: none;
+}
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+input[type="checkbox"]:disabled {
+  opacity: 0.46;
+  cursor: default;
+}
+/* These disclosures have no component-owned indicator. Keep real details
+   semantics while replacing the platform's black triangle with a chevron. */
+:is(.source-management details, details.collapsible) > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--text);
+}
+:is(.source-management details, details.collapsible) > summary::-webkit-details-marker { display: none; }
+:is(.source-management details, details.collapsible) > summary::marker { content: ""; }
+:is(.source-management details, details.collapsible) > summary::after {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  margin-right: 5px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+}
+:is(.source-management details, details.collapsible)[open] > summary::after { transform: rotate(45deg); }
+@media (forced-colors: active) {
+  input[type="checkbox"] { border-color: ButtonText; }
+  input[type="checkbox"]:checked,
+  input[type="checkbox"]:indeterminate { background: Highlight; color: HighlightText; forced-color-adjust: none; }
+}

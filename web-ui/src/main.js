@@ -6,5 +6,6 @@ import './styles/v9.css'
 import './styles/v10.css'
 import './styles/shell.css'
 import './styles/bubbles.css'
+import './styles/control-skin.css'
 
 createApp(App).mount('#app')

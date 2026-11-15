@@ -181,6 +181,16 @@ const captureTotal = ref(0)
 const detailItem = ref(null)
 const transaction = ref(null)
 const captureLookup = ref('')
+const captureLookupError = ref('')
+function lookupCapture() {
+  if (locked.value) return
+  captureLookupError.value = ''
+  if (!/^cap:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(captureLookup.value)) {
+    captureLookupError.value = '请输入完整抓包会话 ID（cap:UUID）'
+    return
+  }
+  openDetail({ contextId: captureLookup.value })
+}
 const exportOpen = ref(false)
 const detail = ref(null)
 const detailTitle = ref('')
@@ -404,10 +414,11 @@ function itemSub(item) {
     <LogExportPanel v-if="exportOpen" :store="store" :kind="transaction ? 'http' : tab" :ids="selected" :detail-id="detailOpen ? String(transaction?.id || detailItem?.contextId || detailItem?.id || detailItem?.name || '') : ''" :date="date" @close="exportOpen = false" />
     <div v-show="!detailOpen" class="section">
       <LogActions :store="store" :disabled="locked" @open="(kind, item) => { tab = kind; selected = []; items = []; total = null; offset = 0; hasMore = false; openDetail(item) }" />
-      <form v-if="tab === 'capture'" class="actions" @submit.prevent="openDetail({ contextId: captureLookup })">
-        <button type="button" :disabled="locked || s.bridgeKind !== 'android' || s.bootstrap?.capabilities?.interactiveCapture !== true" @click="emit('open-capture-browser')">浏览器抓包</button>
+      <form v-if="tab === 'capture'" class="actions" novalidate @submit.prevent="lookupCapture">
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="locked || s.bridgeKind !== 'android' || s.bootstrap?.capabilities?.interactiveCapture !== true" @click="emit('open-capture-browser')">浏览器抓包</button>
         <input v-model="captureLookup" class="input" aria-label="抓包会话 ID" placeholder="cap:完整会话 ID" :disabled="locked" pattern="cap:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" required />
-        <button :disabled="locked">按 ID 查找</button>
+        <button class="btn btn-primary btn-sm" type="submit" :disabled="locked">按 ID 查找</button>
+        <p v-if="captureLookupError" class="err" role="alert">{{ captureLookupError }}</p>
       </form>
       <div class="section-head">
         <h3 class="section-title">日志</h3>
@@ -439,7 +450,7 @@ function itemSub(item) {
           @keyup.enter="load(true)"
         />
       </div>
-      <div v-if="tab === 'operation'" class="filter-row">
+      <div v-if="tab === 'operation'" class="filter-row operation-filters">
         <!-- Operation filters -->
         <div class="segmented wrap" role="group" aria-label="级别">
           <button v-for="option in [{ value: '', label: '全部级别' }, { value: 'I', label: '信息' }, { value: 'W', label: '警告' }, { value: 'E', label: '错误' }]"
@@ -449,7 +460,7 @@ function itemSub(item) {
         <input v-model="category" :disabled="locked" class="input" placeholder="category（如 tool/mcp）" aria-label="分类" @keyup.enter="load(true)" />
       </div>
       <div v-if="tab === 'http' || tab === 'operation'" class="filter-row">
-        <button v-if="localDelete" :disabled="locked || !date" @click="askDeleteDay">删除该日全部</button>
+        <button class="btn btn-ghost btn-sm danger" type="button" v-if="localDelete" :disabled="locked || !date" @click="askDeleteDay">删除该日全部</button>
         <div class="log-date-filter" role="group" aria-label="日志日期">
           <div class="log-date-actions">
             <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="changeDate(-1)">上一天</button>
@@ -457,8 +468,8 @@ function itemSub(item) {
             <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="changeDate(1)">下一天</button>
           </div>
           <div class="log-date-value" aria-live="polite">
-            <span v-if="tab === 'operation' && !operationDateEnabled">最近记录（未按日期筛选）；日期操作目标：{{ date }}</span>
-            <time v-else-if="date" :datetime="date">{{ date }}</time>
+            <span v-if="tab === 'operation' && !operationDateEnabled" class="log-date-description">最近记录（未按日期筛选）；日期操作目标：</span>
+            <time v-if="date" :datetime="date">{{ date }}</time>
             <span v-else>全部日期</span>
             <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" :aria-pressed="!date" @click="changeDate('all')">全部日期</button>
           </div>
@@ -479,9 +490,9 @@ function itemSub(item) {
 
       <div v-if="localDelete" class="actions" aria-label="日志选择">
         <span>已选 {{ selected.length }} 条（最多 100 条）</span>
-        <button class="btn btn-ghost btn-sm" :disabled="locked || !items.length" @click="selectLoaded">全选已加载</button>
-        <button class="btn btn-ghost btn-sm" :disabled="locked || !selected.length" @click="selected = []">取消选择</button>
-        <button class="btn btn-ghost btn-sm" :disabled="locked || !selected.length" @click="askDelete()">删除所选</button>
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="locked || !items.length" @click="selectLoaded">全选已加载</button>
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="locked || !selected.length" @click="selected = []">取消选择</button>
+        <button class="btn btn-ghost btn-sm danger" type="button" :disabled="locked || !selected.length" @click="askDelete()">删除所选</button>
       </div>
       <p v-if="listError" class="code-block err" role="alert">{{ listError }}</p>
       <EmptyState v-if="loading" title="正在读取日志" :text="currentTab.tool" :busy="true" />
@@ -500,9 +511,9 @@ function itemSub(item) {
             <span class="detail-link">查看详情 <AppIcon name="chevron-right" :size="15" /></span>
           </button>
           <span v-if="isCaptureHttp(item)" class="muted small">抓包事务不能单删
-            <button class="btn btn-ghost btn-sm" :disabled="locked" @click="switchTab('capture')">前往抓包页</button>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="locked" @click="switchTab('capture')">前往抓包页</button>
           </span>
-          <button v-if="localDelete" class="btn btn-ghost btn-sm" type="button" :disabled="locked || !logId(item)" @click="askDelete(item)">删除</button>
+          <button v-if="localDelete" class="btn btn-ghost btn-sm danger" type="button" :disabled="locked || !logId(item)" @click="askDelete(item)">删除</button>
         </div>
       </div>
       <div v-if="supportsPaging && (offset > 0 || hasMore)" class="pager">
@@ -544,8 +555,8 @@ function itemSub(item) {
       <p v-if="detailError" class="code-block err">{{ detailError }}</p>
       <template v-if="tab === 'capture' && !transaction">
         <p>已加载 {{ captureRows.length }} / {{ captureTotal }} 条事务</p>
-        <button v-for="row in captureRows" :key="row.id" class="log-row" :data-transaction-id="row.id" :disabled="detailBusy" @click="openTransaction(row)">#{{ row.id }} {{ row.method }} {{ row.statusCode }} {{ row.url }}</button>
-        <button v-if="captureRows.length < captureTotal" :disabled="detailBusy" @click="moreCapture">加载更多事务</button>
+        <button type="button" v-for="row in captureRows" :key="row.id" class="log-row" :data-transaction-id="row.id" :disabled="detailBusy" @click="openTransaction(row)">#{{ row.id }} {{ row.method }} {{ row.statusCode }} {{ row.url }}</button>
+        <button class="btn btn-ghost btn-sm" type="button" v-if="captureRows.length < captureTotal" :disabled="detailBusy" @click="moreCapture">加载更多事务</button>
       </template>
       <pre v-if="transaction?.text" class="code-block tall">{{ transaction.text }}</pre>
       <pre v-else-if="detail && (tab !== 'capture' || !captureRows.length)" class="code-block tall">{{ detail }}</pre>
@@ -584,6 +595,10 @@ function itemSub(item) {
   gap: 8px;
   margin-top: 8px;
 }
+
+.operation-filters { display: grid; grid-template-columns: minmax(0, 1fr); }
+.log-date-description { flex-basis: 100%; }
+.log-date-value time { white-space: nowrap; }
 
 .filter-row .input {
   flex: 1;

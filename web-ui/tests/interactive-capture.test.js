@@ -2,7 +2,9 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { describe, it, expect, vi } from 'vitest'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+const execFileAsync = promisify(execFile)
 
 describe('interactive capture workbench', () => {
   it('provides a separate visible-browser workbench', () => {
@@ -117,9 +119,11 @@ describe('interactive capture workbench', () => {
   })
   it('renders a receipt produced by the actual JVM host/exporter', async () => {
     // Generate from current production Kotlin every run, not optional/stale JSON.
-    const receipt = JSON.parse(execFileSync('python3', [
+    // Keep Vitest's RPC heartbeat alive under the shared one-CPU QA budget.
+    const { stdout } = await execFileAsync('python3', [
       resolve('tests/fixtures/capture-export-receipt.py'),
-    ], { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'inherit'] }))
+    ], { encoding: 'utf8', timeout: 120_000 })
+    const receipt = JSON.parse(stdout)
     expect(receipt).toMatchObject({ saved: true, cancelled: false, count: 1, total: 1, partial: true, missingResources: 1, omittedResources: 0 })
     const { default: Workbench } = await import('../src/components/InteractiveCaptureWorkbench.vue')
     const wrapper = mount(Workbench, { props: { call: async a => a.endsWith('.export') ? receipt : { phase: 'saved', contextId: 'cap:export', total: receipt.total } } })

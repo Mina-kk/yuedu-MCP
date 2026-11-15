@@ -665,7 +665,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 .sources-page .source-entry.selecting > .source-row { grid-column: 2; }
 .source-pick { grid-column: 1; grid-row: 1; min-height: 44px; display: flex; justify-content: center; align-items: center; align-self: stretch; }
 .source-pick input { width: 22px; height: 22px; accent-color: var(--c1); }
-.source-row-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); padding: 0 4px; }
+.source-row-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; border-top: 1px solid var(--line); padding: 0 4px; }
 .source-row-more { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; border-top: 1px solid var(--line); }
 .sources-page .btn { min-height: 44px; height: auto; min-width: 44px; white-space: normal; padding: 6px 8px; }
 .source-row-actions .btn { border: 0; border-radius: 8px; background: transparent; font-size: 12px; }

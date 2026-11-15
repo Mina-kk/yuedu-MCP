@@ -63,6 +63,16 @@ async function act(action, args = {}) {
   }
   finally { busy.value = false; requestAnimationFrame(viewport) }
 }
+function submitUrl() {
+  if (busy.value || state.value.phase === 'finishing') return
+  let parsed
+  try { parsed = new URL(url.value) } catch { /* Report in Vue, never a native validation bubble. */ }
+  if (!parsed || !/^https?:\/\//i.test(url.value) || !['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    error.value = '需要不含凭据的 HTTP/HTTPS URL'
+    return
+  }
+  act(state.value.phase === 'active' ? 'navigate' : 'open', { url: url.value })
+}
 function togglePanel() { panel.value = !panel.value; refresh(); requestAnimationFrame(viewport) }
 function back() {
   if (busy.value) return
@@ -90,19 +100,19 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="capture-workbench">
-    <header><button :disabled="busy" @click="back">返回</button><strong>浏览器抓包</strong><span>{{ state.phase === 'saved' ? '已保存' : state.phase === 'failed' ? '未确认保存' : state.phase === 'finishing' ? '正在结算' : state.phase === 'active' ? '录制中' : '未开始' }}</span></header>
+    <header><button type="button" class="btn btn-ghost btn-sm" :disabled="busy" @click="back">返回</button><strong>浏览器抓包</strong><span>{{ state.phase === 'saved' ? '已保存' : state.phase === 'failed' ? '未确认保存' : state.phase === 'finishing' ? '正在结算' : state.phase === 'active' ? '录制中' : '未开始' }}</span></header>
     <p class="notice">真实可交互网页；GET/HEAD 为 OkHttp 供给，POST 与部分重定向仅观察，不是完整网络栈抓包。仅允许公网 HTTP(S)。</p>
-    <form @submit.prevent="act(state.phase === 'active' ? 'navigate' : 'open', { url })">
-      <input v-model="url" aria-label="抓包网址" placeholder="https://example.com" :disabled="busy || state.phase === 'finishing'" />
-      <button :disabled="busy || !url.trim() || state.phase === 'finishing'">前往</button>
+    <form novalidate @submit.prevent="submitUrl">
+      <input class="input" type="url" required v-model="url" aria-label="抓包网址" placeholder="https://example.com" :disabled="busy || state.phase === 'finishing'" />
+      <button type="submit" class="btn btn-primary btn-sm" :disabled="busy || !url.trim() || state.phase === 'finishing'">前往</button>
     </form>
     <nav>
-      <button :disabled="busy || !state.canGoBack || state.phase !== 'active'" @click="act('back')">后退</button>
-      <button :disabled="busy || !state.canGoForward || state.phase !== 'active'" @click="act('forward')">前进</button>
-      <button :disabled="busy || state.phase !== 'active'" @click="act('reload')">刷新</button>
-      <button :disabled="!state.contextId || busy" @click="togglePanel">{{ panel ? '网页' : '事务' }} ({{ state.total || 0 }})</button>
-      <button :disabled="busy || !['active', 'finishing', 'failed'].includes(state.phase)" @click="act('finish')">结束并保存</button>
-      <button :disabled="busy || state.phase !== 'saved'" @click="confirmExport = true; viewport()">导出会话</button>
+      <button type="button" class="btn btn-ghost btn-sm" :disabled="busy || !state.canGoBack || state.phase !== 'active'" @click="act('back')">后退</button>
+      <button type="button" class="btn btn-ghost btn-sm" :disabled="busy || !state.canGoForward || state.phase !== 'active'" @click="act('forward')">前进</button>
+      <button type="button" class="btn btn-ghost btn-sm" :disabled="busy || state.phase !== 'active'" @click="act('reload')">刷新</button>
+      <button type="button" class="btn btn-ghost btn-sm" :disabled="!state.contextId || busy" @click="togglePanel">{{ panel ? '网页' : '事务' }} ({{ state.total || 0 }})</button>
+      <button type="button" class="btn btn-ghost btn-sm" :disabled="busy || !['active', 'finishing', 'failed'].includes(state.phase)" @click="act('finish')">结束并保存</button>
+      <button type="button" class="btn btn-ghost btn-sm" :disabled="busy || state.phase !== 'saved'" @click="confirmExport = true; viewport()">导出会话</button>
     </nav>
     <p class="url">{{ state.url }} <small>{{ state.contextId }}</small></p>
     <p v-if="error" role="alert">{{ error }}</p>
@@ -115,22 +125,22 @@ onBeforeUnmount(() => {
     </p>
     <div ref="slot" class="browser-slot" aria-label="隔离交互网页区域">
       <p v-if="state.phase !== 'active' && !panel && !detail">{{ state.phase === 'saved' ? '会话已结束，可查看事务或导出会话。' : '输入公网网址开始；网页由隔离 Android WebView 显示。' }}</p>
-      <section v-if="detail" class="transactions"><button @click="detail = null; viewport()">返回事务</button><pre>{{ JSON.stringify(detail, null, 2) }}</pre></section>
+      <section v-if="detail" class="transactions"><button type="button" class="btn btn-ghost btn-sm" @click="detail = null; viewport()">返回事务</button><pre>{{ JSON.stringify(detail, null, 2) }}</pre></section>
       <section v-else-if="panel" class="transactions">
         <p>已加载 {{ rows.length }} / {{ state.total || 0 }} 条</p>
-        <button v-for="row in rows" :key="row.id" class="transaction" :disabled="busy" @click="act('detail', { id: row.id })">{{ row.statusCode }} {{ row.method }} {{ row.url }}</button>
-        <button v-if="rows.length < state.total" :disabled="busy" @click="act('transactions', { offset: rows.length })">加载更多</button>
+        <button type="button" class="btn btn-ghost btn-sm transaction" v-for="row in rows" :key="row.id" :disabled="busy" @click="act('detail', { id: row.id })">{{ row.statusCode }} {{ row.method }} {{ row.url }}</button>
+        <button type="button" class="btn btn-ghost btn-sm" v-if="rows.length < state.total" :disabled="busy" @click="act('transactions', { offset: rows.length })">加载更多</button>
       </section>
     </div>
     <div v-if="confirmExport" role="dialog" aria-modal="true" aria-label="导出风险确认" class="export-confirm">
       <p>导出包含全部已存事务与可用二进制正文，URL/query 和正文可能含敏感信息。抓取时截断或仅观察的数据无法补回。</p>
-      <button :disabled="busy" @click="confirmExport = false; viewport()">取消</button>
-      <button :disabled="busy" @click="act('export')">确认导出</button>
+      <button type="button" class="btn btn-ghost btn-sm" :disabled="busy" @click="confirmExport = false; viewport()">取消</button>
+      <button type="button" class="btn btn-primary btn-sm" :disabled="busy" @click="act('export')">确认导出</button>
     </div>
   </section>
 </template>
 
 <style scoped>
 .capture-workbench{display:flex;flex-direction:column;position:relative;height:100%;min-height:0;gap:8px;padding:8px;box-sizing:border-box;background:var(--bg,#fff);color:var(--text,#222)}
-header,form,nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}header strong{flex:1}form input{flex:1;min-width:100px}button,input{font:inherit;padding:8px}button:disabled{opacity:.5}.notice,.url{font-size:12px;margin:0;overflow-wrap:anywhere}.browser-slot{flex:1;min-height:80px;position:relative}.transactions{height:100%;overflow:auto}.transaction{display:block;width:100%;text-align:left;overflow-wrap:anywhere;margin-bottom:6px}pre{white-space:pre-wrap;overflow-wrap:anywhere}.export-confirm{position:absolute;inset:0;z-index:5;background:var(--bg,#fff);padding:24px;overflow:auto}@media(max-height:500px){.notice{display:none}button,input{padding:4px}.capture-workbench{gap:4px}.url{max-height:30px;overflow:hidden}}
+header,form,nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}header strong{flex:1}form input{flex:1;min-width:100px}.notice,.url{font-size:12px;margin:0;overflow-wrap:anywhere}.browser-slot{flex:1;min-height:80px;position:relative}.transactions{height:100%;overflow:auto}.transaction{height:auto;min-height:32px;white-space:normal;display:block;width:100%;text-align:left;overflow-wrap:anywhere;margin-bottom:6px}pre{white-space:pre-wrap;overflow-wrap:anywhere}.export-confirm{position:absolute;inset:0;z-index:5;background:var(--bg,#fff);padding:24px;overflow:auto}@media(max-height:500px){.notice{display:none}.capture-workbench{gap:4px}.url{max-height:30px;overflow:hidden}}
 </style>

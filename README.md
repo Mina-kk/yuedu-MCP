@@ -5,14 +5,15 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`2.0.9`（versionCode 210，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.10`（versionCode 211，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
-- 下载：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)（每个版本附带已签名 APK）
+- 本分支下载：[2.0.10 正式签名 APK](https://github.com/Mina-kk/yuedu-MCP/releases/download/v2.0.10-rust-vue/yuedu-MCP-2.0.10-release.apk) · [版本说明与源码](https://github.com/Mina-kk/yuedu-MCP/releases/tag/v2.0.10-rust-vue)（独立 Pre-release，不替换 main 的 Latest）
+- 历史版本：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)
 
-## 2.0.9 阅读导入与主题气泡渐变修复
+## 2.0.10 业务控件统一与书源紧凑气泡
 
-本节描述当前源码（versionCode 210），不表示正式 APK 已发布或设备验收已完成。列表“更多 → 导入阅读”与详情使用同一可见交互：单客户端直接唤起，多个客户端在当前视口的 Vue 弹层中选择，不再插入屏外列表顶部。取消后迟到查询不重开选择器，保留精确书源或当前草稿；显示已唤起而非已导入。书源操作、更多菜单及客户端选择补齐随现有主题变化的淡色气泡渐变，浅深模式分别处理，不改 M 球蓝白半隐或书源规则。以下 Vue 操作链路保持：
+本节描述当前源码（versionCode 211），不表示正式 APK 已发布或设备验收已完成。日志、诊断、日志导出与交互抓包工作台补齐 Vue 主题控件，去掉默认灰按钮、系统式复选框与展开标记；业务表单错误在页面内显示，不弹浏览器默认验证气泡。书源操作使用 MCP 相同的柔和浅色渐变、细描边和紧凑圆角，可见气泡缩小而保留触摸区域，不再另用大片粉色底。保留原有直接复制/导出/分享和当前视口阅读导入选择，不改规则、鉴权、M 球蓝白半隐、文件授权或系统分享。以下 Vue 操作链路保持：
 
 - MCP 接入：自定义令牌、请求头名称/值/整行复制，以及权限与后台运行设置入口。
 - 书源：原文导出、导入阅读入口、版本管理与经确认的批量删除；并发新增不纳入旧快照删除。

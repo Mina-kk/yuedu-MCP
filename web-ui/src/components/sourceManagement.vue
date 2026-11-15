@@ -104,7 +104,7 @@ defineExpose({invalidate, handleBack})
 <style scoped>
 .source-management { margin:8px 0; overflow-wrap:anywhere; min-width:0; }
 .source-management .btn, .source-management summary { min-height:44px; height:auto; min-width:44px; white-space:normal; padding:6px 8px; }
-.draft-actions { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px; }
+.draft-actions { display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) minmax(0,1.4fr);gap:4px; }
 .draft-actions .btn { font-size:12px; padding-inline:4px; }
 .options { display:flex;flex-wrap:wrap;gap:4px 12px; }
 .options label { display:flex;align-items:center;gap:6px;min-height:44px; }
