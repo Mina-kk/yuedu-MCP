@@ -136,6 +136,10 @@ body {
 .dialog-text { overflow-wrap: anywhere; max-height: calc(var(--vvh, 100vh) * .45); overflow-y: auto; }
 html[data-keyboard='1'] .app-shell > .tabbar { display: none; }
 
+/* Delivery status belongs above navigation, never over its labels. */
+.app-shell > .toast-host { bottom: calc(96px + var(--safe-bottom)); }
+html[data-keyboard='1'] .app-shell > .toast-host { bottom: 18px; }
+
 /* 页头：吸顶玻璃条，内容滚动时保持可见 */
 .shell-head {
   position: sticky;

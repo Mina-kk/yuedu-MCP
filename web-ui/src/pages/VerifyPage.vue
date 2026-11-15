@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { formatTime } from '../lib/tools.js'
@@ -26,52 +26,122 @@ const activeSession = computed(() => {
   return sessions.value.find((x) => x.id === id) || null
 })
 
-onMounted(() => load())
-// The toolbar lives in App, so its successful completion does not run this
-// page's act(). Re-read persisted rows when the isolated view returns instead
-// of displaying an optimistic COMPLETED tag or waiting for a page re-entry.
-watch(() => [browserOpen.value, s.verificationBrowser?.action], ([open, action], [wasOpen, previousAction]) => {
-  if (!open && (wasOpen || (action === 'completed' && previousAction !== 'completed'))) load()
-})
+const listStale = ref(false)
+let mounted = false
+let refreshTimer
+let listRequest = null
+let pendingRefresh = null
 let loadSequence = 0
+const canRefresh = () => mounted && document.visibilityState === 'visible' &&
+  !browserOpen.value && !busyId.value && s.bridgeKind === 'android'
 
-async function load() {
-  const sequence = ++loadSequence
-  if (s.bridgeKind !== 'android') {
-    listError.value = '验证中心需要 Android 宿主：浏览器模式没有隔离 WebView，无法打开外站验证页。'
-    sessions.value = []
-    return
-  }
-  loading.value = true
-  listError.value = ''
+function scheduleRefresh() {
+  clearTimeout(refreshTimer)
+  if (canRefresh() && !listRequest) refreshTimer = setTimeout(() => load({ background: true }), 2000)
+}
+function visibilityChanged() {
+  clearTimeout(refreshTimer)
+  if (canRefresh()) load({ background: true })
+}
+onMounted(() => {
+  mounted = true
+  document.addEventListener('visibilitychange', visibilityChanged)
+  load()
+})
+onUnmounted(() => {
+  mounted = false
+  ++loadSequence
+  pendingRefresh = null
+  clearTimeout(refreshTimer)
+  document.removeEventListener('visibilitychange', visibilityChanged)
+})
+// App's toolbar completion must re-read persistence, never infer a status.
+watch(() => [browserOpen.value, s.verificationBrowser?.action], ([open, action], [wasOpen, previousAction]) => {
+  if (open) clearTimeout(refreshTimer)
+  else if (wasOpen || (action === 'completed' && previousAction !== 'completed')) load({ background: true })
+  else scheduleRefresh()
+})
+
+// Mutation readbacks also wait for any earlier list call. Invalidating its
+// sequence discards the snapshot without pretending the bridge was cancelled.
+async function readSessions() {
+  while (listRequest) await listRequest.catch(() => {})
+  if (!mounted) throw new Error('验证页面已关闭')
+  const request = props.store.bridge.call('verification.list', {})
+  listRequest = request
   try {
-    const result = await props.store.bridge.call('verification.list', {})
-    if (sequence !== loadSequence) return
-    sessions.value = Array.isArray(result && result.sessions) ? result.sessions : []
-    selectedIds.value = selectedIds.value.filter(id => sessions.value.some(x => x.id === id))
-  } catch (error) {
-    if (sequence !== loadSequence) return
-    sessions.value = []
-    listError.value = (error && error.message) || '验证会话读取失败'
+    const result = await request
+    if (!Array.isArray(result?.sessions)) throw new Error('会话列表格式无效')
+    return result
   } finally {
-    if (sequence === loadSequence) loading.value = false
+    if (listRequest === request) listRequest = null
   }
 }
-
-async function act(method, params, label) {
-  if (locked.value) return null
+function applySessions(result, pruneSelection = false) {
+  if (!mounted) return
+  sessions.value = result.sessions
+  if (pruneSelection) selectedIds.value = selectedIds.value.filter(id => sessions.value.some(x => x.id === id))
+  listError.value = ''
+  listStale.value = false
+}
+async function load({ background = false } = {}) {
+  clearTimeout(refreshTimer)
+  if (!mounted) return
+  if (s.bridgeKind !== 'android') {
+    listError.value = '验证中心需要 Android 宿主：浏览器模式没有隔离 WebView，无法打开外站验证页。'
+    return
+  }
+  const sequence = ++loadSequence
+  // Closing/completing externally must invalidate mutation snapshots too.
+  if (busyId.value || listRequest) {
+    pendingRefresh = { background: background && (pendingRefresh?.background ?? true) }
+    return
+  }
+  if (!canRefresh()) return
+  pendingRefresh = null
+  loading.value = !background && !sessions.value.length
+  try {
+    const result = await readSessions()
+    if (sequence !== loadSequence || !canRefresh()) return
+    applySessions(result, !background)
+  } catch (error) {
+    if (sequence !== loadSequence || !canRefresh()) return
+    listStale.value = true
+    listError.value = error?.message || '验证会话读取失败'
+  } finally {
+    if (mounted) loading.value = false
+    if (pendingRefresh && canRefresh()) load(pendingRefresh)
+    else scheduleRefresh()
+  }
+}
+function beginMutation(id) {
+  busyId.value = id
   actionError.value = ''
-  const id = params && params.id ? params.id : ''
-  busyId.value = id || label
+  ++loadSequence
+  pendingRefresh = null
+  clearTimeout(refreshTimer)
+}
+function endMutation() {
+  if (!mounted) return
+  busyId.value = ''
+  if (pendingRefresh && canRefresh()) load(pendingRefresh)
+  else scheduleRefresh()
+}
+async function act(method, params, label) {
+  if (locked.value || !mounted) return null
+  beginMutation(params?.id || label)
   try {
     const result = await props.store.bridge.call(method, params || {})
-    await load()
+    const sequence = loadSequence
+    const snapshot = await readSessions()
+    if (!mounted) return null
+    if (sequence === loadSequence) applySessions(snapshot)
     return result
   } catch (error) {
-    actionError.value = (error && error.message) || `${label} 失败`
+    if (mounted) actionError.value = error?.message || `${label} 失败`
     return null
   } finally {
-    busyId.value = ''
+    endMutation()
   }
 }
 
@@ -121,12 +191,12 @@ function isRepairedSession(session, id, url) {
 async function repairAddress(id, url) {
   const session = sessions.value.find(x => x.id === id)
   if (locked.value || !session || !canRepair(session)) return
-  busyId.value = id
-  actionError.value = ''
+  beginMutation(id)
   try {
     // 原样提交用户输入，URL/私网校验由宿主负责；不能用 domain/finalUrl 猜地址。
     const receipt = await props.store.bridge.call('verification.repairAddress', { id, url })
-    const result = await props.store.bridge.call('verification.list', {})
+    const result = await readSessions()
+    if (!mounted) return
     if (receipt?.repaired !== true || !isRepairedSession(receipt.session, id, url)) {
       throw new Error('地址补全回执无效')
     }
@@ -135,14 +205,13 @@ async function repairAddress(id, url) {
     if (matches.length !== 1 || !isRepairedSession(matches[0], id, url)) {
       throw new Error('回读未确认同一记录的验证地址')
     }
-    sessions.value = result.sessions
-    selectedIds.value = selectedIds.value.filter(key => sessions.value.some(x => x.id === key))
+    applySessions(result)
     delete repairUrls.value[id]
     props.store.toast('验证地址已补全，请手动打开验证页')
   } catch (error) {
-    actionError.value = `无法确认地址补全结果：${error?.message || '补全失败'}`
+    if (mounted) actionError.value = `无法确认地址补全结果：${error?.message || '补全失败'}`
   } finally {
-    busyId.value = ''
+    endMutation()
   }
 }
 
@@ -162,27 +231,24 @@ function askClear(session) {
 }
 
 async function clearCookies(session) {
-  busyId.value = session.id
-  actionError.value = ''
-  ++loadSequence // Invalidate snapshots started before this mutation.
+  beginMutation(session.id)
   try {
     if (browserOpen.value && s.verificationBrowser.sessionId === session.id) {
       const close = await props.store.bridge.call('verification.browser.close', {})
       if (close?.closed !== true) throw new Error('关闭验证页未获确认')
     }
     const receipt = await props.store.bridge.call('verification.clear', { id: session.id })
-    const result = await props.store.bridge.call('verification.list', {})
+    const result = await readSessions()
+    if (!mounted) return
     const matches = result?.sessions?.filter(x => x.id === session.id) || []
     if (receipt?.cleared !== true || matches.length !== 1 || matches[0].status !== 'WAITING' ||
         matches[0].url !== session.url || matches[0].finalUrl !== '') throw new Error('回读未确认同一记录已重置')
-    ++loadSequence
-    loading.value = false
-    sessions.value = result.sessions
+    applySessions(result)
     delete answers.value[session.id]
     props.store.toast('Cookie 已清除，记录已保留并重置为待验证')
   } catch (error) {
-    actionError.value = `无法确认清 Cookie 结果：${error?.message || '操作失败'}`
-  } finally { busyId.value = '' }
+    if (mounted) actionError.value = `无法确认清 Cookie 结果：${error?.message || '操作失败'}`
+  } finally { endMutation() }
 }
 
 function askExternal(session) {
@@ -248,12 +314,12 @@ function askDelete(session) {
 
 async function deleteRecords(targets) {
   if (locked.value) return
-  busyId.value = 'delete'
-  actionError.value = ''
+  beginMutation('delete')
   let deleted = 0
   const failures = []
   try {
     for (const session of targets) {
+      if (!mounted) return
       let reason = ''
       if (browserOpen.value && s.verificationBrowser.sessionId === session.id) {
         try {
@@ -270,9 +336,10 @@ async function deleteRecords(targets) {
         reason = error?.message || '删除失败'
       }
       try {
-        const result = await props.store.bridge.call('verification.list', {})
+        const result = await readSessions()
+        if (!mounted) return
         if (!Array.isArray(result?.sessions)) throw new Error('会话列表格式无效')
-        sessions.value = result.sessions
+        applySessions(result)
         if (!result.sessions.some(x => x.id === session.id)) {
           deleted++
           selectedIds.value = selectedIds.value.filter(id => id !== session.id)
@@ -285,10 +352,11 @@ async function deleteRecords(targets) {
       }
       failures.push(`${session.domain || session.id}：${reason}`)
     }
+    if (!mounted) return
     actionError.value = failures.join('\n')
     if (deleted) props.store.toast(`已删除 ${deleted} 条验证记录`)
   } finally {
-    busyId.value = ''
+    endMutation()
   }
 }
 
@@ -345,7 +413,7 @@ const statusChip = (status) => {
         <button class="btn btn-ghost btn-sm danger" type="button" :disabled="locked || !selectedIds.length" @click="askDelete()">批量删除</button>
       </div>
       <p v-if="actionError" class="code-block err">{{ actionError }}</p>
-      <p v-if="listError" class="code-block err">{{ listError }}</p>
+      <p v-if="listError" class="code-block err" role="status"><template v-if="listStale">列表可能已过期，保留上次结果；可刷新重试。 </template>{{ listError }}</p>
       <EmptyState v-if="loading" title="正在读取验证会话" text="verification.list" :busy="true" />
       <EmptyState
         v-else-if="!sessions.length && !listError"

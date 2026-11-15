@@ -150,7 +150,7 @@ try {
         const req = JSON.parse(raw)
         sourceQA.calls.push(req)
         let result = {}
-        if (req.method === 'app.bootstrap') result = { service: { running: true }, versionName: '2.0.3-fixture', appearance: { theme, palette: 'lime' }, capabilities: {} }
+        if (req.method === 'app.bootstrap') result = { service: { running: true }, versionName: '2.0.8', appearance: { theme, palette: 'lime' }, capabilities: {} }
         if (req.method === 'tools.list') result = { tools: [] }
         if (req.method === 'tools.call') {
           const { name, arguments: args } = req.params
@@ -234,7 +234,7 @@ try {
         check(text.glyphCount > 0 && text.left >= row.rect.left - 1 && text.right <= row.rect.right + 1, `${label}: ${part} glyphs escape card`)
         check(text.top >= text.rect.top - 1 && text.bottom <= text.rect.bottom + 1, `${label}: ${part} glyphs escape own text box`)
       }
-      check(row.meta.children.map(child => child.text).join('|') === 'VALIDATED|3 版本|2026-11-10 23:08:59', `${label}: metadata or full timestamp missing`)
+      check(row.meta.children.map(child => child.text).join('|') === '静态校验通过|3 版本|2026-11-10 23:08:59', `${label}: metadata or full timestamp missing`)
       if (index < 2) check(row.name.lineCount === 1, `${label}: short Chinese title must be horizontal, observed ${row.name.lineCount} lines`)
       if (index === 2 || index === 3) {
         check(row.name.lineCount > 1 && row.name.maxLineGlyphs >= 4, `${label}: long title must wrap without a single-character column`)
@@ -252,8 +252,11 @@ try {
     // Exercise production handlers with actual pointer input from a scrolled list.
     // Geometrically broken RED cases skip interaction, not geometry assertions.
     if (!lastCase.failures.length) {
-      await click('.source-entry > input[type="checkbox"]', 9)
-      check(await evaluate(() => document.querySelectorAll('.source-entry > input')[9].checked), 'Checkbox did not select target')
+      await click('[data-selection-toggle]')
+      // New management controls must receive the same text scale before saving the scroll anchor.
+      await enlargeText(scale)
+      await click('.source-entry input[type="checkbox"]', 9)
+      check(await evaluate(() => document.querySelectorAll('.source-entry input')[9].checked), 'Checkbox did not select target')
       const rowHit = await click('.source-row', 9)
       const listTop = rowHit.rect.top - rowHit.main.top
       await poll(() => evaluate(() => !!document.querySelector('textarea[aria-label="书源 JSON"]')), 'source detail after row click')
@@ -267,9 +270,10 @@ try {
       const backHit = await click('[data-detail-back]')
       await poll(() => evaluate(() => !document.querySelector('[data-detail-back]') && document.querySelectorAll('.source-row').length === 20), 'return to list')
       const returned = await evaluate(() => ({ offset: document.querySelectorAll('.source-row')[9].getBoundingClientRect().top - document.querySelector('main').getBoundingClientRect().top,
-        checked: document.querySelectorAll('.source-entry > input')[9].checked, top: document.querySelector('main').scrollTop }))
+        checked: document.querySelectorAll('.source-entry input')[9].checked, top: document.querySelector('main').scrollTop }))
       check(Math.abs(returned.offset - listTop) <= 1 && returned.top > 50 && returned.checked, 'Return must restore scrolled list and selection')
-      const deleteHit = await click('.source-entry > button.btn', 9)
+      await click('[data-source-more]', 9)
+      const deleteHit = await click('.source-row-more .danger')
       await poll(() => evaluate(() => !!document.querySelector('[role="alertdialog"]')), 'delete confirmation')
       await enlargeText(scale)
       await delay(300)
@@ -282,7 +286,8 @@ try {
       await poll(() => evaluate(() => !document.querySelector('[role="alertdialog"]')), 'cancel deletion')
       check(await evaluate(() => sourceQA.deleted.length === 0 && document.querySelectorAll('.source-row').length === 20), 'Cancel must not delete data')
       // The last card's delete action must remain reachable at the same size.
-      const lastDeleteHit = await click('.source-entry > button.btn', 19)
+      await click('[data-source-more]', 19)
+      const lastDeleteHit = await click('.source-row-more .danger')
       await poll(() => evaluate(() => !!document.querySelector('[role="alertdialog"]')), 'last source delete confirmation')
       await enlargeText(scale)
       await delay(300)

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onBeforeUnmount } from 'vue'
 import { prettyJson } from '../lib/tools.js'
+import { deliverSources } from '../lib/source-delivery.js'
 const props = defineProps({store:Object, source:String})
 const emit = defineEmits(['changed'])
 const exclude = ref({excludeLogin:false,excludeCaptcha:false,excludeFailed:false,excludeUnverified:false})
@@ -18,13 +19,9 @@ function invalidate() { report.value=null; targets.value=null; deleting.value=nu
 function analyze() { return perform(async()=>{ invalidate(); report.value=await call('analyze',{exclude:{...exclude.value},collapseIdentical:collapseIdentical.value}) }) }
 function payload() { return props.source != null ? {source:props.source} : {token:report.value?.token} }
 function deliver(action, packageName) { return perform(async()=>{
- const res=await call('deliver',{...payload(),action,...(packageName?{packageName}:{})})
- if(action==='targets') { if(!Array.isArray(res.targets)) throw new Error('客户端列表回执无效'); targets.value=res.targets; return }
- if(action==='copy' && res.copied!==true) throw new Error('复制未确认')
- if(action==='share' && res.launched!==true) throw new Error('分享未唤起')
- if(action==='reader' && !(res.launched===true && res.confirmed===false && res.confirmation==='pending_user')) throw new Error('阅读唤起回执无效')
- if(action==='save' && !res.saved) { if(res.cancelled) return; throw new Error('文件保存未确认') }
- props.store.toast(action==='reader'?'已唤起阅读勾选页，待用户确认；阅读端未覆盖':action==='share'?'已打开系统分享，未确认接收方保存':action==='copy'?'已复制完整书源数组':'已导出完整书源数组')
+ const res=await deliverSources(props.store,payload(),action,packageName)
+ if(res.cancelled) return
+ if(action==='targets') { targets.value=res.targets; return }
  targets.value=null
  }) }
 function askDelete(group) { deleting.value=group || {domain:null,ids:[],all:true}; confirmation.value='' }
@@ -68,13 +65,13 @@ defineExpose({invalidate})
    </div>
   </template>
   <template v-if="report || source != null">
-   <p v-if="source != null" class="hint">以下操作使用当前编辑原文（包括未保存修改），输出完整 JSON 数组；分享可能包含 Cookie/header 等敏感字段。</p>
+   <p v-if="source != null" class="hint">复制 / 导出 / 分享当前草稿（含未保存修改），不会自动保存。输出完整 JSON 数组，可能含 Cookie/header 等敏感字段。</p>
    <p v-else>全库 {{report.total}} 条 · 保留 {{report.keptCount}} · 排除 {{report.excludedCount}} · 导出 {{report.exportCount ?? report.keptCount}}</p>
-   <div class="actions">
-    <button class="btn btn-ghost" :disabled="busy" @click="deliver('copy')">复制完整数组</button>
-    <button class="btn btn-ghost" :disabled="busy" @click="deliver('share')">分享书源 JSON</button>
-    <button class="btn btn-ghost" :disabled="busy" @click="deliver('save')">导出完整数组</button>
-    <button class="btn btn-ghost" :disabled="busy" @click="deliver('targets')">导入指定阅读客户端</button>
+   <div class="actions" :class="{ 'draft-actions': source != null }">
+    <button data-source-action="copy" class="btn btn-ghost" :disabled="busy" @click="deliver('copy')">{{source != null ? '复制' : '复制完整数组'}}</button>
+    <button data-source-action="save" class="btn btn-ghost" :disabled="busy" @click="deliver('save')">{{source != null ? '导出' : '导出完整数组'}}</button>
+    <button data-source-action="share" class="btn btn-ghost" :disabled="busy" @click="deliver('share')">{{source != null ? '分享' : '分享书源 JSON'}}</button>
+    <button class="btn btn-ghost" :disabled="busy" @click="deliver('targets')">{{source != null ? '导入阅读' : '导入指定阅读客户端'}}</button>
    </div>
    <div v-if="targets" class="section" aria-label="选择阅读客户端">
     <p>选择客户端，仅唤起勾选页，不代表已导入。</p><p v-if="!targets.length">没有可处理书源导入的阅读客户端。</p>
@@ -104,7 +101,11 @@ defineExpose({invalidate})
  </div>
 </template>
 <style scoped>
-.source-management { margin:12px 0; overflow-wrap:anywhere; }
-.options { display:flex;flex-wrap:wrap;gap:12px; }
+.source-management { margin:8px 0; overflow-wrap:anywhere; min-width:0; }
+.source-management .btn, .source-management summary { min-height:44px; height:auto; min-width:44px; white-space:normal; padding:6px 8px; }
+.draft-actions { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px; }
+.draft-actions .btn { font-size:12px; padding-inline:4px; }
+.options { display:flex;flex-wrap:wrap;gap:4px 12px; }
+.options label { display:flex;align-items:center;gap:6px;min-height:44px; }
 .group { border-bottom:1px solid var(--line);padding:8px 0; }
 </style>

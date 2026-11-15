@@ -64,9 +64,13 @@ describe('VerifyPage completion refresh', () => {
     await flushPromises()
     store.state.verificationBrowser = { open: false, sessionId: 'qa', action: 'completed' }
     await flushPromises()
-    expect(wrapper.get('.session').text()).toContain('已完成')
+    // Foreground refresh is single-flight: completion queues a fresh read
+    // rather than overlapping the still-pending closed-event snapshot.
+    expect(reads).toBe(2)
+    expect(wrapper.get('.session').text()).not.toContain('已完成')
     resolveStale({ sessions: [row('qa', 'WAITING')] })
     await flushPromises()
+    expect(reads).toBe(3)
     expect(wrapper.get('.session').text()).toContain('已完成')
     expect(wrapper.get('.session').text()).not.toContain('待处理')
   })

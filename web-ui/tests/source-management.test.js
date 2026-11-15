@@ -3,13 +3,14 @@ import { mount, flushPromises } from '@vue/test-utils'
 import SourcesPage from '../src/pages/SourcesPage.vue'
 const snapshot = { token: 's1', total: 2, keptCount: 2, excludedCount: 0, groups: [{ domain: 'a.example', ids: ['p1','p2'] }], kept: [], excluded: [], conflicts: [], clusters: [] }
 function setup() {
- const store = { state: {}, markPageDirty: vi.fn(), toast: vi.fn(), confirmDialog: vi.fn(), callTool: vi.fn(async () => ({content:[{type:'text',text:'{"items":[],"total":0,"hasMore":false}'}]})), bridge: { call: vi.fn(async (method) => method === 'sources.analyze' ? snapshot : { copied: true }) } }
+ const store = { state: { bridgeKind: 'android' }, markPageDirty: vi.fn(), toast: vi.fn(), confirmDialog: vi.fn(), callTool: vi.fn(async () => ({content:[{type:'text',text:'{"items":[],"total":0,"hasMore":false}'}]})), bridge: { call: vi.fn(async (method) => method === 'sources.analyze' ? snapshot : { copied: true }) } }
  return { store, wrapper: mount(SourcesPage,{ props:{store} }) }
 }
 const button = (w,t) => w.findAll('button').find(b=>b.text()===t)
 describe('source management',()=>{
  it('批量删除可用但快照冲突拒绝不显示成功',async()=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   expect(wrapper.text()).not.toContain('批量删除暂不可用')
   await button(wrapper,'清空本地全库').trigger('click')
@@ -22,6 +23,7 @@ describe('source management',()=>{
  })
  it.each(['all','domain'])('真实确认范围删除成功：%s',async(scope)=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   await button(wrapper,scope==='all'?'清空本地全库':'删除该域名整组').trigger('click')
   await wrapper.find('[aria-label="删除确认文字"]').setValue(scope==='all'?'清空全库':'a.example')
@@ -34,6 +36,7 @@ describe('source management',()=>{
  })
  it('全库删除后新增不得宣称清空，必须提示重新分析',async()=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   await button(wrapper,'清空本地全库').trigger('click')
   await wrapper.find('[aria-label="删除确认文字"]').setValue('清空全库')
@@ -52,6 +55,7 @@ describe('source management',()=>{
   {verified:true,deletedCount:2}
  ])('同ID重建或不完整/越界回执不报成功 %#',async receipt=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   await button(wrapper,'清空本地全库').trigger('click')
   await wrapper.find('[aria-label="删除确认文字"]').setValue('清空全库')
@@ -64,6 +68,7 @@ describe('source management',()=>{
  })
  it('过滤变化立即废弃旧快照',async()=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   await wrapper.find('.options input').setValue(true)
   expect(button(wrapper,'复制完整数组')).toBeUndefined()
@@ -73,6 +78,7 @@ describe('source management',()=>{
  })
  it('清库必须输入精确文字，取消不删除，错误不报成功',async()=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   await button(wrapper,'清空本地全库').trigger('click')
   expect(button(wrapper,'确认永久删除').attributes('disabled')).toBeDefined()
@@ -88,6 +94,7 @@ describe('source management',()=>{
  })
  it('指定阅读包名后只报告待确认',async()=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   store.bridge.call.mockResolvedValueOnce({targets:[{packageName:'reader.test',label:'阅读测试'}]})
   await button(wrapper,'导入指定阅读客户端').trigger('click'); await flushPromises()
@@ -99,6 +106,7 @@ describe('source management',()=>{
  })
  it('实时检测先确认，取消请求交给宿主而非只停止轮询',async()=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   await button(wrapper,'实时检测此源').trigger('click')
   expect(store.bridge.call.mock.calls.some(([m])=>m==='sources.checkStart')).toBe(false)
@@ -111,6 +119,7 @@ describe('source management',()=>{
  })
  it('分析全库默认无排除无折叠，复制只使用完整宿主快照',async()=>{
   const {store,wrapper}=setup(); await flushPromises()
+  await wrapper.find('button[aria-expanded]').trigger('click')
   expect(button(wrapper,'全库分析与分组')).toBeTruthy()
   await button(wrapper,'全库分析与分组').trigger('click'); await flushPromises()
   expect(store.bridge.call).toHaveBeenCalledWith('sources.analyze',{exclude:{excludeLogin:false,excludeCaptcha:false,excludeFailed:false,excludeUnverified:false},collapseIdentical:false})

@@ -34,6 +34,7 @@ JS：`StudioBridge.postMessage(JSON.stringify({id, method, params}))`
 | `verification.clear` | `{id}` | `{cleared:true}`；清 Cookie 并重置待验证，不用于删除记录 |
 | `verification.close` | `{id}` | `{closed:true}`；删除会话记录、保留 Cookie |
 | `verification.browser.close` | `{}` | `{closed:true}`；销毁隔离验证页返回 web 控制台 |
+| `sources.deliver` | `{action:"copy"|"share"|"save"|"targets"|"reader", source?:string, projectIds?:string[], scope?:"all", token?:string, packageName?:string}` | source、projectIds、scope、token 必须恰有一个。projectIds 为最多500个唯一非空精确ID，全部命中才交付；scope=all 为宿主本次全库快照，不受分页及前端筛选限制。保留全部原文/版本，不重序列化数值。token沿用分析快照，过期拒绝。copy须copied=true，save须saved=true（取消不报成功），share/reader的launched仅表示交给系统，不代表接收或阅读导入完成。share用text/plain MIME的.json文件、EXTRA_STREAM/ClipData/read grant兼容原版；保存用application/json SAF内部临时文件流与digest回读，避免全库原文再经JS；用户取消回saved:false/cancelled:true，普通file.export及外部桥消息2MiB上限不变。 |
 | `file.export` | `{name,text,mime?}` | `{saved:true}` 或取消状态；系统 SAF，不接受路径 |
 | `file.import` | `{}` | `{name,text}` 或取消状态；限制 2MB，系统 SAF |
 | `app.theme` | `{dark:boolean}` | `{applied:true}`；仅同步系统栏图标/背景 |

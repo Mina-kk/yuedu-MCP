@@ -43,21 +43,21 @@ class WebBuildContractTest(unittest.TestCase):
         app = (ROOT / 'app/build.gradle.kts').read_text()
         db = (ROOT / 'app/src/main/java/com/mina/legadostudio/data/db/StudioDatabase.kt').read_text()
         self.assertIn('applicationId = "com.mina.legadostudio"', app)
-        self.assertIn('versionCode = 208', app)
-        self.assertIn('versionName = "2.0.7"', app)
+        self.assertIn('versionCode = 209', app)
+        self.assertIn('versionName = "2.0.8"', app)
         self.assertIn('"studio-v1.db"', db)
         self.assertNotIn('.fallbackToDestructiveMigration', db)
 
     def test_release_version_and_manual_verification_scope_are_documented(self):
         package = json.loads((ROOT / 'web-ui/package.json').read_text())
         lock = json.loads((ROOT / 'web-ui/package-lock.json').read_text())
-        self.assertEqual(package['version'], '2.0.7')
+        self.assertEqual(package['version'], '2.0.8')
         self.assertEqual(lock['version'], package['version'])
         self.assertEqual(lock['packages']['']['version'], package['version'])
         for name in ['README.md', 'BUILDING.md']:
             text = (ROOT / name).read_text()
-            self.assertIn('2.0.7', text)
-            self.assertIn('versionCode 208', text)
+            self.assertIn('2.0.8', text)
+            self.assertIn('versionCode 209', text)
             self.assertIn('验证由用户手动完成', text)
             self.assertIn('不提供自动完成', text)
 

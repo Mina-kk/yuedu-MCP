@@ -84,7 +84,11 @@ internal class StudioWebBridge(
         explicitNulls = false
     }
 
-    private val sourceManagement = SourceManagementModule(activity, ::fileExport)
+    private val sourceManagement = SourceManagementModule(activity, ::sourceFileExport)
+    private suspend fun sourceFileExport(params: JsonObject): JsonElement {
+        val host = safHost ?: throw BridgeFailure(WebBridgeProtocol.ERR_UNSUPPORTED, "当前系统不支持文件保存")
+        return SourceFileExport(activity.cacheDir, host).export(params)
+    }
     private val logManagement by lazy { LogManagementBridge(app) }
     private val logShareLauncher by lazy { LogShareLauncher(activity, logManagement) }
     private var skillManagement: SkillManagementModule? = null

@@ -6,7 +6,8 @@ import EmptyState from '../components/EmptyState.vue'
 import SourceManagement from '../components/sourceManagement.vue'
 import { callToolParsed, formatTime, itemsOf, prettyJson, redactForDisplay } from '../lib/tools.js'
 import { core } from '../lib/core.js'
-import { exportText, importText, sourceJsonSlices } from '../lib/files.js'
+import { importText, sourceJsonSlices } from '../lib/files.js'
+import { deliverSources } from '../lib/source-delivery.js'
 
 // 书源页：list_sources 分页摘要 + get_source 读取原文 + save_source 保存后 get_source 回读。
 // 关键约束：
@@ -42,6 +43,33 @@ const readbackDiff = ref(null)
 const deleteBusy = ref(false)
 const deleteError = ref('')
 const selectedIds = ref([])
+const selecting = ref(false)
+const advancedOpen = ref(false)
+const advancedVisited = ref(false)
+watch(advancedOpen, (open) => { if (open) advancedVisited.value = true })
+const moreId = ref(null)
+const deliveryBusy = ref(false)
+const deliveryError = ref('')
+const readerTargets = ref(null)
+function cancelSelection() { selectedIds.value = []; selecting.value = false }
+function stageLabel(stage) {
+  return ({ DRAFT: '草稿', SAVED: '已保存', VALIDATED: '静态校验通过', TESTED: '已检测', FAILED: '检测失败', IMPORTED: '已导入', VERIFIED: '已验证' })[stage] || '状态待确认'
+}
+async function deliver(payload, action, packageName) {
+  if (deliveryBusy.value || deleteBusy.value || saveBusy.value) return
+  if (payload.projectIds && (!payload.projectIds.length || payload.projectIds.length > 500)) {
+    deliveryError.value = '请选择 1–500 条书源；超过 500 条请使用导出全部或分享全部。'
+    return
+  }
+  deliveryBusy.value = true
+  deliveryError.value = ''
+  try {
+    const res = await deliverSources(props.store, payload, action, packageName)
+    if (action === 'targets' && !res.cancelled) readerTargets.value = { payload, targets: res.targets }
+    else if (!res.cancelled) readerTargets.value = null
+  } catch (error) { deliveryError.value = error.message || '交付失败' }
+  finally { deliveryBusy.value = false }
+}
 const allPageSelected = computed(() => items.value.length > 0 && items.value.every((row) => selectedIds.value.includes(row.projectId)))
 function selectPage(event) {
   selectedIds.value = event.target.checked ? [...new Set([...selectedIds.value, ...items.value.map((row) => row.projectId)])] : selectedIds.value.filter((id) => !items.value.some((row) => row.projectId === id))
@@ -261,37 +289,6 @@ async function afterSave(savedSource, receipt) {
   load(true)
 }
 
-async function exportCurrent() {
-  if (!editing.value) return
-  try {
-    const res = await exportText(props.store, {
-      name: `${editing.value.name || editing.value.projectId}.json`,
-      text: draft.value
-    })
-    if (res && res.saved) props.store.toast('已导出')
-  } catch (error) {
-    props.store.toast((error && error.message) || '导出失败', 'err')
-  }
-}
-
-async function exportList() {
-  try {
-    const sources = []
-    for (const row of [...items.value]) {
-      const r = await callToolParsed(props.store, 'get_source', { key: row.projectId })
-      if (r.threw || r.isError) throw new Error(r.threw || r.text || '读取原文失败')
-      const slices = sourceJsonSlices(r.raw)
-      if (slices.length !== 1 || Array.isArray(JSON.parse(r.raw))) throw new Error('书源原文回执无效')
-      sources.push(r.raw)
-    }
-    const res = await exportText(props.store, {
-      name: 'book-sources.json', text: `[\n${sources.join(',\n')}\n]`
-    })
-    if (res && res.saved) props.store.toast('已导出当前页完整书源数组')
-  } catch (error) {
-    props.store.toast((error && error.message) || '导出失败', 'err')
-  }
-}
 
 async function doImport() {
   if (deleteBusy.value) return
@@ -447,7 +444,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 </script>
 
 <template>
-  <section ref="pageRef" class="page">
+  <section ref="pageRef" class="page sources-page">
     <div v-if="detailOpen" class="detail-navigation">
       <button data-detail-back class="btn btn-ghost" type="button" @click="handleBack"><AppIcon name="chevron-left" :size="16" /><span>返回列表</span></button>
     </div>
@@ -461,42 +458,53 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           {{ total === null ? items.length : `${items.length} / ${total}` }} 条
         </span>
       </div>
-      <SourceManagement v-if="!detailOpen" :store="store" @changed="load()" />
+      <div class="source-search">
       <div class="search">
         <AppIcon name="search" :size="16" class="search-ico" />
         <input
           v-model="query"
           type="search"
           class="input"
-          placeholder="按书名或 URL 过滤"
+          placeholder="名称或 URL"
           aria-label="过滤书源"
           @keyup.enter="load()"
         />
       </div>
-      <div class="actions">
-        <button class="btn btn-ghost btn-sm" type="button" :disabled="loading" @click="load()">
+        <button class="btn btn-ghost btn-sm" type="button" :disabled="loading" @click="load()" aria-label="刷新书源">
           <AppIcon name="refresh" :size="15" /><span>刷新</span>
         </button>
-        <button
-          class="btn btn-ghost btn-sm"
-          type="button"
-          :class="{ on: latestOnly }"
-          @click="latestOnly = !latestOnly; load()"
-        >
-          <span>{{ latestOnly ? '只看最新版本' : '列出全部版本' }}</span>
-        </button>
-        <button class="btn btn-ghost btn-sm" type="button" @click="doImport">
-          <AppIcon name="upload" :size="15" /><span>导入</span>
-        </button>
-        <button class="btn btn-ghost btn-sm" type="button" :disabled="!items.length" @click="exportList">
-          <AppIcon name="download" :size="15" /><span>导出当前页完整书源</span>
-        </button>
       </div>
-      <div class="actions source-selection">
+      <div class="source-toolbar">
+        <button class="btn btn-ghost btn-sm" type="button" @click="doImport">
+          <span>导入</span>
+        </button>
+        <button data-export-all class="btn btn-ghost btn-sm" type="button" :disabled="deliveryBusy" @click="deliver({ scope: 'all' }, 'save')">导出全部</button>
+        <button data-share-all class="btn btn-ghost btn-sm" type="button" :disabled="deliveryBusy" @click="deliver({ scope: 'all' }, 'share')">分享全部</button>
+        <button data-selection-toggle class="btn btn-ghost btn-sm" type="button" :aria-pressed="selecting" @click="selecting ? cancelSelection() : selecting = true">管理</button>
+      </div>
+      <div class="source-advanced">
+        <button data-advanced-toggle class="btn btn-ghost btn-sm" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">高级分析与过滤 <span aria-hidden="true">{{ advancedOpen ? '−' : '+' }}</span></button>
+        <div v-if="advancedVisited" v-show="advancedOpen">
+          <button class="btn btn-ghost btn-sm" type="button" :aria-pressed="latestOnly" @click="latestOnly = !latestOnly; load()">{{ latestOnly ? '只看最新版本' : '列出全部版本' }}</button>
+          <p class="hint">全部导出 / 分享始终包含全库所有版本，不受搜索、当前页和下方过滤影响。</p>
+          <SourceManagement v-if="!detailOpen" :store="store" @changed="load()" />
+        </div>
+      </div>
+      <div v-if="selecting" class="actions source-selection">
         <label><input type="checkbox" aria-label="全选当前页" :checked="allPageSelected" :indeterminate="!allPageSelected && items.some((row) => selectedIds.includes(row.projectId))" @change="selectPage" />全选当前页（仅已加载条目）</label>
         <span>已选 {{ selectedIds.length }} 条</span>
-        <button class="btn btn-ghost btn-sm" type="button" @click="selectedIds = []">取消选择</button>
+        <button class="btn btn-ghost btn-sm" type="button" @click="cancelSelection">取消选择</button>
+        <p class="hint selection-scope">跨页保留选择；全选只增加当前页。取消选择会清空全部已选。</p>
+        <button data-export-selected class="btn btn-ghost btn-sm" type="button" :disabled="!selectedIds.length || deliveryBusy" @click="deliver({ projectIds: [...selectedIds] }, 'save')">导出选中</button>
+        <button data-share-selected class="btn btn-ghost btn-sm" type="button" :disabled="!selectedIds.length || deliveryBusy" @click="deliver({ projectIds: [...selectedIds] }, 'share')">分享选中</button>
         <button class="btn btn-ghost danger" type="button" :disabled="!selectedIds.length || loading || loadingSource || saveBusy" @click="askDeleteIds(selectedIds)">删除选中</button>
+      </div>
+      <p v-if="deliveryError" class="code-block err" role="alert">{{ deliveryError }}</p>
+      <div v-if="readerTargets" class="section" aria-label="选择阅读客户端">
+        <p class="hint">仅唤起阅读勾选页，待用户确认。</p>
+        <p v-if="!readerTargets.targets.length">没有可处理书源导入的阅读客户端。</p>
+        <button v-for="target in readerTargets.targets" :key="target.packageName" class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="deliver(readerTargets.payload, 'reader', target.packageName)">{{ target.label }} · {{ target.packageName }}</button>
+        <button class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="readerTargets = null">取消选择客户端</button>
       </div>
       <p v-if="importError" class="code-block err">{{ importError }}</p>
       <p v-if="deleteBusy" role="status">正在删除并回读校验，请勿重复操作…</p>
@@ -510,8 +518,8 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         icon="book"
       />
       <div v-else class="source-list">
-        <div v-for="row in items" :key="row.projectId" class="source-entry">
-        <input v-model="selectedIds" type="checkbox" :value="row.projectId" :aria-label="`选择书源 ${row.bookSourceName || '未命名'}（${row.projectId}）`" />
+        <article v-for="row in items" :key="row.projectId" class="source-entry" :class="{ selecting }">
+        <label v-if="selecting" class="source-pick"><input v-model="selectedIds" type="checkbox" :value="row.projectId" :aria-label="`选择书源 ${row.bookSourceName || '未命名'}（${row.projectId}）`" /></label>
         <button
           type="button"
           class="source-row"
@@ -521,13 +529,22 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           <span class="source-name">{{ row.bookSourceName || '（未命名）' }}</span>
           <span class="source-url mono">{{ row.bookSourceUrl }}</span>
           <span class="source-meta">
-            <span v-if="row.stage" class="chip">{{ row.stage }}</span>
-            <span v-if="Number(row.versionCount) > 1" class="chip bad">{{ row.versionCount }} 版本</span>
+            <span v-if="row.stage" class="source-stage">{{ stageLabel(row.stage) }}</span>
+            <span v-if="Number(row.versionCount) > 1">{{ row.versionCount }} 版本</span>
             <span class="muted small">{{ formatTime(row.updatedAt) }}</span>
           </span>
         </button>
-        <button class="btn btn-ghost danger" type="button" :disabled="loading || loadingSource || saveBusy" @click="askDelete(row)">删除书源</button>
+        <div class="source-row-actions">
+          <button data-source-action="copy" class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="deliver({ projectIds: [row.projectId] }, 'copy')">复制</button>
+          <button data-source-action="save" class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="deliver({ projectIds: [row.projectId] }, 'save')">导出</button>
+          <button data-source-action="share" class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="deliver({ projectIds: [row.projectId] }, 'share')">分享</button>
+          <button data-source-more class="btn btn-ghost" type="button" :aria-expanded="moreId === row.projectId" @click="moreId = moreId === row.projectId ? null : row.projectId">更多</button>
         </div>
+        <div v-if="moreId === row.projectId" class="source-row-more">
+          <button class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="deliver({ projectIds: [row.projectId] }, 'targets')">导入阅读</button>
+          <button class="btn btn-ghost danger" type="button" :disabled="loading || loadingSource || saveBusy || deliveryBusy" @click="askDelete(row)">删除书源</button>
+        </div>
+        </article>
       </div>
       <div class="pager">
         <button class="btn btn-ghost btn-sm" type="button" :disabled="offset <= 0 || loading" @click="prevPage">
@@ -551,6 +568,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         <span class="section-sub">{{ dirty ? '有未保存修改' : '与宿主一致' }}</span>
       </div>
       <p class="hint mono">{{ editing.url }}</p>
+      <SourceManagement :store="store" :source="draft" />
       <label class="field">
         <span class="flabel">书源 JSON（原文）</span>
         <textarea
@@ -563,7 +581,6 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         ></textarea>
       </label>
       <p class="fhint">保存时原样提交你的 JSON 文本，不做重新序列化，避免大整数精度丢失。</p>
-      <SourceManagement :store="store" :source="draft" />
 
       <div class="actions">
         <button class="btn btn-primary" type="button" :disabled="saveBusy || !s.runtimeConnected" @click="save">
@@ -577,9 +594,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         <button class="btn btn-ghost" type="button" @click="compareWithOriginal">
           <AppIcon name="edit" :size="16" /><span>与原文对比</span>
         </button>
-        <button class="btn btn-ghost" type="button" @click="exportCurrent">
-          <AppIcon name="download" :size="16" /><span>导出</span>
-        </button>
+
         <button class="btn btn-ghost danger" type="button" :disabled="saveBusy" @click="askDeleteIds([editing.projectId])">删除书源</button>
         <button class="btn btn-ghost" type="button" @click="closeEditor">
           <AppIcon name="x" :size="16" /><span>关闭</span>
@@ -632,7 +647,39 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 </template>
 
 <style scoped>
-/* Keep Back in document flow: a sticky row occludes edits/actions in a short IME viewport. */
+/* Page-local overrides intentionally outrank shell's old two-column entry layout. */
+.sources-page .source-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.sources-page .source-entry.selecting { grid-template-columns: 44px minmax(0, 1fr); }
+.sources-page .source-entry > .source-row { grid-column: 1 / -1; border: 0; border-radius: 0; background: transparent; }
+.sources-page .source-entry.selecting > .source-row { grid-column: 2; }
+.source-pick { grid-column: 1; grid-row: 1; min-height: 44px; display: flex; justify-content: center; align-items: center; align-self: stretch; }
+.source-pick input { width: 22px; height: 22px; accent-color: var(--c1); }
+.source-row-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); padding: 0 4px; }
+.source-row-more { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; border-top: 1px solid var(--line); }
+.sources-page .btn { min-height: 44px; height: auto; min-width: 44px; white-space: normal; padding: 6px 8px; }
+.source-row-actions .btn { border: 0; border-radius: 8px; background: transparent; font-size: 12px; }
+.source-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; align-items: center; }
+.source-search .search { min-width: 0; margin: 0; }
+.source-search .input { min-height: 44px; }
+.source-toolbar { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.source-toolbar .btn { flex: 1 1 auto; padding-inline: 6px; font-size: 12px; white-space: nowrap; }
+.source-advanced { margin: 2px 0 6px; }
+.source-advanced > .btn { font-size: 12px; color: var(--muted); }
+.source-selection { margin: 8px 0; padding: 8px; border: 1px solid var(--line); border-radius: 10px; }
+.source-selection label { min-height: 44px; }
+.selection-scope { flex-basis: 100%; margin: 0; }
+.source-stage { color: var(--muted); }
+.source-meta { color: var(--muted); font-size: 11px; }
+/* Keep Back in document flow; sticky rows occlude short IME viewports. */
 .detail-navigation { padding: 8px 0; background: var(--surface); }
 .source-list {
   display: flex;

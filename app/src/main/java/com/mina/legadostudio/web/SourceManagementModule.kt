@@ -112,11 +112,53 @@ internal class SourceManagementModule(
         return rows.joinToString(",\n", "[\n", "\n]")
     }
     private suspend fun deliver(p: JsonObject): JsonElement {
-        val text = if (p.has("source")) array(listOf(p.str("source"))) else {
-            val s = current(p); array(s.rows.filter { it.id in s.selection }.map { it.sourceJson })
+        val selector = listOf("source", "projectIds", "scope", "token").filter { p.has(it) }
+        require(selector.size == 1) { "source、projectIds、scope、token 必须且只能提供一项" }
+        val action = p.str("action")
+        require(action in setOf("copy", "share", "save", "targets", "reader")) { "未知导出操作" }
+        val deliveryScope = if (selector.single() == "scope") {
+            require(p.str("scope") == "all") { "未知导出范围" }
+            "all"
+        } else selector.single()
+        val rawSources = when {
+            p.has("source") -> listOf(p.str("source"))
+            p.has("projectIds") -> {
+                val value = p.get("projectIds")
+                require(value.isJsonArray) { "projectIds 必须为数组" }
+                val ids = value.asJsonArray.map {
+                    require(it.isJsonPrimitive && it.asJsonPrimitive.isString && it.asString.isNotBlank()) { "书源 ID 必须为非空字符串" }
+                    it.asString
+                }
+                require(ids.size in 1..500 && ids.distinct().size == ids.size) { "请选择 1 至 500 个不重复书源 ID" }
+                // One immutable full read: no per-ID races and no partial selection.
+                val rows = app.projects.list().associateBy { it.id }
+                require(ids.all { it in rows }) { "部分书源已不存在，请刷新后重试" }
+                ids.map { rows.getValue(it).sourceJson }
+            }
+            p.has("scope") -> app.projects.list().map { it.sourceJson }
+            else -> {
+                val s = current(p); s.rows.filter { it.id in s.selection }.map { it.sourceJson }
+            }
         }
-        return when (p.str("action")) {
-            "targets" -> obj("targets" to ReaderImport.resolve(activity).map { obj("packageName" to it.packageName, "label" to it.label, "known" to it.known) })
+        val text = array(rawSources)
+        // Metadata only: never serialize the parsed tree back into the delivery payload.
+        val sourceName = rawSources.singleOrNull()?.let { raw ->
+            JsonParser.parseString(raw).asJsonObject.get("bookSourceName")
+                ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+        }
+        val stem = sourceName.orEmpty().replace(Regex("[^\\p{L}\\p{N} ._()-]"), "_")
+            .take(60).trim('.', '_', ' ').ifBlank { "book-sources" }
+        val fileName = "$stem.json"
+        val result = when (action) {
+            "targets" -> JsonObject().apply {
+                add("targets", JsonArray().apply {
+                    ReaderImport.resolve(activity).forEach { target -> add(JsonObject().apply {
+                        addProperty("packageName", target.packageName)
+                        addProperty("label", target.label)
+                        addProperty("known", target.known)
+                    }) }
+                })
+            }
             "reader" -> {
                 val pkg = p.str("packageName")
                 require(ReaderImport.resolve(activity).any { it.packageName == pkg }) { "阅读客户端不存在或不能处理导入" }
@@ -131,27 +173,47 @@ internal class SourceManagementModule(
                         throw e
                     }
                 }
-                obj("launched" to true, "confirmed" to false, "confirmation" to "pending_user", "packageName" to pkg)
+                JsonObject().apply {
+                    addProperty("launched", true)
+                    addProperty("confirmed", false)
+                    addProperty("confirmation", "pending_user")
+                    addProperty("packageName", pkg)
+                }
             }
             "copy" -> withContext(Dispatchers.Main) {
                 val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("书源 JSON", text))
                 require(clipboard.primaryClip?.getItemAt(0)?.text?.toString() == text) { "剪贴板回读不一致" }
-                obj("copied" to true)
+                JsonObject().apply { addProperty("copied", true) }
             }
             "share" -> {
-                val dir = File(activity.cacheDir, "exports").apply { mkdirs() }
-                val file = File(dir, "sources-${UUID.randomUUID()}.json").apply { writeText(text, Charsets.UTF_8) }
+                // A unique directory keeps an earlier recipient's grant tied to immutable bytes.
+                val dir = File(activity.cacheDir, "exports/${UUID.randomUUID()}").apply { mkdirs() }
+                val file = File(dir, fileName).apply { writeText(text, Charsets.UTF_8) }
                 val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.files", file)
                 withContext(Dispatchers.Main) {
-                    val intent = Intent(Intent.ACTION_SEND).setType("application/json").putExtra(Intent.EXTRA_STREAM, uri)
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply { clipData = ClipData.newRawUri("书源 JSON", uri) }
+                    // QQ/WeChat accept text/plain attachments more reliably than application/json.
+                    val intent = Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_STREAM, uri)
+                        .putExtra(Intent.EXTRA_SUBJECT, file.name)
+                        .putExtra(Intent.EXTRA_TITLE, file.name)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        .apply { clipData = ClipData.newUri(activity.contentResolver, file.name, uri) }
                     activity.startActivity(Intent.createChooser(intent, "分享书源 JSON"))
                 }
-                obj("launched" to true)
+                JsonObject().apply { addProperty("launched", true) }
             }
-            "save" -> saveText(obj("name" to "book-sources.json", "text" to text, "mime" to "application/json"))
+            "save" -> saveText(JsonObject().apply {
+                addProperty("name", fileName)
+                addProperty("text", text)
+                addProperty("mime", "application/json")
+            })
             else -> error("未知导出操作")
+        }
+        return result.asJsonObject.deepCopy().apply {
+            addProperty("action", action)
+            addProperty("scope", deliveryScope)
+            addProperty("count", rawSources.size)
         }
     }
     private suspend fun delete(p: JsonObject): JsonObject {

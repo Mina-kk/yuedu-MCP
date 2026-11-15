@@ -48,7 +48,15 @@ async function mountPage(handlers) {
 }
 
 const result = (data) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }] })
-const button = (wrapper, text) => wrapper.findAll('button').find((b) => b.text() === text)
+const button = (wrapper, text) => wrapper.findAll('button').find((b) => b.isVisible() && b.text() === text)
+async function selectAll(wrapper) {
+  if (!wrapper.find('input[aria-label="全选当前页"]').exists()) await button(wrapper, '管理').trigger('click')
+  await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+}
+async function requestDelete(wrapper) {
+  if (!button(wrapper, '删除书源')) await button(wrapper, '更多').trigger('click')
+  await button(wrapper, '删除书源').trigger('click')
+}
 async function acceptDialog(store) {
   const accept = store.state.dialog.onAccept
   store.closeDialog()
@@ -57,6 +65,166 @@ async function acceptDialog(store) {
 }
 
 describe('SourcesPage', () => {
+  it('折叠再展开高级面板保留过滤与分析快照，不重置用户决定', async () => {
+    const { wrapper, bridge } = await mountPage({
+      list_sources: async () => result(LIST),
+      'sources.analyze': async () => ({ token: 'snapshot-persist', total: 1, keptCount: 1, excludedCount: 0, groups: [], kept: [], excluded: [], clusters: [], conflicts: [] }),
+      'sources.deliver': async () => ({ copied: true })
+    })
+    await wrapper.find('[data-advanced-toggle]').trigger('click')
+    await wrapper.find('.options input').setValue(true)
+    await button(wrapper, '全库分析与分组').trigger('click'); await flushPromises()
+    await wrapper.find('[data-advanced-toggle]').trigger('click')
+    expect(button(wrapper, '全库分析与分组')).toBeUndefined()
+    await wrapper.find('[data-advanced-toggle]').trigger('click')
+    expect(wrapper.find('.options input').element.checked).toBe(true)
+    await button(wrapper, '复制完整数组').trigger('click'); await flushPromises()
+    expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { token: 'snapshot-persist', action: 'copy' }])
+    expect(bridge.calls.filter(([method]) => method === 'sources.analyze')).toHaveLength(1)
+  })
+  it.each([
+    ['copy', '复制', { copied: false }], ['save', '导出', { saved: 'true' }],
+    ['share', '分享', { launched: false }], ['save', '导出', { cancelled: true, saved: true }]
+  ])('单条%s失败/取消不报成功也不打开详情', async (action, label, receipt) => {
+    const { wrapper, bridge, store } = await mountPage({ list_sources: async () => result(LIST), 'sources.deliver': async () => receipt })
+    await button(wrapper.find('.source-entry'), label).trigger('click'); await flushPromises()
+    expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { projectIds: ['p1'], action }])
+    expect(store.state.toast).toBeNull()
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+  })
+  it('列表交付期间防重，返回列表保留选择和原滚动', async () => {
+    let finish
+    const { wrapper, bridge } = await mountPage({
+      list_sources: async () => result(LIST), get_source: async () => result(RAW),
+      'sources.deliver': () => new Promise(resolve => { finish = resolve })
+    })
+    await selectAll(wrapper)
+    const page = wrapper.find('.page').element
+    page.scrollTop = 230
+    await wrapper.find('[data-source-action="save"]').trigger('click')
+    await wrapper.find('[data-source-action="save"]').trigger('click')
+    expect(bridge.calls.filter(([method]) => method === 'sources.deliver')).toHaveLength(1)
+    expect(wrapper.find('[data-export-all]').attributes('disabled')).toBeDefined()
+    finish({ saved: false, cancelled: true }); await flushPromises()
+    await wrapper.find('.source-row').trigger('click'); await flushPromises()
+    await wrapper.find('[data-detail-back]').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('已选 1 条')
+    expect(wrapper.find('input[aria-label="全选当前页"]').element.checked).toBe(true)
+    expect(page.scrollTop).toBe(230)
+  })
+  it('单条更多中的导入阅读保留精确ID，选包只报告待确认', async () => {
+    const { wrapper, bridge, store } = await mountPage({
+      list_sources: async () => result(LIST),
+      'sources.deliver': async ({ action }) => action === 'targets' ? { targets: [{ packageName: 'reader.test', label: '阅读测试' }] } : { launched: true, confirmed: false, confirmation: 'pending_user' }
+    })
+    await wrapper.find('[data-source-more]').trigger('click')
+    await button(wrapper, '导入阅读').trigger('click'); await flushPromises()
+    expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { projectIds: ['p1'], action: 'targets' }])
+    await button(wrapper, '阅读测试 · reader.test').trigger('click'); await flushPromises()
+    expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { projectIds: ['p1'], action: 'reader', packageName: 'reader.test' }])
+    expect(store.state.toast.text).toContain('待用户确认')
+    expect(bridge.calls.some(([method]) => ['get_source', 'sources.analyze'].includes(method))).toBe(false)
+  })
+  it('超过500条选择明确拒绝且不截断，仍可一键全库导出', async () => {
+    const { wrapper, bridge } = await mountPage({
+      list_sources: async ({ offset }) => result({ total: 501, hasMore: offset === 0, items: Array.from({ length: offset === 0 ? 500 : 1 }, (_, i) => ({ ...LIST.items[0], projectId: offset === 0 ? `p${i}` : 'p500' })) }),
+      'sources.deliver': async () => ({ saved: true })
+    })
+    await wrapper.find('[data-selection-toggle]').trigger('click')
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await wrapper.find('.pager button:last-child').trigger('click'); await flushPromises()
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await wrapper.find('[data-export-selected]').trigger('click'); await flushPromises()
+    expect(wrapper.find('[role="alert"]').text()).toContain('500')
+    expect(wrapper.text()).toContain('已选 501 条')
+    expect(bridge.calls.some(([method]) => method === 'sources.deliver')).toBe(false)
+    await wrapper.find('[data-export-all]').trigger('click'); await flushPromises()
+    expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { scope: 'all', action: 'save' }])
+  }, 30000)
+  it('详情常用动作位于JSON之前，交付当前未保存草稿且不偷偷保存或重排大整数', async () => {
+    const { wrapper, bridge, store } = await mountPage({
+      list_sources: async () => result(LIST), get_source: async () => result(RAW),
+      'sources.deliver': async ({ action }) => ({ copied: action === 'copy', saved: action === 'save', launched: action === 'share' })
+    })
+    await wrapper.find('.source-row').trigger('click'); await flushPromises()
+    const draft = ` \n${RAW}  `
+    await wrapper.find('textarea').setValue(draft)
+    expect(wrapper.text()).toContain('当前草稿')
+    for (const [label, action] of [['复制', 'copy'], ['导出', 'save'], ['分享', 'share']]) {
+      const control = button(wrapper, label)
+      expect(control?.isVisible()).toBe(true)
+      expect(control.element.compareDocumentPosition(wrapper.find('textarea').element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      await control.trigger('click'); await flushPromises()
+      expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { source: draft, action }])
+    }
+    expect(bridge.calls.some(([method]) => method === 'save_source')).toBe(false)
+    expect(wrapper.find('textarea').element.value).toBe(draft)
+    expect(wrapper.vm.handleBack()).toBe(true)
+    expect(store.state.dialog.kind).toBe('discard')
+  })
+  it('全库直接交付不受搜索、分页、版本与高级过滤影响，默认全部版本', async () => {
+    const { wrapper, bridge } = await mountPage({
+      list_sources: async () => result({ ...LIST, total: 41, hasMore: true }),
+      'sources.deliver': async ({ action }) => ({ saved: action === 'save', launched: action === 'share' })
+    })
+    expect(bridge.calls.find(([method]) => method === 'list_sources')[1].latestOnly).not.toBe(true)
+    await wrapper.find('input[type="search"]').setValue('only-one')
+    await wrapper.find('button[aria-expanded]').trigger('click')
+    await button(wrapper, '列出全部版本').trigger('click'); await flushPromises()
+    await wrapper.find('.options input').setValue(true)
+    await button(wrapper, '下一页').trigger('click'); await flushPromises()
+    for (const [label, action] of [['导出全部', 'save'], ['分享全部', 'share']]) {
+      await button(wrapper, label).trigger('click'); await flushPromises()
+      expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { scope: 'all', action }])
+    }
+    expect(bridge.calls.some(([method]) => ['get_source', 'sources.analyze', 'file.export'].includes(method))).toBe(false)
+  })
+  it('跨页选择只交付精确ID，取消选择清空；取消或失败不显示成功', async () => {
+    let receipt = { saved: false, cancelled: true }
+    const { wrapper, bridge, store } = await mountPage({
+      list_sources: async ({ offset }) => result({ total: 21, hasMore: offset === 0, items: [{ ...LIST.items[0], projectId: offset === 0 ? 'p1' : 'p2' }] }),
+      'sources.deliver': async () => receipt
+    })
+    await selectAll(wrapper)
+    await button(wrapper, '下一页').trigger('click'); await flushPromises()
+    await selectAll(wrapper)
+    expect(wrapper.text()).toContain('跨页保留选择')
+    expect(wrapper.text()).toContain('已选 2 条')
+    for (const [label, action] of [['导出选中', 'save'], ['分享选中', 'share']]) {
+      await button(wrapper, label).trigger('click'); await flushPromises()
+      expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { projectIds: ['p1', 'p2'], action }])
+      expect(store.state.toast).toBeNull()
+    }
+    receipt = { saved: false }
+    await button(wrapper, '导出选中').trigger('click'); await flushPromises()
+    expect(wrapper.find('[role="alert"]').text()).toContain('文件保存未确认')
+    expect(store.state.toast).toBeNull()
+    expect(wrapper.text()).toContain('已选 2 条')
+    await button(wrapper, '取消选择').trigger('click')
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0)
+    await button(wrapper, '管理').trigger('click')
+    expect(wrapper.text()).toContain('已选 0 条')
+  })
+  it('首屏只保留常用操作，单条复制导出分享直接按精确ID交付，不读JSON或分析', async () => {
+    const { wrapper, bridge } = await mountPage({
+      list_sources: async () => result({ ...LIST, total: 41, hasMore: true, items: [{ ...LIST.items[0], stage: 'VALIDATED', versionCount: 3 }] }),
+      'sources.deliver': async ({ action }) => ({ copied: action === 'copy', saved: action === 'save', launched: action === 'share' })
+    })
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0)
+    for (const label of ['导入', '导出全部', '分享全部', '管理']) expect(button(wrapper, label)?.isVisible()).toBe(true)
+    expect(wrapper.find('[aria-expanded="false"]').text()).toContain('高级分析与过滤')
+    const row = wrapper.find('.source-entry')
+    expect(row.text()).toContain('静态校验通过')
+    expect(row.findAll('button button')).toHaveLength(0)
+    expect(button(row, '删除书源')).toBeUndefined()
+    for (const [label, action] of [['复制', 'copy'], ['导出', 'save'], ['分享', 'share']]) {
+      await button(row, label).trigger('click'); await flushPromises()
+      expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { projectIds: ['p1'], action }])
+      expect(wrapper.find('textarea').exists()).toBe(false)
+    }
+    expect(bridge.calls.some(([method]) => ['get_source', 'sources.analyze', 'save_source'].includes(method))).toBe(false)
+  })
   it('详情删除失败仍显示持久错误', async () => {
     const { wrapper, store } = await mountPage({ list_sources: async () => result(LIST), get_source: async () => result(RAW), delete_projects: async () => { throw new Error('删除断线') } })
     await wrapper.find('.source-row').trigger('click'); await flushPromises()
@@ -135,7 +303,7 @@ describe('SourcesPage', () => {
       list_sources: async () => result(deleted ? { total: 1, hasMore: false, items: [] } : LIST),
       delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
     })
-    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await selectAll(wrapper)
     await button(wrapper, '删除选中').trigger('click'); await acceptDialog(store)
     expect(store.state.toast.kind).toBe('err')
     expect(wrapper.text()).toContain('已选 1 条')
@@ -152,7 +320,7 @@ describe('SourcesPage', () => {
       },
       delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
     })
-    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await selectAll(wrapper)
     await button(wrapper, '删除选中').trigger('click'); await acceptDialog(store)
     expect(store.state.toast.kind).toBe('err')
     expect(reads).toBe(2)
@@ -165,7 +333,7 @@ describe('SourcesPage', () => {
       list_sources: async () => !deleted ? result(LIST) : (++reads === 1 ? result({ total: 0, hasMore: false, items: [] }) : result('非法回包')),
       delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
     })
-    await button(wrapper, '删除书源').trigger('click'); await acceptDialog(store)
+    await requestDelete(wrapper); await acceptDialog(store)
     expect(store.state.toast.kind).toBe('err')
     expect(wrapper.text()).toContain('列表刷新失败')
   })
@@ -179,11 +347,11 @@ describe('SourcesPage', () => {
     })
     await wrapper.find('.source-row').trigger('click'); await flushPromises()
     await wrapper.find('textarea').setValue(RAW + ' ')
-    await button(wrapper, '删除书源').trigger('click')
+    await requestDelete(wrapper)
     expect(store.state.dialog.kind).toBe('discard')
     store.closeDialog()
     expect(wrapper.find('textarea').element.value).toBe(RAW + ' ')
-    await button(wrapper, '删除书源').trigger('click'); await acceptDialog(store)
+    await requestDelete(wrapper); await acceptDialog(store)
     expect(store.state.dialog.kind).toBe('delete')
     const accept = store.state.dialog.onAccept
     store.closeDialog()
@@ -210,7 +378,7 @@ describe('SourcesPage', () => {
         return result(mode === 'malformed' ? '{"deleted":2}' : `已删除 ${mode === 'partial' ? 1 : 2} 个项目`)
       }
     })
-    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await selectAll(wrapper)
     await button(wrapper, '删除选中').trigger('click'); await acceptDialog(store)
     expect(store.state.toast.kind).toBe('err')
     expect(wrapper.text()).toContain('删除未完全确认')
@@ -223,7 +391,7 @@ describe('SourcesPage', () => {
       delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
     })
     await button(wrapper, '下一页').trigger('click'); await flushPromises()
-    await button(wrapper, '删除书源').trigger('click'); await acceptDialog(store)
+    await requestDelete(wrapper); await acceptDialog(store)
     expect(wrapper.text()).toContain('偏移 0')
     expect(wrapper.findAll('.source-row')).toHaveLength(20)
     const calls = bridge.calls.slice(bridge.calls.findIndex(([m]) => m === 'delete_projects') + 1)
@@ -236,12 +404,15 @@ describe('SourcesPage', () => {
       list_sources: async () => result({ total: deleted ? 1 : 3, hasMore: !deleted, items: deleted ? [{ ...rows[0], projectId: 'unloaded' }] : rows }),
       delete_projects: async () => { deleted = true; return result('已删除 2 个项目') }
     })
+    await button(wrapper, '管理').trigger('click')
     expect(wrapper.find('input[aria-label="全选当前页"]').exists()).toBe(true)
-    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await selectAll(wrapper)
     expect(wrapper.text()).toContain('已选 2 条')
     await button(wrapper, '取消选择').trigger('click')
+    expect(wrapper.find('input[aria-label="全选当前页"]').exists()).toBe(false)
+    await button(wrapper, '管理').trigger('click')
     expect(wrapper.text()).toContain('已选 0 条')
-    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    await selectAll(wrapper)
     await button(wrapper, '删除选中').trigger('click')
     expect(store.state.dialog.message).toContain('2 条')
     await acceptDialog(store)
@@ -254,15 +425,16 @@ describe('SourcesPage', () => {
       list_sources: async () => result(deleted ? { total: 0, hasMore: false, items: [] } : LIST),
       delete_projects: async ({ ids }) => { expect(ids).toEqual(['p1']); deleted = true; return result('已删除 1 个项目') }
     })
+    await button(wrapper, '更多').trigger('click')
     expect(button(wrapper, '删除书源')).toBeTruthy()
-    await button(wrapper, '删除书源').trigger('click')
+    await requestDelete(wrapper)
     expect(store.state.dialog.message).toContain('不可恢复')
     expect(store.state.dialog.message).toContain('不删除阅读端')
     expect(store.state.dialog.message).toContain('p1')
     expect(deleted).toBe(false)
     store.closeDialog()
     expect(deleted).toBe(false)
-    await button(wrapper, '删除书源').trigger('click')
+    await requestDelete(wrapper)
     await acceptDialog(store)
     expect(bridge.calls.find(([m]) => m === 'delete_projects')[1]).toEqual({ ids: ['p1'] })
     expect(bridge.calls.filter(([m]) => m === 'list_sources').length).toBeGreaterThan(1)
