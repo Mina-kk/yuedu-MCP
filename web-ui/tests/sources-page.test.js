@@ -116,12 +116,14 @@ describe('SourcesPage', () => {
   it('单条更多中的导入阅读保留精确ID，选包只报告待确认', async () => {
     const { wrapper, bridge, store } = await mountPage({
       list_sources: async () => result(LIST),
-      'sources.deliver': async ({ action }) => action === 'targets' ? { targets: [{ packageName: 'reader.test', label: '阅读测试' }] } : { launched: true, confirmed: false, confirmation: 'pending_user' }
+      'sources.deliver': async ({ action }) => action === 'targets' ? { targets: [{ packageName: 'reader.test', label: '阅读测试' }, { packageName: 'reader.other', label: '另一阅读' }] } : { launched: true, confirmed: false, confirmation: 'pending_user' }
     })
     await wrapper.find('[data-source-more]').trigger('click')
     await button(wrapper, '导入阅读').trigger('click'); await flushPromises()
     expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { projectIds: ['p1'], action: 'targets' }])
-    await button(wrapper, '阅读测试 · reader.test').trigger('click'); await flushPromises()
+    expect(document.querySelector('[role="dialog"][aria-label="导入阅读"]')).not.toBeNull()
+    expect(document.querySelectorAll('[data-reader-target]')).toHaveLength(2)
+    document.querySelector('[data-reader-target="reader.test"]').click(); await flushPromises()
     expect(bridge.calls.at(-1)).toEqual(['sources.deliver', { projectIds: ['p1'], action: 'reader', packageName: 'reader.test' }])
     expect(store.state.toast.text).toContain('待用户确认')
     expect(bridge.calls.some(([method]) => ['get_source', 'sources.analyze'].includes(method))).toBe(false)

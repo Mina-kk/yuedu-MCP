@@ -8,6 +8,8 @@ import { callToolParsed, formatTime, itemsOf, prettyJson, redactForDisplay } fro
 import { core } from '../lib/core.js'
 import { importText, sourceJsonSlices } from '../lib/files.js'
 import { deliverSources } from '../lib/source-delivery.js'
+import ReaderImportDialog from '../components/ReaderImportDialog.vue'
+import { useReaderImport } from '../lib/use-reader-import.js'
 
 // 书源页：list_sources 分页摘要 + get_source 读取原文 + save_source 保存后 get_source 回读。
 // 关键约束：
@@ -50,7 +52,10 @@ watch(advancedOpen, (open) => { if (open) advancedVisited.value = true })
 const moreId = ref(null)
 const deliveryBusy = ref(false)
 const deliveryError = ref('')
-const readerTargets = ref(null)
+const readerImport = useReaderImport(props.store)
+const { state: readerState, visible: readerVisible } = readerImport
+const listManagement = ref(null)
+const detailManagement = ref(null)
 function cancelSelection() { selectedIds.value = []; selecting.value = false }
 function stageLabel(stage) {
   return ({ DRAFT: '草稿', SAVED: '已保存', VALIDATED: '静态校验通过', TESTED: '已检测', FAILED: '检测失败', IMPORTED: '已导入', VERIFIED: '已验证' })[stage] || '状态待确认'
@@ -61,12 +66,12 @@ async function deliver(payload, action, packageName) {
     deliveryError.value = '请选择 1–500 条书源；超过 500 条请使用导出全部或分享全部。'
     return
   }
+  if (action === 'targets') return readerImport.start(payload)
+  if (readerVisible.value) return
   deliveryBusy.value = true
   deliveryError.value = ''
   try {
-    const res = await deliverSources(props.store, payload, action, packageName)
-    if (action === 'targets' && !res.cancelled) readerTargets.value = { payload, targets: res.targets }
-    else if (!res.cancelled) readerTargets.value = null
+    await deliverSources(props.store, payload, action, packageName)
   } catch (error) { deliveryError.value = error.message || '交付失败' }
   finally { deliveryBusy.value = false }
 }
@@ -165,6 +170,7 @@ async function open(row) {
 }
 
 function handleBack() {
+  if (readerImport.handleBack() || detailManagement.value?.handleBack?.() || listManagement.value?.handleBack?.()) return true
   if (!detailOpen.value) return false
   closeEditor()
   return true
@@ -487,7 +493,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         <div v-if="advancedVisited" v-show="advancedOpen">
           <button class="btn btn-ghost btn-sm" type="button" :aria-pressed="latestOnly" @click="latestOnly = !latestOnly; load()">{{ latestOnly ? '只看最新版本' : '列出全部版本' }}</button>
           <p class="hint">全部导出 / 分享始终包含全库所有版本，不受搜索、当前页和下方过滤影响。</p>
-          <SourceManagement v-if="!detailOpen" :store="store" @changed="load()" />
+          <SourceManagement v-if="!detailOpen" ref="listManagement" :store="store" @changed="load()" />
         </div>
       </div>
       <div v-if="selecting" class="actions source-selection">
@@ -500,12 +506,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         <button class="btn btn-ghost danger" type="button" :disabled="!selectedIds.length || loading || loadingSource || saveBusy" @click="askDeleteIds(selectedIds)">删除选中</button>
       </div>
       <p v-if="deliveryError" class="code-block err" role="alert">{{ deliveryError }}</p>
-      <div v-if="readerTargets" class="section" aria-label="选择阅读客户端">
-        <p class="hint">仅唤起阅读勾选页，待用户确认。</p>
-        <p v-if="!readerTargets.targets.length">没有可处理书源导入的阅读客户端。</p>
-        <button v-for="target in readerTargets.targets" :key="target.packageName" class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="deliver(readerTargets.payload, 'reader', target.packageName)">{{ target.label }} · {{ target.packageName }}</button>
-        <button class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="readerTargets = null">取消选择客户端</button>
-      </div>
+
       <p v-if="importError" class="code-block err">{{ importError }}</p>
       <p v-if="deleteBusy" role="status">正在删除并回读校验，请勿重复操作…</p>
       <p v-if="deleteError" class="code-block err" role="alert">{{ deleteError }}</p>
@@ -541,7 +542,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           <button data-source-more class="btn btn-ghost" type="button" :aria-expanded="moreId === row.projectId" @click="moreId = moreId === row.projectId ? null : row.projectId">更多</button>
         </div>
         <div v-if="moreId === row.projectId" class="source-row-more">
-          <button class="btn btn-ghost" type="button" :disabled="deliveryBusy" @click="deliver({ projectIds: [row.projectId] }, 'targets')">导入阅读</button>
+          <button data-reader-import class="btn btn-ghost" type="button" :disabled="deliveryBusy || readerVisible" @click="deliver({ projectIds: [row.projectId] }, 'targets')">导入阅读</button>
           <button class="btn btn-ghost danger" type="button" :disabled="loading || loadingSource || saveBusy || deliveryBusy" @click="askDelete(row)">删除书源</button>
         </div>
         </article>
@@ -568,7 +569,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         <span class="section-sub">{{ dirty ? '有未保存修改' : '与宿主一致' }}</span>
       </div>
       <p class="hint mono">{{ editing.url }}</p>
-      <SourceManagement :store="store" :source="draft" />
+      <SourceManagement ref="detailManagement" :store="store" :source="draft" />
       <label class="field">
         <span class="flabel">书源 JSON（原文）</span>
         <textarea
@@ -643,6 +644,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
       </div>
     </div>
     </fieldset>
+    <ReaderImportDialog v-if="readerVisible" :state="readerState" @pick="readerImport.launch" @cancel="readerImport.cancel" @retry="readerImport.retry" />
   </section>
 </template>
 

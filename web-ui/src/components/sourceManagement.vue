@@ -2,28 +2,32 @@
 import { ref, onBeforeUnmount } from 'vue'
 import { prettyJson } from '../lib/tools.js'
 import { deliverSources } from '../lib/source-delivery.js'
+import ReaderImportDialog from './ReaderImportDialog.vue'
+import { useReaderImport } from '../lib/use-reader-import.js'
 const props = defineProps({store:Object, source:String})
 const emit = defineEmits(['changed'])
 const exclude = ref({excludeLogin:false,excludeCaptcha:false,excludeFailed:false,excludeUnverified:false})
 const collapseIdentical = ref(false)
-const report = ref(null), error = ref(''), busy = ref(false), targets = ref(null), deleting = ref(null), confirmation = ref('')
+const report = ref(null), error = ref(''), busy = ref(false), deleting = ref(null), confirmation = ref('')
+const readerImport = useReaderImport(props.store)
+const { state: readerState, visible: readerVisible } = readerImport
 const check = ref(null)
 let timer, disposed = false
 async function call(method, params={}) { return props.store.bridge.call(`sources.${method}`,params) }
 async function perform(fn) {
- if (busy.value) return
+ if (busy.value || readerVisible.value) return
  busy.value=true; error.value=''
  try { await fn() } catch(e) { error.value=e.message || '操作失败' } finally { busy.value=false }
 }
-function invalidate() { report.value=null; targets.value=null; deleting.value=null }
+function invalidate() { report.value=null; readerImport.cancel(); deleting.value=null }
 function analyze() { return perform(async()=>{ invalidate(); report.value=await call('analyze',{exclude:{...exclude.value},collapseIdentical:collapseIdentical.value}) }) }
 function payload() { return props.source != null ? {source:props.source} : {token:report.value?.token} }
-function deliver(action, packageName) { return perform(async()=>{
- const res=await deliverSources(props.store,payload(),action,packageName)
- if(res.cancelled) return
- if(action==='targets') { targets.value=res.targets; return }
- targets.value=null
- }) }
+function deliver(action) {
+ if (busy.value || readerVisible.value) return
+ if (action === 'targets') return readerImport.start(payload())
+ return perform(() => deliverSources(props.store,payload(),action))
+}
+function handleBack() { return readerImport.handleBack() }
 function askDelete(group) { deleting.value=group || {domain:null,ids:[],all:true}; confirmation.value='' }
 function remove() { return perform(async()=>{
  const all = deleting.value.all === true
@@ -52,7 +56,7 @@ function startCheck(id) {
 }
 function cancelCheck() { return perform(async()=>{ check.value=await call('checkCancel',{id:check.value.id}); await poll() }) }
 onBeforeUnmount(()=>{ disposed=true;clearTimeout(timer); if(check.value?.state==='running') call('checkCancel',{id:check.value.id}).catch(()=>{}) })
-defineExpose({invalidate})
+defineExpose({invalidate, handleBack})
 </script>
 <template>
  <div class="source-management">
@@ -71,13 +75,9 @@ defineExpose({invalidate})
     <button data-source-action="copy" class="btn btn-ghost" :disabled="busy" @click="deliver('copy')">{{source != null ? '复制' : '复制完整数组'}}</button>
     <button data-source-action="save" class="btn btn-ghost" :disabled="busy" @click="deliver('save')">{{source != null ? '导出' : '导出完整数组'}}</button>
     <button data-source-action="share" class="btn btn-ghost" :disabled="busy" @click="deliver('share')">{{source != null ? '分享' : '分享书源 JSON'}}</button>
-    <button class="btn btn-ghost" :disabled="busy" @click="deliver('targets')">{{source != null ? '导入阅读' : '导入指定阅读客户端'}}</button>
+    <button data-reader-import class="btn btn-ghost" :disabled="busy || readerVisible" @click="deliver('targets')">{{source != null ? '导入阅读' : '导入指定阅读客户端'}}</button>
    </div>
-   <div v-if="targets" class="section" aria-label="选择阅读客户端">
-    <p>选择客户端，仅唤起勾选页，不代表已导入。</p><p v-if="!targets.length">没有可处理书源导入的阅读客户端。</p>
-    <button v-for="target in targets" :key="target.packageName" class="btn btn-ghost" :disabled="busy" @click="deliver('reader',target.packageName)">{{target.label}} · {{target.packageName}}</button>
-    <button class="btn btn-ghost" :disabled="busy" @click="targets=null">取消选择客户端</button>
-   </div>
+
   </template>
   <template v-if="report">
    <p class="hint">域名整组 / 全库删除将在数据库同一事务内核对完整快照；库有变化则整批拒绝。只删除明确确认的 ID，不扩大到新增书源。</p>
@@ -98,6 +98,7 @@ defineExpose({invalidate})
   </div>
   <div v-if="check" role="status">实时沙箱检测：{{check.state}}<p>阅读端未覆盖</p><button v-if="check.state==='running' || check.state==='cancelling'" class="btn" :disabled="busy || check.state==='cancelling'" @click="cancelCheck">取消检测</button><pre v-if="check.result" class="code-block">{{prettyJson(check.result)}}</pre><p v-if="check.error">{{check.error}}</p></div>
   <p v-if="error" class="code-block err" role="alert">{{error}}</p>
+  <ReaderImportDialog v-if="readerVisible" :state="readerState" @pick="readerImport.launch" @cancel="readerImport.cancel" @retry="readerImport.retry" />
  </div>
 </template>
 <style scoped>
