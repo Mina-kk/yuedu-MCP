@@ -4,10 +4,11 @@ import { useDetailNavigation } from '../lib/detail-navigation.js'
 import AppIcon from '../components/Icon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import SourceManagement from '../components/sourceManagement.vue'
-import { callToolParsed, formatTime, itemsOf, prettyJson, redactForDisplay } from '../lib/tools.js'
+import { callToolParsed, formatTime, prettyJson, redactForDisplay } from '../lib/tools.js'
 import { core } from '../lib/core.js'
 import { importText, sourceJsonSlices } from '../lib/files.js'
 import { deliverSources } from '../lib/source-delivery.js'
+import { groupSources, validateSourcePage, readSourceListResult } from '../lib/source-groups.js'
 import ReaderImportDialog from '../components/ReaderImportDialog.vue'
 import { useReaderImport } from '../lib/use-reader-import.js'
 
@@ -26,7 +27,20 @@ const offset = ref(0)
 const latestOnly = ref(false)
 const items = ref([])
 const total = ref(null)
-const hasMore = ref(false)
+const groups = computed(() => groupSources(items.value))
+const visibleGroups = computed(() => groups.value.slice(offset.value, offset.value + PAGE))
+const groupLimits = ref(new Map())
+const groupRows = (group) => group.items.slice(0, groupLimits.value.get(group.domain) || 1)
+const visibleRows = computed(() => visibleGroups.value.flatMap(groupRows))
+const hasMore = computed(() => offset.value + PAGE < groups.value.length)
+function toggleGroup(group) {
+  groupLimits.value.set(group.domain, groupLimits.value.get(group.domain) ? 0 : PAGE)
+}
+function moreGroup(group) {
+  groupLimits.value.set(group.domain, (groupLimits.value.get(group.domain) || PAGE) + PAGE)
+}
+let loadRevision = 0
+let disposed = false
 const loading = ref(false)
 let openRevision = 0
 const listError = ref('')
@@ -75,9 +89,10 @@ async function deliver(payload, action, packageName) {
   } catch (error) { deliveryError.value = error.message || '交付失败' }
   finally { deliveryBusy.value = false }
 }
-const allPageSelected = computed(() => items.value.length > 0 && items.value.every((row) => selectedIds.value.includes(row.projectId)))
+const allPageSelected = computed(() => visibleRows.value.length > 0 && visibleRows.value.every((row) => selectedIds.value.includes(row.projectId)))
 function selectPage(event) {
-  selectedIds.value = event.target.checked ? [...new Set([...selectedIds.value, ...items.value.map((row) => row.projectId)])] : selectedIds.value.filter((id) => !items.value.some((row) => row.projectId === id))
+  if (loading.value) return
+  selectedIds.value = event.target.checked ? [...new Set([...selectedIds.value, ...visibleRows.value.map((row) => row.projectId)])] : selectedIds.value.filter((id) => !visibleRows.value.some((row) => row.projectId === id))
 }
 const importError = ref('')
 
@@ -85,7 +100,7 @@ const dirty = computed(() => editing.value !== null && draft.value !== original.
 const coreReady = computed(() => s.coreStatus === 'loaded')
 
 watch(dirty, (v) => props.store.markPageDirty(v))
-onBeforeUnmount(() => { openRevision += 1; props.store.markPageDirty(false) })
+onBeforeUnmount(() => { disposed = true; loadRevision += 1; openRevision += 1; props.store.markPageDirty(false) })
 watch(editing, (value, previous) => { if (!value && previous) leaveDetail() })
 
 onMounted(() => {
@@ -93,41 +108,49 @@ onMounted(() => {
 })
 
 async function load(keepOffset = false) {
+  if (disposed) return
+  const revision = ++loadRevision
+  const filter = { query: query.value.trim() || undefined, latestOnly: latestOnly.value || undefined }
   loading.value = true
   listError.value = ''
   try {
-    const parsed = await callToolParsed(props.store, 'list_sources', {
-      limit: PAGE,
-      offset: keepOffset ? offset.value : 0,
-      query: query.value.trim() || undefined,
-      latestOnly: latestOnly.value || undefined
-    })
-    if (parsed.threw) throw new Error(parsed.threw)
-    if (parsed.isError) throw new Error(parsed.text || 'list_sources 返回错误')
-    if (!keepOffset) offset.value = 0
-    items.value = itemsOf(parsed)
-    total.value = Number.isFinite(Number(parsed.data && parsed.data.total)) ? Number(parsed.data.total) : null
-    hasMore.value = Boolean(parsed.data && parsed.data.hasMore)
+    const rows = []
+    const seen = new Set()
+    let expectedTotal = null
+    let readOffset = 0
+    while (true) {
+      const parsed = await callToolParsed(props.store, 'list_sources', { limit: PAGE, offset: readOffset, ...filter })
+      if (revision !== loadRevision || disposed) return
+      if (parsed.threw) throw new Error(parsed.threw)
+      if (parsed.isError) throw new Error(parsed.text || 'list_sources 返回错误')
+      const data = await readSourceListResult(parsed, (args) => callToolParsed(props.store, 'read_result', args), () => revision === loadRevision && !disposed)
+      if (revision !== loadRevision || disposed) return
+      const page = validateSourcePage(data, { total: expectedTotal, offset: readOffset, seen, limit: PAGE })
+      for (const row of page.items) { seen.add(row.projectId); rows.push(row) }
+      expectedTotal = page.total
+      readOffset = page.nextOffset
+      if (!page.hasMore) break
+    }
+    if (rows.length !== expectedTotal) throw new Error('书源列表总数与完整读取数量不一致')
+    items.value = rows
+    total.value = expectedTotal
+    offset.value = keepOffset ? Math.min(offset.value, Math.max(0, Math.ceil(groups.value.length / PAGE) - 1) * PAGE) : 0
   } catch (error) {
+    if (revision !== loadRevision || disposed) return
     items.value = []
     total.value = null
-    hasMore.value = false
     listError.value = (error && error.message) || '书源列表读取失败'
   } finally {
-    loading.value = false
+    if (revision === loadRevision && !disposed) loading.value = false
   }
 }
 
 function nextPage() {
-  if (!hasMore.value) return
-  offset.value += PAGE
-  load(true)
+  if (hasMore.value && !loading.value) offset.value += PAGE
 }
 
 function prevPage() {
-  if (offset.value <= 0) return
-  offset.value = Math.max(0, offset.value - PAGE)
-  load(true)
+  if (!loading.value) offset.value = Math.max(0, offset.value - PAGE)
 }
 
 async function open(row) {
@@ -365,6 +388,8 @@ async function deleteSources(ids) {
     let expectedTotal = null
     while (true) {
       const r = await callToolParsed(props.store, 'list_sources', { limit: PAGE, offset: readOffset, latestOnly: false })
+      r.data = await readSourceListResult(r, (args) => callToolParsed(props.store, 'read_result', args), () => !disposed)
+      if (disposed) return
       if (r.threw || r.isError || !Array.isArray(r.data?.items) || typeof r.data.hasMore !== 'boolean') {
         throw new Error(r.threw || r.text || '列表回读格式错误')
       }
@@ -461,7 +486,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
       <div class="section-head">
         <h3 class="section-title">书源</h3>
         <span class="section-sub">
-          {{ total === null ? items.length : `${items.length} / ${total}` }} 条
+          {{ groups.length }} 个站点 · {{ total ?? 0 }} 条记录
         </span>
       </div>
       <div class="source-search">
@@ -497,10 +522,10 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         </div>
       </div>
       <div v-if="selecting" class="actions source-selection">
-        <label><input type="checkbox" aria-label="全选当前页" :checked="allPageSelected" :indeterminate="!allPageSelected && items.some((row) => selectedIds.includes(row.projectId))" @change="selectPage" />全选当前页（仅已加载条目）</label>
+        <label><input type="checkbox" aria-label="全选当前页" :disabled="loading" :checked="allPageSelected" :indeterminate="!allPageSelected && visibleRows.some((row) => selectedIds.includes(row.projectId))" @change="selectPage" />全选当前页（仅已显示记录）</label>
         <span>已选 {{ selectedIds.length }} 条</span>
         <button class="btn btn-ghost btn-sm" type="button" @click="cancelSelection">取消选择</button>
-        <p class="hint selection-scope">跨页保留选择；全选只增加当前页。取消选择会清空全部已选。</p>
+        <p class="hint selection-scope">跨页保留选择；全选只增加当前页已显示记录，不含折叠历史。取消选择会清空全部已选。</p>
         <button data-export-selected class="btn btn-ghost btn-sm" type="button" :disabled="!selectedIds.length || deliveryBusy" @click="deliver({ projectIds: [...selectedIds] }, 'save')">导出选中</button>
         <button data-share-selected class="btn btn-ghost btn-sm" type="button" :disabled="!selectedIds.length || deliveryBusy" @click="deliver({ projectIds: [...selectedIds] }, 'share')">分享选中</button>
         <button class="btn btn-ghost danger" type="button" :disabled="!selectedIds.length || loading || loadingSource || saveBusy" @click="askDeleteIds(selectedIds)">删除选中</button>
@@ -510,7 +535,7 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
       <p v-if="importError" class="code-block err">{{ importError }}</p>
       <p v-if="deleteBusy" role="status">正在删除并回读校验，请勿重复操作…</p>
       <p v-if="deleteError" class="code-block err" role="alert">{{ deleteError }}</p>
-      <p v-if="listError" class="code-block err">{{ listError }}</p>
+      <p v-if="listError" data-list-error class="code-block err" role="alert">{{ listError }}</p>
       <EmptyState v-if="loading" title="正在读取书源" text="来自宿主项目库" :busy="true" />
       <EmptyState
         v-else-if="!items.length && !listError"
@@ -519,7 +544,14 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
         icon="book"
       />
       <div v-else class="source-list">
-        <article v-for="row in items" :key="row.projectId" class="source-entry" :class="{ selecting }">
+        <section v-for="group in visibleGroups" :key="group.domain" class="source-group" :data-source-domain="group.domain">
+        <header class="source-group-header">
+          <strong class="source-group-domain">{{ group.domain }}</strong>
+          <span class="muted small">{{ group.total }} 条记录 · 最近保存 {{ formatTime(group.latest.updatedAt) }}</span>
+          <button v-if="group.total > 1" data-source-group-toggle class="btn btn-ghost btn-sm" type="button" :aria-expanded="Boolean(groupLimits.get(group.domain))" @click="toggleGroup(group)">{{ groupLimits.get(group.domain) ? '收起历史记录' : `展开历史记录（${group.total}条）` }}</button>
+          <span v-if="groupLimits.get(group.domain)" class="muted small">已显示 {{ groupRows(group).length }} / {{ group.total }} 条</span>
+        </header>
+        <article v-for="row in groupRows(group)" :key="row.projectId" class="source-entry" :data-project-id="row.projectId" :class="{ selecting }">
         <label v-if="selecting" class="source-pick"><input v-model="selectedIds" type="checkbox" :value="row.projectId" :aria-label="`选择书源 ${row.bookSourceName || '未命名'}（${row.projectId}）`" /></label>
         <button
           type="button"
@@ -531,8 +563,10 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           <span class="source-url mono">{{ row.bookSourceUrl }}</span>
           <span class="source-meta">
             <span v-if="row.stage" class="source-stage">{{ stageLabel(row.stage) }}</span>
-            <span v-if="Number(row.versionCount) > 1">{{ row.versionCount }} 版本</span>
-            <span class="muted small">{{ formatTime(row.updatedAt) }}</span>
+            <span v-if="row.projectId === group.latest.projectId">最新保存</span>
+            <span v-else>历史记录</span>
+            <span class="muted small">保存时间 {{ formatTime(row.updatedAt) }}</span>
+            <span class="source-project-id mono">项目 ID：{{ row.projectId }}</span>
           </span>
         </button>
         <div class="source-row-actions">
@@ -546,12 +580,14 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
           <button class="btn btn-ghost danger" type="button" :disabled="loading || loadingSource || saveBusy || deliveryBusy" @click="askDelete(row)">删除书源</button>
         </div>
         </article>
+        <button v-if="groupLimits.get(group.domain) && groupRows(group).length < group.total" data-group-more class="btn btn-ghost btn-sm" type="button" @click="moreGroup(group)">再显示 {{ Math.min(PAGE, group.total - groupRows(group).length) }} 条历史记录</button>
+        </section>
       </div>
       <div class="pager">
         <button class="btn btn-ghost btn-sm" type="button" :disabled="offset <= 0 || loading" @click="prevPage">
           <AppIcon name="chevron-left" :size="15" /><span>上一页</span>
         </button>
-        <span class="muted small">偏移 {{ offset }}</span>
+        <span class="muted small">站点偏移 {{ offset }} · 每页 20 个站点</span>
         <button class="btn btn-ghost btn-sm" type="button" :disabled="!hasMore || loading" @click="nextPage">
           <span>下一页</span><AppIcon name="chevron-right" :size="15" />
         </button>
@@ -649,6 +685,12 @@ const diffText = computed(() => (readbackDiff.value ? prettyJson(readbackDiff.va
 </template>
 
 <style scoped>
+/* Group presentation only; reuse existing action paint/hit-area styles. */
+.source-group { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.source-group-header { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 6px 0; }
+.source-group-domain { flex-basis: 100%; overflow-wrap: anywhere; }
+.source-group-header > span { overflow-wrap: anywhere; min-width: 0; }
+.source-project-id { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
 /* Page-local overrides intentionally outrank shell's old two-column entry layout. */
 .sources-page .source-entry {
   display: grid;

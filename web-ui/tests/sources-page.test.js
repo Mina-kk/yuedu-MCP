@@ -48,8 +48,11 @@ async function mountPage(handlers) {
 }
 
 const result = (data) => ({ content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }] })
+const summaries = (rows) => async ({ offset = 0, limit = 1000 }) => result({ total: rows.length, hasMore: offset + limit < rows.length, items: rows.slice(offset, offset + limit) })
+const siteRows = (count) => Array.from({ length: count }, (_, i) => ({ ...LIST.items[0], projectId: `site-${i}`, bookSourceUrl: `https://site-${i}.example` }))
 const button = (wrapper, text) => wrapper.findAll('button').find((b) => b.isVisible() && b.text() === text)
 async function selectAll(wrapper) {
+  for (const toggle of wrapper.findAll('[data-source-group-toggle][aria-expanded="false"]')) await toggle.trigger('click')
   if (!wrapper.find('input[aria-label="全选当前页"]').exists()) await button(wrapper, '管理').trigger('click')
   await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
 }
@@ -130,13 +133,15 @@ describe('SourcesPage', () => {
   })
   it('超过500条选择明确拒绝且不截断，仍可一键全库导出', async () => {
     const { wrapper, bridge } = await mountPage({
-      list_sources: async ({ offset }) => result({ total: 501, hasMore: offset === 0, items: Array.from({ length: offset === 0 ? 500 : 1 }, (_, i) => ({ ...LIST.items[0], projectId: offset === 0 ? `p${i}` : 'p500' })) }),
+      list_sources: summaries(siteRows(501)),
       'sources.deliver': async () => ({ saved: true })
     })
     await wrapper.find('[data-selection-toggle]').trigger('click')
     await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
-    await wrapper.find('.pager button:last-child').trigger('click'); await flushPromises()
-    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    while (!wrapper.find('.pager button:last-child').element.disabled) {
+      await wrapper.find('.pager button:last-child').trigger('click'); await flushPromises()
+      await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
+    }
     await wrapper.find('[data-export-selected]').trigger('click'); await flushPromises()
     expect(wrapper.find('[role="alert"]').text()).toContain('500')
     expect(wrapper.text()).toContain('已选 501 条')
@@ -167,7 +172,7 @@ describe('SourcesPage', () => {
   })
   it('全库直接交付不受搜索、分页、版本与高级过滤影响，默认全部版本', async () => {
     const { wrapper, bridge } = await mountPage({
-      list_sources: async () => result({ ...LIST, total: 41, hasMore: true }),
+      list_sources: summaries(siteRows(41)),
       'sources.deliver': async ({ action }) => ({ saved: action === 'save', launched: action === 'share' })
     })
     expect(bridge.calls.find(([method]) => method === 'list_sources')[1].latestOnly).not.toBe(true)
@@ -185,10 +190,11 @@ describe('SourcesPage', () => {
   it('跨页选择只交付精确ID，取消选择清空；取消或失败不显示成功', async () => {
     let receipt = { saved: false, cancelled: true }
     const { wrapper, bridge, store } = await mountPage({
-      list_sources: async ({ offset }) => result({ total: 21, hasMore: offset === 0, items: [{ ...LIST.items[0], projectId: offset === 0 ? 'p1' : 'p2' }] }),
+      list_sources: summaries([LIST.items[0], ...siteRows(19), { ...LIST.items[0], projectId: 'p2', bookSourceUrl: 'https://second.example' }]),
       'sources.deliver': async () => receipt
     })
-    await selectAll(wrapper)
+    await button(wrapper, '管理').trigger('click')
+    await wrapper.find('.source-entry[data-project-id="p1"] input').setValue(true)
     await button(wrapper, '下一页').trigger('click'); await flushPromises()
     await selectAll(wrapper)
     expect(wrapper.text()).toContain('跨页保留选择')
@@ -210,7 +216,7 @@ describe('SourcesPage', () => {
   })
   it('首屏只保留常用操作，单条复制导出分享直接按精确ID交付，不读JSON或分析', async () => {
     const { wrapper, bridge } = await mountPage({
-      list_sources: async () => result({ ...LIST, total: 41, hasMore: true, items: [{ ...LIST.items[0], stage: 'VALIDATED', versionCount: 3 }] }),
+      list_sources: summaries([{ ...LIST.items[0], stage: 'VALIDATED', versionCount: 3 }, ...siteRows(40)]),
       'sources.deliver': async ({ action }) => ({ copied: action === 'copy', saved: action === 'save', launched: action === 'share' })
     })
     expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0)
@@ -367,7 +373,7 @@ describe('SourcesPage', () => {
   })
   it.each(['partial', 'error', 'readback', 'malformed', 'still-present'])('删除 %s 不假成功，保留未确认选择并显示持久错误', async (mode) => {
     let attempted = false
-    const rows = [LIST.items[0], { ...LIST.items[0], projectId: 'p2' }]
+    const rows = [LIST.items[0], { ...LIST.items[0], projectId: 'p2', bookSourceUrl: 'https://b.example' }]
     const { wrapper, store } = await mountPage({
       list_sources: async () => {
         if (attempted && mode === 'readback') throw new Error('回读断线')
@@ -389,7 +395,7 @@ describe('SourcesPage', () => {
   it('删除末页后回退有效页，全库回读不受搜索和最新版本折叠影响', async () => {
     let deleted = false
     const { wrapper, store, bridge } = await mountPage({
-      list_sources: async ({ offset }) => result({ total: deleted ? 20 : 21, hasMore: offset === 0 && !deleted, items: offset === 20 ? (deleted ? [] : LIST.items) : Array.from({ length: 20 }, (_, i) => ({ ...LIST.items[0], projectId: `other-${i}` })) }),
+      list_sources: async (args) => summaries([...siteRows(20), ...(deleted ? [] : LIST.items)])(args),
       delete_projects: async () => { deleted = true; return result('已删除 1 个项目') }
     })
     await button(wrapper, '下一页').trigger('click'); await flushPromises()
@@ -400,21 +406,21 @@ describe('SourcesPage', () => {
     expect(calls[0]).toEqual(['list_sources', { limit: 20, offset: 0, latestOnly: false }])
   })
   it('全选仅当前页、取消和计数，批量确认后精确删除选中项目', async () => {
-    const rows = [LIST.items[0], { ...LIST.items[0], projectId: 'p2' }]
+    const rows = [LIST.items[0], { ...LIST.items[0], projectId: 'p2', bookSourceUrl: 'https://b.example' }]
     let deleted = false
     const { wrapper, store, bridge } = await mountPage({
-      list_sources: async () => result({ total: deleted ? 1 : 3, hasMore: !deleted, items: deleted ? [{ ...rows[0], projectId: 'unloaded' }] : rows }),
+      list_sources: async (args) => summaries(deleted ? [{ ...rows[0], projectId: 'unloaded', updatedAt: 0 }] : [...rows, { ...rows[0], projectId: 'unloaded', updatedAt: 0 }])(args),
       delete_projects: async () => { deleted = true; return result('已删除 2 个项目') }
     })
     await button(wrapper, '管理').trigger('click')
     expect(wrapper.find('input[aria-label="全选当前页"]').exists()).toBe(true)
-    await selectAll(wrapper)
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
     expect(wrapper.text()).toContain('已选 2 条')
     await button(wrapper, '取消选择').trigger('click')
     expect(wrapper.find('input[aria-label="全选当前页"]').exists()).toBe(false)
     await button(wrapper, '管理').trigger('click')
     expect(wrapper.text()).toContain('已选 0 条')
-    await selectAll(wrapper)
+    await wrapper.find('input[aria-label="全选当前页"]').setValue(true)
     await button(wrapper, '删除选中').trigger('click')
     expect(store.state.dialog.message).toContain('2 条')
     await acceptDialog(store)

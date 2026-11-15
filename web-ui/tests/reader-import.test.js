@@ -17,6 +17,8 @@ function setup(deliver, component = SourcesPage, extra = {}) {
 }
 async function triggerList(wrapper, index = 1) {
  await flushPromises()
+ // URL-less fixtures share the unknown-domain group; reveal the exact row.
+ for (const toggle of wrapper.findAll('[data-source-group-toggle][aria-expanded="false"]')) await toggle.trigger('click')
  await wrapper.findAll('[data-source-more]')[index].trigger('click')
  await button(wrapper, '导入阅读').trigger('click')
 }
