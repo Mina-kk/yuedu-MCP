@@ -71,7 +71,10 @@ export function createAndroidBridge({ win, timeoutMs } = {}) {
     }
     if (!data || typeof data !== 'object') return
     if (typeof data.event === 'string') {
-      const payload = data.payload && typeof data.payload === 'object' ? data.payload : {}
+      // studio:route 的 payload 是纯字符串路由名；其余事件是对象。
+      // 字符串 payload 原样透传给监听者，不能被对象分支吞成 {}。
+      const payload = typeof data.payload === 'string' ? data.payload
+        : data.payload && typeof data.payload === 'object' ? data.payload : {}
       listeners.forEach((fn) => {
         try {
           fn(data.event, payload)
@@ -100,7 +103,10 @@ export function createAndroidBridge({ win, timeoutMs } = {}) {
   const HOST_EVENTS = ['studio:back', 'studio:insets', 'studio:service', 'studio:verification-browser', 'studio:route']
   const customHandler = (event) => {
     if (!event || typeof event.type !== 'string') return
-    const payload = event.detail && typeof event.detail === 'object' ? event.detail : {}
+    // studio:route 的 detail 是纯字符串（MainActivity quoteJs）；其余事件是对象。
+    // 字符串 detail 原样透传，不能被对象分支吞成空 payload。
+    const payload = typeof event.detail === 'string' ? event.detail
+      : event.detail && typeof event.detail === 'object' ? event.detail : {}
     onMessage({ data: { event: event.type, payload } })
   }
   if (w && typeof w.addEventListener === 'function') {

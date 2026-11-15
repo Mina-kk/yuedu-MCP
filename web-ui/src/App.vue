@@ -152,8 +152,17 @@ function onKeydown(event) {
 }
 
 function routePage(payload) {
-  const target = payload && (payload.page || payload.route)
-  if (typeof target === 'string' && PAGES.includes(target)) store.setPage(target)
+  // 宿主 MainActivity 派发的 detail 是纯字符串路由名（quoteJs(route)），
+  // 桥的 CustomEvent 分支只保留对象 detail——两种形态都必须识别，
+  // 否则悬浮球/通知的 "verification" 路由被静默丢弃，App 停在默认 MCP 页。
+  const raw = typeof payload === 'string'
+    ? payload
+    : payload && typeof payload === 'object' && (payload.page || payload.route)
+  if (typeof raw !== 'string') return
+  // 原生侧路由名是 "verification"（VerificationOverlayManager/通知），
+  // 前端页面键是 "verify"；归一后再校验，不改宿主契约。
+  const target = raw === 'verification' ? 'verify' : raw
+  if (PAGES.includes(target)) store.setPage(target)
 }
 
 function onHostEvent(event, payload) {

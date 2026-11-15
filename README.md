@@ -5,15 +5,15 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`2.0.11`（versionCode 212，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.12`（versionCode 213，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
-- 本分支下载：[2.0.11 正式签名 APK](https://github.com/Mina-kk/yuedu-MCP/releases/download/v2.0.11-rust-vue/yuedu-MCP-2.0.11-release.apk) · [版本说明与源码](https://github.com/Mina-kk/yuedu-MCP/releases/tag/v2.0.11-rust-vue)（独立 Pre-release，不替换 main 的 Latest）
+- 本分支下载：[2.0.12 正式签名 APK](https://github.com/Mina-kk/yuedu-MCP/releases/download/v2.0.12-rust-vue/yuedu-MCP-2.0.12-release.apk) · [版本说明与源码](https://github.com/Mina-kk/yuedu-MCP/releases/tag/v2.0.12-rust-vue)（独立 Pre-release，不替换 main 的 Latest）
 - 历史版本：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)
 
-## 2.0.11 恢复站点域名分组
+## 2.0.12 验证路由与验证码会话修复
 
-本节描述当前源码（versionCode 212），不表示正式 APK 已发布或设备验收已完成。书源恢复原版按站点域名分组、组内按保存时间倒序的展示：每组默认展示最新保存记录，可展开历史记录；域名、记录数量、保存时间和项目 ID 清晰显示，不再把同一总版本数重复当作每条版本身份。摘要跨页读取完成后再分组，同站点不会因原始分页散落到不同组；分组仅改变展示，不合并、删除或重写书源。保留小气泡、卡内复制/导出/分享、精确 ID 阅读导入及全库交付。以下 Vue 操作链路保持：
+本节描述当前源码（versionCode 213），不表示正式 APK 已发布或设备验收已完成。修复两处验证问题：①悬浮球弹出验证提醒时点击直接进入验证中心（宿主路由名 verification 归一为前端 verify 页，桥同时透传字符串 detail，不再落到默认 MCP 页）；②图片验证码每次拉取新图后立即更新会话记录——旧的“复用 WAITING 会话保留过期验证码图”导致用户按旧图输入永远失败的问题已根除，updatedAt 同步推进使列表展示最新一张。其余分组、书源操作、阅读导入、鉴权与工具链路不变。以下 Vue 操作链路保持：
 
 - MCP 接入：自定义令牌、请求头名称/值/整行复制，以及权限与后台运行设置入口。
 - 书源：原文导出、导入阅读入口、版本管理与经确认的批量删除；并发新增不纳入旧快照删除。

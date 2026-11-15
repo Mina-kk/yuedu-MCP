@@ -1,10 +1,10 @@
 # 构建与开发
 
-## 2.0.11 / versionCode 212 交付契约
+## 2.0.12 / versionCode 213 交付契约
 
-Android `app/build.gradle.kts`、`web-ui/package.json`、lock 根版本及 `tests/test_web_build_contract.py` 同步为应用版本 2.0.11；Rust 核心有独立版本，不作为 APK 版本依据。恢复范围见 README；本版接受**验证由用户手动完成、不提供自动完成**的例外，不把安全降级写成自动功能恢复。
+Android `app/build.gradle.kts`、`web-ui/package.json`、lock 根版本及 `tests/test_web_build_contract.py` 同步为应用版本 2.0.12；Rust 核心有独立版本，不作为 APK 版本依据。恢复范围见 README；本版接受**验证由用户手动完成、不提供自动完成**的例外，不把安全降级写成自动功能恢复。
 
-本次增量仅检查书源站点分组：跨原始摘要分页聚合、组内时间排序、同名不同域分离、展开历史精确ID操作及当前可见记录选择。采用完整生产App/CSS窄屏样本核对组头/展开/详情返回，不重复已通过的主题、日志、阅读客户端、网站解析或SAF矩阵。正式签名、2.0.10覆盖保全与最终APK分组入口为必要交付检查；宿主代码和MCP工具契约不变。
+本次增量仅检查验证修复：悬浮球/通知路由到验证中心（字符串detail透传与verification→verify归一）、image_code复用会话刷新最新验证码图并推进updatedAt。定向Kotlin verification.*153项与Vue受影响7套209项全绿；EmbeddedLegadoRuntimeTest toc连接失败在干净HEAD同样复现、Orphan集成重跑两次全绿，均与本改动无关，不重跑无关矩阵。正式签名、2.0.11覆盖保全与最终APK验证入口为必要交付检查。
 
 轻量准备检查（不运行 Gradle、不启动模拟器、不生成 APK）：
 
@@ -19,7 +19,7 @@ python legacy-ui/check_isolation.py
 
 正式构建前须审查并冻结源码：工作区无未提交的交付源码，记录完整 40 位 HEAD，并显式传入 `-PbuildRevision`（systemd 隔离环境不得依赖父 shell 自动继承）。只用既有官方签名身份，不生成替代密钥；通过私有凭据加载器注入签名变量，禁止 shell trace、打印密码或提交凭据。私有报告、抓包、设备日志和 QA 产物不加入源码提交，尤其不要对含未审查 `reports/` 的工作区执行 `git add -A`。
 
-本轮准备检查不证明设备通过。正式构建后仍须运行 Release mapping 契约、校验 APK 版本/完整 buildRevision/签名/资源指纹，并在最终 APK 上完成本次变更入口的混淆桥回执、旧官方包覆盖升级数据保留、书源站点分组、历史展开与精确ID入口。未改动的权限、抓包和悬浮行为保留旧版本证据归属，不重复整套验收。没有本次关键入口的真实证据，不得标注本次设备验收通过或发布。
+本轮准备检查不证明设备通过。正式构建后仍须运行 Release mapping 契约、校验 APK 版本/完整 buildRevision/签名/资源指纹，并在最终 APK 上完成本次变更入口的混淆桥回执、旧官方包覆盖升级数据保留、悬浮球路由进验证中心、验证码图刷新与完成入口。未改动的权限、抓包和悬浮行为保留旧版本证据归属，不重复整套验收。没有本次关键入口的真实证据，不得标注本次设备验收通过或发布。
 
 ## 环境要求
 

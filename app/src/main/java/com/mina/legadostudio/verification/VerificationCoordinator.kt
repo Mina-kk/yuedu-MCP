@@ -66,16 +66,24 @@ class VerificationCoordinator internal constructor(
         val domain = DomainKey.fromUrl(url)
         // 复用 WAITING 会话时同步更新 url/purpose：站点常换验证地址，沿用旧 URL 会让用户白验
         dao.waitingVerification(jobId, domain)?.let { old ->
-            val refreshed = if (old.url == url && old.purpose == purpose && old.kind == kind) old
-                else old.copy(url = url, purpose = purpose, kind = kind, imageData = imageData, updatedAt = now)
-            if (refreshed != old) { browserGenerations.remove(old.id); dao.saveVerificationSession(refreshed) }
+            // 复用 WAITING 会话必须总是刷新 url/purpose/kind/imageData/updatedAt：
+            // 站点每次 getVerificationCode 都拉一张新图，旧挑战随之作废；
+            // 若保留旧图，用户对着过期图输入，站点永远判错（用户实测十多次全失败）。
+            // 无条件落库推进 updatedAt：验证列表按 updatedAt 排序，用户必须看到刷新后的那张图。
+            val refreshed = old.copy(url = url, purpose = purpose, kind = kind, imageData = imageData, updatedAt = now)
+            browserGenerations.remove(old.id)
+            dao.saveVerificationSession(refreshed)
             return@withLock refreshed
         }
         val value = VerificationSessionEntity(java.util.UUID.randomUUID().toString(), jobId, domain, url, purpose, "WAITING", "", now, now, kind, "", imageData)
         dao.saveVerificationSession(value)
         notifyVerification(value)
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            VerificationOverlayManager.showVerificationAlert(context, domain, value.id, purpose)
+        runCatching {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                VerificationOverlayManager.showVerificationAlert(context, domain, value.id, purpose)
+            }
+        }.onFailure {
+            com.mina.legadostudio.mcp.StudioLog.add("verification overlay alert err", "W", "overlay", it.javaClass.simpleName)
         }
         value
     }
@@ -174,18 +182,22 @@ class VerificationCoordinator internal constructor(
     }
 
     private fun notifyVerification(session: VerificationSessionEntity) {
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(NotificationChannel("studio_mcp", "MCP 服务", NotificationManager.IMPORTANCE_LOW))
-        val intent = Intent(context, MainActivity::class.java).putExtra("route", "verification")
-        val pending = PendingIntent.getActivity(context, session.id.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification = NotificationCompat.Builder(context, "studio_mcp")
-            .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setContentTitle("阅读书源MCP等待网站验证")
-            .setContentText("${session.domain} · 点击在 App 内完成")
-            .setContentIntent(pending)
-            .setAutoCancel(true)
-            .build()
-        manager.notify(notificationId(session.id), notification)
+        runCatching {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(NotificationChannel("studio_mcp", "MCP 服务", NotificationManager.IMPORTANCE_LOW))
+            val intent = Intent(context, MainActivity::class.java).putExtra("route", "verification")
+            val pending = PendingIntent.getActivity(context, session.id.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val notification = NotificationCompat.Builder(context, "studio_mcp")
+                .setSmallIcon(android.R.drawable.stat_sys_warning)
+                .setContentTitle("阅读书源MCP等待网站验证")
+                .setContentText("${session.domain} · 点击在 App 内完成")
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .build()
+            manager.notify(notificationId(session.id), notification)
+        }.onFailure {
+            com.mina.legadostudio.mcp.StudioLog.add("verification notify err", "W", "verification", it.javaClass.simpleName)
+        }
     }
 
     suspend fun updateCurrentUrl(id: String, url: String, stillCurrent: () -> Boolean = { true }): Unit = stateLock.withLock {
