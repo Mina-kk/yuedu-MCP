@@ -1,10 +1,10 @@
 # 构建与开发
 
-## 2.0.12 / versionCode 213 交付契约
+## 2.0.13 / versionCode 214 交付契约
 
-Android `app/build.gradle.kts`、`web-ui/package.json`、lock 根版本及 `tests/test_web_build_contract.py` 同步为应用版本 2.0.12；Rust 核心有独立版本，不作为 APK 版本依据。恢复范围见 README；本版接受**验证由用户手动完成、不提供自动完成**的例外，不把安全降级写成自动功能恢复。
+Android `app/build.gradle.kts`、`web-ui/package.json`、lock 根版本及 `tests/test_web_build_contract.py` 同步为应用版本 2.0.13；Rust 核心有独立版本，不作为 APK 版本依据。恢复范围见 README；本版接受**验证由用户手动完成、不提供自动完成**的例外，不把安全降级写成自动功能恢复。
 
-本次增量仅检查验证修复：悬浮球/通知路由到验证中心（字符串detail透传与verification→verify归一）、image_code复用会话刷新最新验证码图并推进updatedAt。定向Kotlin verification.*153项与Vue受影响7套209项全绿；EmbeddedLegadoRuntimeTest toc连接失败在干净HEAD同样复现、Orphan集成重跑两次全绿，均与本改动无关，不重跑无关矩阵。正式签名、2.0.11覆盖保全与最终APK验证入口为必要交付检查。
+本次增量仅检查跨类型会话隔离：webview 与 image_code 各保留独立 WAITING 行（复用限定同 kind），用户完成浏览器会话不再误标图片验证码会话。定向 Kotlin verification.* 156项全绿，含新增跨类型复用红绿3项；不重跑无关矩阵。正式签名、2.0.12覆盖保全与最终APK验证入口为必要交付检查。
 
 轻量准备检查（不运行 Gradle、不启动模拟器、不生成 APK）：
 

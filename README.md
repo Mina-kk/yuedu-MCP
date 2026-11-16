@@ -5,15 +5,15 @@
 内置 **Legado 运行时 + MCP Server**。App 内不调用任何模型、不保存任何模型 Key。书源的制作、修复和调试全部由外部 MCP 客户端完成。
 
 - 包名：`com.mina.legadostudio`
-- 当前版本：`2.0.12`（versionCode 213，以 `app/build.gradle.kts` 为准）
+- 当前版本：`2.0.13`（versionCode 214，以 `app/build.gradle.kts` 为准）
 - 许可证：GPL-3.0
 - 上游致谢：DandanLLab/legadoSkill、LegadoTeam/legado、morluto/rea
-- 本分支下载：[2.0.12 正式签名 APK](https://github.com/Mina-kk/yuedu-MCP/releases/download/v2.0.12-rust-vue/yuedu-MCP-2.0.12-release.apk) · [版本说明与源码](https://github.com/Mina-kk/yuedu-MCP/releases/tag/v2.0.12-rust-vue)（独立 Pre-release，不替换 main 的 Latest）
+- 本分支下载：[2.0.13 正式签名 APK](https://github.com/Mina-kk/yuedu-MCP/releases/download/v2.0.13-rust-vue/yuedu-MCP-2.0.13-release.apk) · [版本说明与源码](https://github.com/Mina-kk/yuedu-MCP/releases/tag/v2.0.13-rust-vue)（独立 Pre-release，不替换 main 的 Latest）
 - 历史版本：[Releases](https://github.com/Mina-kk/yuedu-MCP/releases)
 
-## 2.0.12 验证路由与验证码会话修复
+## 2.0.13 跨类型验证会话隔离修复
 
-本节描述当前源码（versionCode 213），不表示正式 APK 已发布或设备验收已完成。修复两处验证问题：①悬浮球弹出验证提醒时点击直接进入验证中心（宿主路由名 verification 归一为前端 verify 页，桥同时透传字符串 detail，不再落到默认 MCP 页）；②图片验证码每次拉取新图后立即更新会话记录——旧的“复用 WAITING 会话保留过期验证码图”导致用户按旧图输入永远失败的问题已根除，updatedAt 同步推进使列表展示最新一张。其余分组、书源操作、阅读导入、鉴权与工具链路不变。以下 Vue 操作链路保持：
+本节描述当前源码（versionCode 214），不表示正式 APK 已发布或设备验收已完成。修复验证中心跨类型会话互相覆盖的问题：webview 与 image_code 会话此前共用同域同任务的 WAITING 行，AI 交替调用 startBrowserAwait 与 getVerificationCode 时同一会话在两种类型间翻转——用户按浏览器流程完成（无答案文本）时图片验证码会话也被标完成，MCP 侧永远等不到答案，表现为「用户取消或等待超时」。现在复用限定同类型，两种会话各保留独立行，互不干扰。其余悬浮球路由、验证码图刷新、分组、书源操作、阅读导入、鉴权与工具链路不变。以下 Vue 操作链路保持：
 
 - MCP 接入：自定义令牌、请求头名称/值/整行复制，以及权限与后台运行设置入口。
 - 书源：原文导出、导入阅读入口、版本管理与经确认的批量删除；并发新增不纳入旧快照删除。

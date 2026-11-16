@@ -65,7 +65,10 @@ class VerificationCoordinator internal constructor(
         val now = System.currentTimeMillis()
         val domain = DomainKey.fromUrl(url)
         // 复用 WAITING 会话时同步更新 url/purpose：站点常换验证地址，沿用旧 URL 会让用户白验
-        dao.waitingVerification(jobId, domain)?.let { old ->
+        // 复用必须限定同 kind：webview 与 image_code 各保留独立 WAITING 行。跨 kind 复用会把
+        // 同一行在两种类型间翻转——用户按 webview 流程完成（无答案文本）时 image_code 行也
+        // 被标 COMPLETED，awaitAnswer 永远等不到非空 answer，AI 侧表现为「用户取消或等待超时」。
+        dao.waitingVerification(jobId, domain)?.takeIf { it.kind == kind }?.let { old ->
             // 复用 WAITING 会话必须总是刷新 url/purpose/kind/imageData/updatedAt：
             // 站点每次 getVerificationCode 都拉一张新图，旧挑战随之作废；
             // 若保留旧图，用户对着过期图输入，站点永远判错（用户实测十多次全失败）。
